@@ -21,7 +21,7 @@ Tests that touch OAuth mock `os.homedir()` — never let a test write to the rea
 
 ## Architecture
 
-lazygate (formerly context-broker) is an MCP server that itself acts as a proxy. It exposes **6 meta-tools** to Claude Code instead of loading all real MCP server schemas upfront. Real servers and skills are loaded on demand.
+lazygate (formerly context-broker) is an MCP server that itself acts as a proxy. It exposes **8 meta-tools** to Claude Code instead of loading all real MCP server schemas upfront. Real servers and skills are loaded on demand.
 
 ### Source files (`src/`)
 

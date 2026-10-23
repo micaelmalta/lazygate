@@ -30,6 +30,13 @@ export interface BrokerAccess {
   prepare(name: string, cfg: ServerConfig): RuntimeCredentials | undefined;
   /** What the caller still has to provide before the server can be activated (shown by discover_tools). */
   missing?(name: string, cfg: ServerConfig): string[];
+  /**
+   * Start connecting the caller's account (gateway). Returns a message that may include an
+   * authorization URL. Absent outside gateway mode.
+   */
+  connect?(name: string, cfg: ServerConfig): Promise<string>;
+  /** Drop the caller's stored credentials for the server (gateway). */
+  disconnect?(name: string, cfg: ServerConfig): Promise<string>;
 }
 
 export interface BrokerDeps {
@@ -230,6 +237,49 @@ export function createBroker({ router, manager, skillRouter, access }: BrokerDep
         if (!skillRouter.getConfig(a.skill_name)) skillRouter.reloadFromDisk();
         try {
           return text(`# Skill: ${a.skill_name}\n\n${skillRouter.load(a.skill_name)}`);
+        } catch (err) {
+          return fail((err as Error).message);
+        }
+      }
+
+      case "connect_server": {
+        const a = parseArgs(ServerNameSchema, rawArgs);
+        if (isResult(a)) return a;
+        if (!access?.connect) {
+          return fail(
+            "connect_server is only available in gateway mode. For local stdio, activate the server — a browser window opens when OAuth is needed."
+          );
+        }
+        router.reloadServersFromDisk();
+        const cfg = router.getConfig(a.server_name);
+        if (!cfg || !visible(a.server_name)) {
+          return fail(
+            `Unknown server: "${a.server_name}". Available: ${visibleNames().join(", ") || "(none)"}`
+          );
+        }
+        try {
+          return text(await access.connect(a.server_name, cfg));
+        } catch (err) {
+          return fail((err as Error).message);
+        }
+      }
+
+      case "disconnect_server": {
+        const a = parseArgs(ServerNameSchema, rawArgs);
+        if (isResult(a)) return a;
+        if (!access?.disconnect) {
+          return fail("disconnect_server is only available in gateway mode.");
+        }
+        router.reloadServersFromDisk();
+        const cfg = router.getConfig(a.server_name);
+        if (!cfg || !visible(a.server_name)) {
+          return fail(
+            `Unknown server: "${a.server_name}". Available: ${visibleNames().join(", ") || "(none)"}`
+          );
+        }
+        try {
+          manager.deactivate(a.server_name);
+          return text(await access.disconnect(a.server_name, cfg));
         } catch (err) {
           return fail((err as Error).message);
         }

@@ -68,9 +68,11 @@ async function serve(args: string[]): Promise<void> {
     idleMs: idleMin * 60_000,
     maxSessions: Number(flag(args, "--max-sessions") ?? 100),
     allowedHosts,
+    publicUrl: flag(args, "--public-url"),
   });
 
   console.error(`${LOG_PREFIX} HTTP gateway listening on ${gateway.url}`);
+  console.error(`${LOG_PREFIX} Web UI: ${gateway.publicUrl}/ui`);
   if (!LOOPBACK.has(host)) console.error(`${LOG_PREFIX} warning: listening on ${host} without TLS`);
 
   const stop = () => {

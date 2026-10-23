@@ -72,6 +72,31 @@ export const META_TOOLS: Tool[] = [
       required: ["skill_name"],
     },
   },
+  {
+    name: "connect_server",
+    description:
+      "Get a link to connect your account to a server that needs OAuth or an API key " +
+      "(gateway mode). Open the link, finish authorizing, then call activate_server.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        server_name: { type: "string", description: "Name of the server to connect" },
+      },
+      required: ["server_name"],
+    },
+  },
+  {
+    name: "disconnect_server",
+    description:
+      "Remove your stored credentials (API key and/or OAuth token) for a server (gateway mode).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        server_name: { type: "string", description: "Name of the server to disconnect" },
+      },
+      required: ["server_name"],
+    },
+  },
 ];
 
 export const META_TOOL_NAMES = META_TOOLS.map((t) => t.name);
