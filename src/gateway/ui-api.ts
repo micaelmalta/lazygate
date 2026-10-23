@@ -317,8 +317,13 @@ function patchServer(ctx: UiContext, name: string, patch: Record<string, unknown
 
 // ── Connections (a user's own credentials + OAuth) ─────────────────────────
 
+/** Same rule as the gateway's OAuth path: HTTP, OAuth not disabled, no static Authorization. */
 function isOauthServer(cfg: ServerConfig): boolean {
-  return Boolean(cfg.url) && cfg.oauth !== false;
+  if (!cfg.url || cfg.oauth === false) return false;
+  for (const group of [cfg.headers, cfg.auth?.headers]) {
+    if (group && Object.keys(group).some((k) => k.toLowerCase() === "authorization")) return false;
+  }
+  return true;
 }
 
 async function connections(

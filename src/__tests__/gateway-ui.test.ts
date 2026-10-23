@@ -74,6 +74,13 @@ beforeAll(async () => {
         jira: server("jira", { scope: "user", env: { TEST_TOKEN: "${cred:token}" } }),
         shared: server("shared", { scope: "server", env: { TEST_TOKEN: "${secret:shared/token}" } }),
         plain: server("plain", undefined),
+        githubish: {
+          description: "PAT via header, not OAuth",
+          keywords: ["github"],
+          type: "http",
+          url: "https://api.example.com/mcp",
+          headers: { Authorization: "Bearer ${GITHUB_TOKEN}" },
+        },
       },
     })
   );
@@ -209,6 +216,12 @@ describe("my credentials (vault)", () => {
     const r = await ui("GET", "/ui/api/connections", alice);
     expect(r.json.connections.map((c: any) => c.server)).toEqual(["jira"]);
     expect(r.json.connections[0].fields[0]).toMatchObject({ name: "token", stored: false, header: "X-Lazygate-Cred-jira-token" });
+  });
+
+  it("does not offer OAuth Connect for HTTP servers that already set Authorization", async () => {
+    const r = await ui("GET", "/ui/api/connections", admin);
+    expect(r.json.connections.find((c: any) => c.server === "githubish")).toBeUndefined();
+    expect((await ui("POST", "/ui/api/connections/githubish/oauth", admin, {})).status).toBe(400);
   });
 
   it("encrypts stored values, never returns them, and uses them in MCP sessions", async () => {
