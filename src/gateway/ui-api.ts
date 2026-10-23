@@ -32,6 +32,11 @@ export interface UiContext {
   vault?: UserVault;
   audit: AuditLog;
   startedAt: number;
+  publicUrl: string;
+  /** Start an OAuth authorization; returns the URL to send the user to. */
+  beginOAuth(userId: string, name: string, cfg: ServerConfig): Promise<string>;
+  oauthConnected(userId: string, name: string, cfg: ServerConfig): boolean;
+  clearOAuth(userId: string, name: string, cfg: ServerConfig): boolean;
   sessions(): SessionInfo[];
 }
 
@@ -124,9 +129,14 @@ export async function handleUi(
   if (!user) return sendJson(res, 401, { error: "unauthorized" }, { ...headers, "WWW-Authenticate": 'Bearer realm="lazygate"' });
 
   try {
-    const body = req.method === "GET" || req.method === "DELETE" ? undefined : await readBody(req, MAX_UI_BODY).catch((e) => {
-      throw new HttpError(400, (e as Error).message);
-    });
+    let body: unknown;
+    if (req.method !== "GET" && req.method !== "DELETE" && req.method !== "HEAD") {
+      try {
+        body = await readBody(req, MAX_UI_BODY);
+      } catch (e) {
+        throw new HttpError(400, (e as Error).message);
+      }
+    }
     const result = await route(ctx, user, req.method ?? "GET", path.slice("/ui/api/".length).split("/").map(decodeURIComponent), query, body);
     if (result === undefined) {
       res.writeHead(204, headers).end();
@@ -305,21 +315,33 @@ function patchServer(ctx: UiContext, name: string, patch: Record<string, unknown
   return describeServer(name, ctx.registry.router.getConfig(name) as ServerConfig);
 }
 
-// ── Connections (a user's own credentials) ────────────────────────────────
+// ── Connections (a user's own credentials + OAuth) ─────────────────────────
 
-function connections(ctx: UiContext, user: UserIdentity, method: string, seg: string[], body: unknown): unknown {
+function isOauthServer(cfg: ServerConfig): boolean {
+  return Boolean(cfg.url) && cfg.oauth !== false;
+}
+
+async function connections(
+  ctx: UiContext,
+  user: UserIdentity,
+  method: string,
+  seg: string[],
+  _body: unknown
+): Promise<unknown> {
   const { registry, vault } = ctx;
-  if (!vault) throw new HttpError(501, "Credential storage is not enabled on this gateway");
   const resolver = new CredentialResolver(ctx.secrets);
 
   if (method === "GET" && seg.length === 1) {
-    const stored = vault.list(user.id);
+    const stored = vault?.list(user.id) ?? {};
     const out = [];
     for (const name of registry.router.listAll()) {
       const cfg = registry.router.getConfig(name) as ServerConfig;
-      if (!canAccess(cfg, user) || !resolver.usesCredentials(cfg) || (cfg.auth?.scope ?? "server") !== "user") continue;
-      const fields = userFields(cfg);
-      if (!fields.length) continue;
+      if (!canAccess(cfg, user)) continue;
+      const scope = cfg.auth?.scope ?? "server";
+      const fields = scope === "user" ? userFields(cfg) : [];
+      const oauth = isOauthServer(cfg) && (scope === "user" || user.admin);
+      if (!fields.length && !oauth) continue;
+      if (fields.length && !vault) continue;
       out.push({
         server: name,
         description: cfg.description,
@@ -329,20 +351,41 @@ function connections(ctx: UiContext, user: UserIdentity, method: string, seg: st
           header: credHeaderName(name, f),
           sharedFallback: cfg.auth?.fallback === "server" && ctx.secrets.get(`${name}/${f}`) !== undefined,
         })),
-        oauth: Boolean(cfg.oauth),
+        oauth,
+        oauthConnected: oauth ? ctx.oauthConnected(user.id, name, cfg) : false,
+        oauthShared: oauth && scope !== "user",
       });
     }
     return { connections: out };
   }
 
-  const [, server, field] = seg;
+  const [, server, action] = seg;
   const cfg = server ? registry.router.getConfig(server) : undefined;
-  if (!cfg || !canAccess(cfg, user) || (cfg.auth?.scope ?? "server") !== "user") throw new HttpError(404, "No such server");
+  if (!cfg || !canAccess(cfg, user)) throw new HttpError(404, "No such server");
+
+  if (method === "POST" && action === "oauth" && seg.length === 3) {
+    const scope = cfg.auth?.scope ?? "server";
+    if (!isOauthServer(cfg)) throw new HttpError(400, "This server does not use OAuth");
+    if (scope !== "user" && !user.admin) throw new HttpError(403, "Only an admin can connect a shared OAuth server");
+    const authorizationUrl = await ctx.beginOAuth(user.id, server, cfg);
+    return { authorizationUrl };
+  }
+
+  if (method === "DELETE" && action === "oauth" && seg.length === 3) {
+    const scope = cfg.auth?.scope ?? "server";
+    if (scope !== "user" && !user.admin) throw new HttpError(403, "Only an admin can disconnect a shared OAuth server");
+    if (!ctx.clearOAuth(user.id, server, cfg)) throw new HttpError(404, "No OAuth token stored");
+    return undefined;
+  }
+
+  const field = action;
+  if ((cfg.auth?.scope ?? "server") !== "user") throw new HttpError(404, "No such server");
+  if (!vault) throw new HttpError(501, "Credential storage is not enabled on this gateway");
   const f = (field ?? "").toLowerCase();
   if (!userFields(cfg).includes(f)) throw new HttpError(404, "That server doesn't take this credential");
 
   if (method === "PUT" && seg.length === 3) {
-    vault.set(user.id, server, f, asString(asObject(body).value, "value"));
+    vault.set(user.id, server, f, asString(asObject(_body).value, "value"));
     return { stored: true };
   }
   if (method === "DELETE" && seg.length === 3) {

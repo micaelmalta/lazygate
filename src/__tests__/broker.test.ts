@@ -56,11 +56,11 @@ describe("createBroker", () => {
     });
   });
 
-  it("lists the six meta-tools plus active server tools (prefixed)", async () => {
-    expect(broker.listTools().tools).toHaveLength(6);
+  it("lists the meta-tools plus active server tools (prefixed)", async () => {
+    expect(broker.listTools().tools).toHaveLength(8);
     await broker.callTool("activate_server", { server_name: "github" });
     const tools = broker.listTools().tools;
-    expect(tools).toHaveLength(7);
+    expect(tools).toHaveLength(9);
     expect(tools.at(-1)!.description).toMatch(/^\[github\]/);
   });
 

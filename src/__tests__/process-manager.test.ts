@@ -575,7 +575,7 @@ describe("ProcessManager", () => {
         "hq",
         "https://mcp.example.com/mcp",
         {},
-        { force: true }
+        { force: true, owner: undefined, interactive: true }
       );
       const retryHeaders = (fetchMock.mock.calls[1]?.[1] as RequestInit | undefined)?.headers as Record<string, string>;
       expect(retryHeaders.Authorization).toBe("Bearer test-token");
@@ -606,7 +606,7 @@ describe("ProcessManager", () => {
       mockHttpFlow([{ name: "a", description: "A", inputSchema: {} }]);
       await gw.activate("per-user", makeHttpConfig("https://mcp.example.com/mcp", { auth: { scope: "user" } }));
       expect(mockGetAccessTokenFn).toHaveBeenLastCalledWith(
-        "per-user", "https://mcp.example.com/mcp", {}, { force: true, owner: "alice" }
+        "per-user", "https://mcp.example.com/mcp", {}, { force: true, owner: "alice", interactive: true }
       );
 
       // server scope (default): shared token, no owner
@@ -614,7 +614,7 @@ describe("ProcessManager", () => {
       mockHttpFlow([{ name: "b", description: "B", inputSchema: {} }]);
       await gw.activate("shared", makeHttpConfig("https://mcp2.example.com/mcp"));
       expect(mockGetAccessTokenFn).toHaveBeenLastCalledWith(
-        "shared", "https://mcp2.example.com/mcp", {}, { force: true, owner: undefined }
+        "shared", "https://mcp2.example.com/mcp", {}, { force: true, owner: undefined, interactive: true }
       );
     });
 
@@ -707,7 +707,7 @@ describe("ProcessManager", () => {
         "oauth-srv",
         "http://localhost:4000/mcp",
         { clientId: "client_id", callbackPort: 9999 },
-        { force: true } // must not replay the rejected cached token
+        { force: true, owner: undefined, interactive: true } // must not replay the rejected cached token
       );
       expect(result).toEqual({ content: [{ type: "text", text: "refreshed" }] });
     });
