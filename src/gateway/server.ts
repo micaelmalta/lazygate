@@ -22,6 +22,15 @@ import { Redactor } from "./redact.js";
 import { UserVault, mergeCreds } from "./vault.js";
 import { readBody, sendJson } from "./http-util.js";
 import { handleUi, isUiPath } from "./ui-api.js";
+import {
+  clearStoredToken,
+  finishRemoteAuthorization,
+  hasStoredToken,
+  oauthCallbackPage,
+  startRemoteAuthorization,
+  type OAuthConfig,
+} from "../oauth.js";
+import type { ServerConfig } from "../router.js";
 
 export interface GatewayOptions {
   registry: Registry;
@@ -40,13 +49,38 @@ export interface GatewayOptions {
   maxSessionsPerUser?: number;
   /** Extra Host header values to accept (when behind a proxy or bound to a non-loopback address). */
   allowedHosts?: string[];
+  /**
+   * Public base URL of this gateway (scheme://host[:port], no trailing slash). Used for OAuth
+   * redirect URIs. Defaults to http://127.0.0.1:<port> (or the listen host when not loopback).
+   */
+  publicUrl?: string;
 }
 
 export interface Gateway {
   url: string;
   port: number;
+  /** Base URL (no /mcp) — OAuth callback and UI. */
+  publicUrl: string;
   sessionCount(): number;
   close(): Promise<void>;
+}
+
+function normalizeOAuth(oauth: ServerConfig["oauth"]): OAuthConfig | undefined {
+  if (oauth === undefined || oauth === false) return undefined;
+  if (oauth === true) return {};
+  return oauth;
+}
+
+/** HTTP servers that use OAuth (explicit or on-demand) and may need a Connect step. */
+function wantsOAuth(cfg: ServerConfig): boolean {
+  return Boolean(cfg.url) && cfg.oauth !== false && !hasStaticAuthHeader(cfg);
+}
+
+function hasStaticAuthHeader(cfg: ServerConfig): boolean {
+  for (const h of [cfg.headers, cfg.auth?.headers]) {
+    if (h && Object.keys(h).some((k) => k.toLowerCase() === "authorization")) return true;
+  }
+  return false;
 }
 
 interface Session {
@@ -82,6 +116,33 @@ export async function startGateway(opts: GatewayOptions): Promise<Gateway> {
   const resolver = new CredentialResolver(secrets);
   const sessions = new Map<string, Session>();
   const startedAt = Date.now();
+  /** Filled after listen; used by OAuth redirect and connect links. */
+  let publicUrl = opts.publicUrl?.replace(/\/$/, "") ?? "";
+
+  async function beginOAuth(userId: string, name: string, cfg: ServerConfig): Promise<string> {
+    if (!cfg.url || !wantsOAuth(cfg)) throw new Error(`Server "${name}" does not use OAuth`);
+    const redirectUri = `${publicUrl}/oauth/callback`;
+    const { authorizationUrl } = await startRemoteAuthorization({
+      serverName: name,
+      serverUrl: cfg.url,
+      config: normalizeOAuth(cfg.oauth),
+      owner: (cfg.auth?.scope ?? "server") === "user" ? userId : undefined,
+      redirectUri,
+    });
+    return authorizationUrl;
+  }
+
+  function oauthOwner(userId: string, cfg: ServerConfig): string | undefined {
+    return (cfg.auth?.scope ?? "server") === "user" ? userId : undefined;
+  }
+
+  function connectionGaps(userId: string, name: string, cfg: ServerConfig, creds: UserCredentials): string[] {
+    const gaps = resolver.missing(name, cfg, creds);
+    if (wantsOAuth(cfg) && !hasStoredToken(name, oauthOwner(userId, cfg))) {
+      gaps.push(`OAuth (call connect_server "${name}" or Connect in the UI)`);
+    }
+    return gaps;
+  }
 
   function closeSession(s: Session): void {
     if (s.closed) return;
@@ -99,6 +160,7 @@ export async function startGateway(opts: GatewayOptions): Promise<Gateway> {
 
     session.manager = new ProcessManager({
       owner: user.id,
+      oauthInteractive: false,
       reservedToolNames: META_TOOL_NAMES,
       onToolsChanged: () => {
         if (!session.closed) server.sendToolListChanged().catch(() => undefined);
@@ -125,7 +187,49 @@ export async function startGateway(opts: GatewayOptions): Promise<Gateway> {
         redactor.add(r.secretValues);
         return r.runtime;
       },
-      missing: (name, cfg) => resolver.missing(name, cfg, session.creds),
+      missing: (name, cfg) => connectionGaps(user.id, name, cfg, session.creds),
+      connect: async (name, cfg) => {
+        if (!canAccess(cfg, user)) throw new Error(`Unknown server: "${name}"`);
+        const gaps = connectionGaps(user.id, name, cfg, session.creds);
+        const needsOauth = wantsOAuth(cfg) && !hasStoredToken(name, oauthOwner(user.id, cfg));
+        const needsKey = gaps.some((g) => g.startsWith("X-Lazygate-Cred-") || g.startsWith("secret "));
+        if (!needsOauth && !needsKey && gaps.length === 0) {
+          return `Already connected to "${name}". Call activate_server to use it.`;
+        }
+        if (needsOauth) {
+          if ((cfg.auth?.scope ?? "server") !== "user" && !user.admin) {
+            throw new Error(
+              `Server "${name}" uses a shared OAuth connection — ask an admin to Connect it in the UI.`
+            );
+          }
+          const url = await beginOAuth(user.id, name, cfg);
+          return (
+            `Open this URL to authorize "${name}" (expires in 10 minutes):\n\n${url}\n\n` +
+            `When the browser says Connected, call activate_server again.`
+          );
+        }
+        return (
+          `Server "${name}" needs an API key. Save it in the gateway UI (${publicUrl}/ui → My credentials)` +
+          (gaps.length ? `,\n  or send: ${gaps.filter((g) => g.startsWith("X-Lazygate-Cred-")).join(", ")}` : "") +
+          `.`
+        );
+      },
+      disconnect: async (name, cfg) => {
+        if (!canAccess(cfg, user)) throw new Error(`Unknown server: "${name}"`);
+        const parts: string[] = [];
+        if (opts.vault) {
+          for (const f of Object.keys(opts.vault.list(user.id)[name] ?? {})) {
+            if (opts.vault.delete(user.id, name, f)) parts.push(`api key "${f}"`);
+          }
+        }
+        if (clearStoredToken(name, oauthOwner(user.id, cfg))) parts.push("OAuth token");
+        if ((cfg.auth?.scope ?? "server") !== "user" && user.admin && clearStoredToken(name)) {
+          parts.push("shared OAuth token");
+        }
+        return parts.length
+          ? `Disconnected "${name}" (${parts.join(", ")}).`
+          : `Nothing stored for "${name}".`;
+      },
     };
 
     const broker = createBroker({
@@ -217,9 +321,34 @@ export async function startGateway(opts: GatewayOptions): Promise<Gateway> {
       res.writeHead(200, { "Content-Type": "text/plain" }).end("ok");
       return;
     }
-    if (path !== "/mcp" && !isUiPath(path)) return sendJson(res, 404, { error: "not found" });
 
     if (!hostAllowed(req)) return sendJson(res, 403, { error: "host not allowed" });
+
+    // OAuth redirect target — no bearer auth; the one-time `state` binds the flow to a user.
+    if (path === "/oauth/callback" && (req.method === "GET" || req.method === "HEAD")) {
+      const q = new URLSearchParams(rawQuery);
+      const state = q.get("state") ?? "";
+      const code = q.get("code");
+      const err = q.get("error");
+      let html: string;
+      let ok = false;
+      if (!code || err) {
+        html = oauthCallbackPage(false, err ? `Provider error: ${err}` : "Missing authorization code", `${publicUrl}/ui`);
+      } else {
+        try {
+          const { serverName } = await finishRemoteAuthorization(state, code);
+          html = oauthCallbackPage(true, `"${serverName}" is connected. You can close this tab and activate the server.`, `${publicUrl}/ui`);
+          ok = true;
+        } catch (e) {
+          html = oauthCallbackPage(false, (e as Error).message, `${publicUrl}/ui`);
+        }
+      }
+      res.writeHead(ok ? 200 : 400, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+      res.end(req.method === "HEAD" ? undefined : html);
+      return;
+    }
+
+    if (path !== "/mcp" && !isUiPath(path)) return sendJson(res, 404, { error: "not found" });
 
     if (isUiPath(path)) {
       return handleUi(
@@ -230,6 +359,15 @@ export async function startGateway(opts: GatewayOptions): Promise<Gateway> {
           vault: opts.vault,
           audit,
           startedAt,
+          publicUrl,
+          beginOAuth: (userId, name, cfg) => beginOAuth(userId, name, cfg),
+          oauthConnected: (userId, name, cfg) => hasStoredToken(name, oauthOwner(userId, cfg)),
+          clearOAuth: (userId, name, cfg) => {
+            let n = 0;
+            if (clearStoredToken(name, oauthOwner(userId, cfg))) n++;
+            if ((cfg.auth?.scope ?? "server") !== "user" && clearStoredToken(name)) n++;
+            return n > 0;
+          },
           sessions: () =>
             [...sessions.values()].map((s) => ({
               id: s.id,
@@ -321,9 +459,14 @@ export async function startGateway(opts: GatewayOptions): Promise<Gateway> {
 
   const port = (httpServer.address() as AddressInfo).port;
   const shownHost = host.includes(":") ? `[${host}]` : host;
+  if (!publicUrl) {
+    const loopback = host === "127.0.0.1" || host === "localhost" || host === "::1";
+    publicUrl = `http://${loopback ? "127.0.0.1" : shownHost}:${port}`;
+  }
   return {
     url: `http://${shownHost}:${port}/mcp`,
     port,
+    publicUrl,
     sessionCount: () => sessions.size,
     close: async () => {
       clearInterval(sweep);

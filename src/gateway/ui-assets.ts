@@ -162,11 +162,27 @@ export const UI_JS = String.raw`(function () {
   function connectionsView(root) {
     api("GET", "connections").then(function (d) {
       clear(root);
-      root.appendChild(h("div", { class: "notice" }, "Keys you save here are encrypted on the gateway and used for your MCP sessions. " +
-        "A key sent in an X-Lazygate-Cred-… request header takes precedence. Values are never shown again."));
+      root.appendChild(h("div", { class: "notice" }, "API keys you save here are encrypted on the gateway. OAuth Connect opens the provider in this browser " +
+        "and returns to /oauth/callback. A key sent in an X-Lazygate-Cred-… header still takes precedence. Values are never shown again."));
       if (!d.connections.length) root.appendChild(h("p", { class: "muted" }, "No server needs a personal credential."));
       d.connections.forEach(function (c) {
-        var card = h("div", { class: "card" }, h("h2", null, c.server, " ", c.oauth ? h("span", { class: "pill" }, "OAuth") : null), h("p", { class: "muted" }, c.description));
+        var card = h("div", { class: "card" }, h("h2", null, c.server, " ",
+          c.oauth ? h("span", { class: "pill" }, c.oauthShared ? "OAuth (shared)" : "OAuth") : null),
+          h("p", { class: "muted" }, c.description));
+        if (c.oauth) {
+          var obox = h("div");
+          card.appendChild(h("p", { class: "row" },
+            c.oauthConnected ? h("span", { class: "good" }, "connected") : h("span", { class: "bad" }, "not connected"),
+            h("button", { class: "btn primary", type: "button", onclick: guard(obox, function () {
+              return api("POST", "connections/" + encodeURIComponent(c.server) + "/oauth", {}).then(function (r) {
+                window.location.href = r.authorizationUrl;
+              });
+            }) }, c.oauthConnected ? "Reconnect" : "Connect"),
+            c.oauthConnected ? h("button", { class: "btn danger", type: "button", onclick: guard(obox, function () {
+              return api("DELETE", "connections/" + encodeURIComponent(c.server) + "/oauth").then(function () { connectionsView(root); });
+            }) }, "Disconnect") : null));
+          card.appendChild(obox);
+        }
         c.fields.forEach(function (f) {
           var box = h("div"), input = h("input", { type: "password", placeholder: f.stored ? "stored — enter a new value to replace" : "value", autocomplete: "new-password" });
           var row = h("form", { class: "row", onsubmit: guard(box, function () {
