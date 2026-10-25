@@ -1,21 +1,30 @@
 // src/gateway/vault.ts
 // Per-user credentials entered through the web UI, encrypted at rest (AES-256-GCM).
-// The key comes from LAZYGATE_VAULT_KEY (base64, 32 bytes) or a 0600 `vault.key` next to the data.
+//
+// Key resolution (never write a new vault.key beside vault.json when serving):
+//   1. LAZYGATE_VAULT_KEY (base64, 32 bytes) — preferred; never writes vault.key
+//   2. Existing 0600 `vault.key` next to the data — backward compatible (read only)
+//   3. Otherwise an ephemeral in-memory key for this process (credentials won't decrypt
+//      after restart unless env or an existing vault.key is provided)
+//
 // Each value is bound to its user/server/field, so a stored value can't be moved to another user.
 // Credentials sent as request headers always take precedence over stored ones.
 
 import { createCipheriv, createDecipheriv, randomBytes } from "crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
+import { existsSync, readFileSync } from "fs";
 import { resolve } from "path";
-import { ensurePrivateMode, fileMtimeMs, readPrivateJson, writePrivateJson } from "./private-file.js";
+import { fileMtimeMs, readPrivateJson, writePrivateJson } from "./private-file.js";
 import type { UserCredentials } from "./credentials.js";
 
 type VaultFile = Record<string, Record<string, Record<string, string>>>;
+
+export type VaultKeySource = "env" | "file" | "ephemeral";
 
 export class UserVault {
   private data: VaultFile = {};
   private mtime = -1;
   private key?: Buffer;
+  private keySource?: VaultKeySource;
   readonly path: string;
   private readonly keyPath: string;
 
@@ -27,22 +36,32 @@ export class UserVault {
     this.keyPath = resolve(dir, "vault.key");
   }
 
+  /** How the encryption key was resolved (after first use). */
+  getKeySource(): VaultKeySource {
+    this.getKey();
+    return this.keySource!;
+  }
+
   private getKey(): Buffer {
     if (this.key) return this.key;
     const fromEnv = this.env.LAZYGATE_VAULT_KEY;
     let key: Buffer;
+    let source: VaultKeySource;
     if (fromEnv) {
+      // Env wins: do not create or touch vault.key beside the ciphertext.
       key = Buffer.from(fromEnv, "base64");
+      source = "env";
     } else if (existsSync(this.keyPath)) {
+      // Compat only — never write a new vault.key next to the data.
       key = Buffer.from(readFileSync(this.keyPath, "utf-8").trim(), "base64");
+      source = "file";
     } else {
       key = randomBytes(32);
-      mkdirSync(this.dir, { recursive: true, mode: 0o700 });
-      writeFileSync(this.keyPath, key.toString("base64") + "\n", { mode: 0o600 });
-      ensurePrivateMode(this.keyPath);
+      source = "ephemeral";
     }
     if (key.length !== 32) throw new Error("Vault key must be 32 bytes (base64)");
     this.key = key;
+    this.keySource = source;
     return key;
   }
 

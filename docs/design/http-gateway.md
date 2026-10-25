@@ -291,26 +291,32 @@ OAuth client per upstream per gateway, not per user.
 ## Stdio servers on the gateway
 
 - **One process per (user, server)** for user-level credentials; the credential is injected through
-  `env` templates with `inheritEnv: false` forced in gateway mode, so a child never sees the gateway's
-  own environment or other users' secrets.
-- **Isolation**: each child runs in its own working directory (`/var/lib/lazygate/users/<id>/<server>`),
-  with resource limits (memory, CPU, open files) via cgroups or `prlimit`, optionally as an unprivileged
-  OS user or inside a container (`runtime: "process" | "docker"`). Container runtime is a later phase;
-  the interface is designed so it can be swapped in.
+  `env` templates with `inheritEnv: false` as the gateway default (and `LAZYGATE_*` always stripped),
+  so a child never sees the gateway's vault key or secret env by inheritance.
+- **Command allowlist** (implemented): `LAZYGATE_STDIO_ALLOWLIST` / `LAZYGATE_ALLOWED_COMMANDS`
+  rejects stdio `command` values not on the list at activate time (and in the UI when editing).
+- **`local: true`** (implemented): servers that need the user's machine are hidden from non-admin
+  catalog users and refused for install/activate in gateway mode.
+- **Isolation** (still deferred): each child should run in its own working directory
+  (`/var/lib/lazygate/users/<id>/<server>`), with resource limits (memory, CPU, open files) via
+  cgroups or `prlimit`, optionally as an unprivileged OS user or inside a container
+  (`runtime: "process" | "docker"`). Container / nsjail / Firecracker isolation is a later phase —
+  scrubbing env and allowlisting commands do not stop a child from reading `~/.config/lazygate/`
+  while it shares the gateway uid.
 - **Lifecycle**: idle reaping, a per-user process cap, a global cap with a clear error when hit,
   and crash handling as today (pending calls rejected, `tools/list_changed`).
-- **Startup cost**: `npx`-style servers are slow on first launch; the gateway image pre-installs the
-  allowed servers, and `servers.json` in gateway mode rejects `npx -y` of arbitrary packages unless
-  allowlisted.
-- Servers that need a user's local machine are marked `local: true` and hidden in gateway mode.
+- **Startup cost**: `npx`-style servers are slow on first launch; the gateway image should
+  pre-install allowed servers so allowlisted commands need not be `npx -y` of arbitrary packages.
 
 ---
 
 ## Discovery, policy and the tool index
 
 - `discover_tools` filters by policy *before* scoring, so users don't learn about servers they can't use.
-- The learned tool index stays per server (tool lists rarely differ between users). It is only
-  updated from activations by users allowed to use the server.
+- The learned tool index stays per server and is shared across users. It is only updated from
+  shared-scope (`auth.scope: "server"`, including default stdio) activations — never from
+  user-scoped credentials. Admins can pre-warm it via `POST /ui/api/tool-index/rebuild`
+  (Sessions → Index all tools), which activates each eligible catalog server once and deactivates it.
 - Skills: `skills.json` in gateway mode points at a skills directory on the gateway (or a git repo
   synced on a schedule). Per-user skills are out of scope for the first version.
 

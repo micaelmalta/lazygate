@@ -2,7 +2,7 @@
 // Learned tool index (routing by tool descriptions) and child environment scoping.
 
 import { describe, it, expect, afterEach } from "@jest/globals";
-import { mkdtempSync, rmSync, writeFileSync, existsSync } from "fs";
+import { mkdtempSync, rmSync, writeFileSync, existsSync, utimesSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { ToolIndex, toolText } from "../tool-index.js";
@@ -64,6 +64,32 @@ describe("ToolIndex", () => {
   it("toolText splits tool names on _ and -", () => {
     expect(toolText([{ name: "list_open-issues", description: "Lists issues" }])).toBe("list open issues Lists issues");
   });
+
+  it("findServersWithTool returns exact name hits with a fresh signature", () => {
+    const idx = new ToolIndex();
+    const jira = server({ command: "npx", args: ["jira"] });
+    const gh = server({ command: "npx", args: ["gh"] });
+    idx.record("jira", jira, [{ name: "create_issue", description: "Create issue" }]);
+    idx.record("github", gh, [{ name: "create_issue", description: "Create GitHub issue" }]);
+    expect(idx.findServersWithTool("create_issue", { jira, github: gh }).sort()).toEqual(["github", "jira"]);
+    expect(idx.findServersWithTool("missing", { jira, github: gh })).toEqual([]);
+    expect(idx.findServersWithTool("create_issue", { jira: server({ args: ["other"] }) })).toEqual([]);
+  });
+
+  it("reloads from disk when another process updates the file", () => {
+    dir = mkdtempSync(join(tmpdir(), "cb-idx-"));
+    const path = join(dir, "tool-index.json");
+    const cfg = server();
+
+    const a = new ToolIndex(path);
+    a.record("acme", cfg, [{ name: "old_tool", description: "Old" }]);
+
+    const b = new ToolIndex(path);
+    b.record("acme", cfg, [{ name: "new_tool", description: "New" }]);
+    utimesSync(path, new Date(), new Date(Date.now() + 2000));
+
+    expect(a.get("acme", cfg).map((t) => t.name)).toEqual(["new_tool"]);
+  });
 });
 
 describe("routing by learned tools", () => {
@@ -80,7 +106,7 @@ describe("routing by learned tools", () => {
     ]);
     const [hit] = router.rank("send an invoice reminder");
     expect(hit.name).toBe("acme");
-    expect(hit.toolMatches.sort()).toEqual(["invoice", "reminder"]);
+    expect(hit.toolMatches.sort()).toEqual(["invoice", "reminder", "send"]);
   });
 
   it("caps the tool contribution so keywords still dominate", () => {
@@ -110,11 +136,24 @@ describe("buildChildEnv", () => {
     npm_config_registry: "https://r.example",
     AWS_SECRET_ACCESS_KEY: "aws-secret",
     GITHUB_TOKEN: "ghp_x",
+    LAZYGATE_VAULT_KEY: "vault",
+    LAZYGATE_SECRET_X: "sec",
   } as NodeJS.ProcessEnv;
 
-  it("inherits everything by default", () => {
-    expect(buildChildEnv(parent, undefined, { A: "1" })).toEqual({ ...parent, A: "1" });
-    expect(buildChildEnv(parent, true, {})).toEqual(parent);
+  it("inherits everything by default except LAZYGATE_*", () => {
+    expect(buildChildEnv(parent, undefined, { A: "1" })).toEqual({
+      PATH: "/bin",
+      HOME: "/home/u",
+      LC_ALL: "C",
+      npm_config_registry: "https://r.example",
+      AWS_SECRET_ACCESS_KEY: "aws-secret",
+      GITHUB_TOKEN: "ghp_x",
+      A: "1",
+    });
+    const full = buildChildEnv(parent, true, {});
+    expect(full.LAZYGATE_VAULT_KEY).toBeUndefined();
+    expect(full.LAZYGATE_SECRET_X).toBeUndefined();
+    expect(full.GITHUB_TOKEN).toBe("ghp_x");
   });
 
   it("false → only the base set (no secrets), plus own env", () => {
@@ -122,11 +161,18 @@ describe("buildChildEnv", () => {
     expect(env).toEqual({ PATH: "/bin", HOME: "/home/u", LC_ALL: "C", npm_config_registry: "https://r.example", OWN: "1" });
   });
 
+  it("strips LAZYGATE_* even from the server's own env overlay", () => {
+    const env = buildChildEnv(parent, false, { OWN: "1", LAZYGATE_SECRET_INJECTED: "nope" });
+    expect(env.OWN).toBe("1");
+    expect(env.LAZYGATE_SECRET_INJECTED).toBeUndefined();
+  });
+
   it("list → base plus named variables, with prefix globs", () => {
     const env = buildChildEnv(parent, ["GITHUB_TOKEN", "AWS_*"], {});
     expect(env.GITHUB_TOKEN).toBe("ghp_x");
     expect(env.AWS_SECRET_ACCESS_KEY).toBe("aws-secret");
     expect(env.PATH).toBe("/bin");
+    expect(env.LAZYGATE_VAULT_KEY).toBeUndefined();
   });
 
   it("own env always wins and matching is case-insensitive", () => {

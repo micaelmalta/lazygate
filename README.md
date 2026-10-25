@@ -12,7 +12,7 @@ You  →  discover · activate · load skill
     jira · github · datadog · …  (on demand)
 ```
 
-**~96% fewer input tokens when idle** across a typical multi-server setup (see [benchmark notes](docs/reference.md#benchmark)).
+**Large idle-token savings** in multi-server setups (historically ~96% vs loading every schema upfront in one cold-cache run — idle-only; re-run `npm run benchmark` on your catalog). See [benchmark notes](docs/reference.md#benchmark).
 
 Formerly `context-broker` — [existing installs upgrade in place](docs/reference.md#upgrading-from-context-broker).
 
@@ -29,6 +29,30 @@ Formerly `context-broker` — [existing installs upgrade in place](docs/referenc
 
 ---
 
+## Install
+
+The package is **not on npm yet**. Install from this repo (Node.js **≥ 20**):
+
+```bash
+git clone https://github.com/micaelmalta/lazygate.git
+cd lazygate
+npm install && npm run build
+# optional: put `lazygate` on your PATH
+npm link
+```
+
+Or run without linking:
+
+```bash
+node /path/to/lazygate/dist/index.js <subcommand>
+# tarball:
+# npm install -g https://github.com/micaelmalta/lazygate/archive/refs/heads/main.tar.gz
+```
+
+Below, `lazygate` means that binary (or `node …/dist/index.js`).
+
+---
+
 ## Two ways to run
 
 ### Personal (stdio)
@@ -36,46 +60,52 @@ Formerly `context-broker` — [existing installs upgrade in place](docs/referenc
 One agent, one machine. Migrate your existing MCP config and go.
 
 ```bash
-npx -y lazygate migrate --from cursor   # or: claude, opencode
+lazygate migrate --from cursor   # or: claude, opencode
 # restart the client — ask “list active servers”
 ```
 
-Requires Node.js ≥ 26. Add `--dry-run` to preview; `npx -y lazygate revert --from cursor` to undo.
+Add `--dry-run` to preview; `lazygate revert --from cursor` to undo.
 
 ### Team gateway (HTTP)
 
 One shared instance for several people or clients — Streamable HTTP, personal access tokens, per-user sessions, and a web catalog.
 
 ```bash
-npx -y lazygate token create --user you --admin
-npx -y lazygate serve
+lazygate token create --user you --admin
+lazygate serve
 # → MCP  http://127.0.0.1:8787/mcp
 # → UI   http://127.0.0.1:8787/ui
 ```
 
 Open `/ui`, paste a token, **Install** servers and skills, **Connect** credentials. Full guide: [docs/gateway.md](docs/gateway.md).
 
+For remote access, put a **TLS reverse proxy** in front and use `--allow-remote` (the gateway speaks plain HTTP only). See [Remote access / TLS](docs/gateway.md#remote-access--tls).
+
 ---
 
 ## What the agent sees
 
-Six meta-tools instead of dozens of schemas:
+**11 meta-tools** in `META_TOOLS` (9 listed in stdio; gateway also advertises `connect_server` / `disconnect_server`). Activated servers stay off `tools/list` by default — use `describe_tool` / `call_tool` (or set `expose` in `servers.json`).
+
+Clients that ignore `notifications/tools/list_changed` never pick up newly exposed schemas: prefer `call_tool` / `describe_tool` instead of expecting upstream tools to appear in `tools/list`. Changing `tools/list` also invalidates prompt cache for everything after the tools block — another reason to keep the default `expose: "none"`.
 
 | Tool | Job |
 |---|---|
 | `discover_tools` | Find the right server for a task |
 | `activate_server` / `deactivate_server` | Start or stop it |
+| `describe_tool` / `call_tool` | One schema on demand; call without merging into `tools/list` |
 | `list_active_servers` | What’s running in this session |
-| `discover_skill` / `load_skill` | Find and load playbooks on demand |
+| `discover_skill` / `load_skill` / `read_skill_file` | Find, load playbooks, and read bundled skill files |
+| `connect_server` / `disconnect_server` | Gateway only — credentials (hidden in stdio) |
 
 Example:
 
 ```
 You:    Search GitHub for issues labelled bug
-Agent:  discover_tools → activate_server("github") → search_issues(...)
+Agent:  discover_tools → activate_server("github") → describe_tool → call_tool(...)
 ```
 
-Unknown tool calls auto-activate the best-matching server and retry. Details: [Routing](docs/reference.md#routing).
+Unknown tool calls can still auto-activate and retry by name when tools are exposed. Details: [Routing](docs/reference.md#routing).
 
 ---
 
@@ -93,8 +123,8 @@ Example server entry and every field: [Configuration](docs/reference.md#configur
 ## Migrate from Claude, Cursor, or OpenCode
 
 ```bash
-npx -y lazygate migrate --from claude [--dry-run] [--servers | --skills | --plugins]
-npx -y lazygate revert  --from claude [--dry-run]
+lazygate migrate --from claude [--dry-run] [--servers | --skills | --plugins]
+lazygate revert  --from claude [--dry-run]
 ```
 
 `migrate` converts servers, extracts secrets to your shell, registers skills in place, wires lazygate into the client, and keeps backups of every file it touches. Limits and details: [Migration](docs/reference.md#migration).
@@ -103,17 +133,26 @@ npx -y lazygate revert  --from claude [--dry-run]
 
 ## Manual install (stdio)
 
+Point the client at the built binary:
+
 ```bash
-claude mcp add --scope user lazygate -- npx -y lazygate
+claude mcp add --scope user lazygate -- node /path/to/lazygate/dist/index.js
 ```
 
 Or in `~/.claude.json` / Cursor `mcp.json`:
 
 ```json
-{ "mcpServers": { "lazygate": { "command": "npx", "args": ["-y", "lazygate"] } } }
+{
+  "mcpServers": {
+    "lazygate": {
+      "command": "node",
+      "args": ["/path/to/lazygate/dist/index.js"]
+    }
+  }
+}
 ```
 
-From source: `git clone` → `npm install && npm run build` → point the client at `dist/index.js`. Use the name **`lazygate`** so migrate doesn’t create a second entry.
+Use the name **`lazygate`** so migrate doesn’t create a second entry. After `npm link`, `command` can be `lazygate` with no args.
 
 ---
 
@@ -121,7 +160,7 @@ From source: `git clone` → `npm install && npm run build` → point the client
 
 | Doc | Contents |
 |---|---|
-| [docs/gateway.md](docs/gateway.md) | HTTP gateway, UI, tokens, vault |
+| [docs/gateway.md](docs/gateway.md) | HTTP gateway, UI, tokens, vault, TLS proxy |
 | [docs/reference.md](docs/reference.md) | Config, routing, migrate, benchmark |
 | [CLAUDE.md](CLAUDE.md) | Architecture for contributors |
 

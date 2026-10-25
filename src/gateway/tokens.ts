@@ -65,7 +65,9 @@ export class TokenStore {
   /** Returns the token — this is the only time it is available. */
   create(opts: { user: string; groups?: string[]; expiresInMs?: number; label?: string; admin?: boolean }): { id: string; token: string } {
     const data = this.load();
-    const id = randomBytes(4).toString("hex");
+    let id = randomBytes(4).toString("hex");
+    for (let i = 0; i < 8 && data.tokens[id]; i++) id = randomBytes(4).toString("hex");
+    if (data.tokens[id]) throw new Error("Failed to allocate a unique token id");
     const secret = randomBytes(32).toString("base64url");
     data.tokens[id] = {
       user: opts.user,

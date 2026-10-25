@@ -15,7 +15,8 @@ import {
   secretEnvName,
 } from "../gateway/credentials.js";
 import { TokenStore, bearerToken, parseDuration } from "../gateway/tokens.js";
-import { Redactor } from "../gateway/redact.js";
+import { UserProfileStore } from "../gateway/profile.js";
+import { Redactor, MAX_REDACT_SECRETS } from "../gateway/redact.js";
 import { tokenPath } from "../oauth.js";
 import type { ServerConfig } from "../router.js";
 
@@ -239,13 +240,53 @@ describe("TokenStore", () => {
   });
 });
 
+describe("UserProfileStore", () => {
+  it("reloads when another process updates profiles.json", () => {
+    const d = tmp();
+    const path = join(d, "profiles.json");
+    const a = new UserProfileStore(d);
+    a.installServer("alice", "jira");
+    expect(a.isServerInstalled("alice", "jira")).toBe(true);
+
+    const b = new UserProfileStore(d);
+    b.installServer("alice", "github");
+    utimesSync(path, new Date(), new Date(Date.now() + 2000));
+    expect(a.get("alice").servers.sort()).toEqual(["github", "jira"]);
+  });
+});
+
 describe("Redactor", () => {
   it("replaces secret values, longest first, in text and results", () => {
     const r = new Redactor();
     r.add(["supersecret-token", "supersecret"]);
     expect(r.text("a supersecret-token and supersecret")).toBe("a [redacted] and [redacted]");
     expect(r.result({ content: [{ type: "text", text: "x supersecret-token" }, { type: "image", data: "supersecret" }] })).toEqual({
-      content: [{ type: "text", text: "x [redacted]" }, { type: "image", data: "supersecret" }],
+      content: [{ type: "text", text: "x [redacted]" }, { type: "image", data: "[redacted]" }],
+    });
+  });
+
+  it("redacts structuredContent, embedded resources and _meta", () => {
+    const r = new Redactor();
+    r.add(["leak-me-please"]);
+    const out = r.result({
+      content: [
+        {
+          type: "resource",
+          resource: { uri: "file://x", text: "has leak-me-please inside", mimeType: "text/plain" },
+        },
+      ],
+      structuredContent: { token: "leak-me-please", nested: { ok: true } },
+      _meta: { note: "leak-me-please" },
+    });
+    expect(out).toEqual({
+      content: [
+        {
+          type: "resource",
+          resource: { uri: "file://x", text: "has [redacted] inside", mimeType: "text/plain" },
+        },
+      ],
+      structuredContent: { token: "[redacted]", nested: { ok: true } },
+      _meta: { note: "[redacted]" },
     });
   });
 
@@ -253,6 +294,21 @@ describe("Redactor", () => {
     const r = new Redactor();
     r.add(["abc", undefined, ""]);
     expect(r.text("abc abc")).toBe("abc abc");
+  });
+
+  it("LRU-prunes registered secrets past the cap", () => {
+    const r = new Redactor();
+    const secrets = Array.from({ length: MAX_REDACT_SECRETS + 50 }, (_, i) => `secret-value-${String(i).padStart(4, "0")}`);
+    r.add(secrets);
+    expect(r.size).toBe(MAX_REDACT_SECRETS);
+    expect(r.text(`has ${secrets[0]}`)).toBe(`has ${secrets[0]}`); // evicted
+    expect(r.text(`has ${secrets[secrets.length - 1]}`)).toBe("has [redacted]"); // newest kept
+    // Touch an older survivor so it is not next to go.
+    const keptEarly = secrets[50];
+    r.add([keptEarly]);
+    r.add(Array.from({ length: 10 }, (_, i) => `newer-secret-${i}-xxxxxx`));
+    expect(r.text(`has ${keptEarly}`)).toBe("has [redacted]");
+    expect(r.size).toBeLessThanOrEqual(MAX_REDACT_SECRETS);
   });
 });
 
