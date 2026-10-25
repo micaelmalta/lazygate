@@ -2,7 +2,7 @@
 // Per-user install lists for the gateway marketplace (opt-in from the shared catalog).
 
 import { resolve } from "path";
-import { readPrivateJson, writePrivateJson } from "./private-file.js";
+import { fileMtimeMs, readPrivateJson, writePrivateJson } from "./private-file.js";
 
 export interface UserProfile {
   servers: string[];
@@ -32,44 +32,52 @@ function empty(): UserProfile {
 export class UserProfileStore {
   private readonly path: string;
   private data: StoreFile;
-  private mtime = 0;
+  private mtime = -1;
 
   constructor(gatewayDir: string) {
     this.path = resolve(gatewayDir, "profiles.json");
     this.data = {};
-    this.reload();
+    this.load();
   }
 
-  private reload(): void {
-    this.data = readPrivateJson<StoreFile>(this.path, {}, "profiles");
-    for (const [user, p] of Object.entries(this.data)) {
-      this.data[user] = {
-        servers: normalizeList(p?.servers),
-        skills: normalizeList(p?.skills),
-      };
+  /** Re-read when the file changed (another process / admin wrote profiles.json). */
+  private load(): StoreFile {
+    const m = fileMtimeMs(this.path);
+    if (m !== this.mtime) {
+      this.data = readPrivateJson<StoreFile>(this.path, {}, "profiles");
+      for (const [user, p] of Object.entries(this.data)) {
+        this.data[user] = {
+          servers: normalizeList(p?.servers),
+          skills: normalizeList(p?.skills),
+        };
+      }
+      this.mtime = m;
     }
+    return this.data;
   }
 
   private save(): void {
     writePrivateJson(this.path, this.data);
+    this.mtime = fileMtimeMs(this.path);
   }
 
   private ensure(userId: string): UserProfile {
-    if (!this.data[userId]) this.data[userId] = empty();
-    return this.data[userId];
+    const data = this.load();
+    if (!data[userId]) data[userId] = empty();
+    return data[userId];
   }
 
   get(userId: string): UserProfile {
-    const p = this.data[userId];
+    const p = this.load()[userId];
     return p ? { servers: [...p.servers], skills: [...p.skills] } : empty();
   }
 
   isServerInstalled(userId: string, name: string): boolean {
-    return (this.data[userId]?.servers ?? []).includes(name);
+    return (this.load()[userId]?.servers ?? []).includes(name);
   }
 
   isSkillInstalled(userId: string, name: string): boolean {
-    return (this.data[userId]?.skills ?? []).includes(name);
+    return (this.load()[userId]?.skills ?? []).includes(name);
   }
 
   installServer(userId: string, name: string): boolean {
@@ -82,7 +90,7 @@ export class UserProfileStore {
   }
 
   uninstallServer(userId: string, name: string): boolean {
-    const p = this.data[userId];
+    const p = this.load()[userId];
     if (!p) return false;
     const next = p.servers.filter((s) => s !== name);
     if (next.length === p.servers.length) return false;
@@ -101,7 +109,7 @@ export class UserProfileStore {
   }
 
   uninstallSkill(userId: string, name: string): boolean {
-    const p = this.data[userId];
+    const p = this.load()[userId];
     if (!p) return false;
     const next = p.skills.filter((s) => s !== name);
     if (next.length === p.skills.length) return false;
@@ -112,8 +120,9 @@ export class UserProfileStore {
 
   /** Drop a server from every user's install list (admin deleted the catalog entry). */
   removeServerEverywhere(name: string): void {
+    const data = this.load();
     let changed = false;
-    for (const p of Object.values(this.data)) {
+    for (const p of Object.values(data)) {
       const next = p.servers.filter((s) => s !== name);
       if (next.length !== p.servers.length) {
         p.servers = next;
@@ -125,8 +134,9 @@ export class UserProfileStore {
 
   /** Drop a skill from every user's install list. */
   removeSkillEverywhere(name: string): void {
+    const data = this.load();
     let changed = false;
-    for (const p of Object.values(this.data)) {
+    for (const p of Object.values(data)) {
       const next = p.skills.filter((s) => s !== name);
       if (next.length !== p.skills.length) {
         p.skills = next;

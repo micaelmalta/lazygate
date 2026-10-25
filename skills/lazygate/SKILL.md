@@ -9,25 +9,30 @@ description: >-
 
 # Lazygate
 
-lazygate is an MCP proxy. Cursor/Claude see a few **meta-tools**; real servers and skills load on demand. Do not expect full upstream tool lists until you activate a server.
+lazygate is an MCP proxy. Cursor/Claude see **11 meta-tools** (9 in stdio; gateway also lists `connect_server` / `disconnect_server`). Real servers and skills load on demand. Activated tools stay off `tools/list` by default — use `describe_tool` / `call_tool`.
+
+Clients that ignore `notifications/tools/list_changed` will not see newly exposed schemas in `tools/list`; use `call_tool` / `describe_tool` instead. Changing `tools/list` also invalidates prompt cache for everything after the tools block — keep `expose: "none"` and prefer `call_tool`.
 
 ## Meta-tools
 
 | Tool | Use |
 |---|---|
 | `discover_tools` | Rank servers for a task (`query`) |
-| `activate_server` | Start a server by `server_name`; tools appear after this |
+| `activate_server` | Start a server by `server_name` (schemas not merged into `tools/list` unless `expose` is set) |
+| `describe_tool` | One tool schema on demand (`server`, `tool`) |
+| `call_tool` | Invoke without exposing schemas (`server`, `tool`, `args`) |
 | `deactivate_server` | Stop a server |
 | `list_active_servers` | What is running in this session |
 | `discover_skill` | Rank installed skills (`query`). No dedicated list — a non-matching query returns available skills |
 | `load_skill` | Fetch full instructions for `skill_name`, then follow them |
-| `connect_server` | Gateway only: link to save OAuth/API key, then activate |
+| `read_skill_file` | Read a bundled file under a skill (`skill_name`, path) |
+| `connect_server` / `disconnect_server` | Gateway only: credentials (not listed in stdio) |
 
 Namespace in Cursor is typically `user-lazygate`.
 
 ## Default workflow
 
-1. **Servers:** `discover_tools` → `activate_server` → call that server’s tools. If a tool is unknown, activate the best match and retry.
+1. **Servers:** `discover_tools` → `activate_server` → `describe_tool` (if needed) → `call_tool`. Prefer `call_tool` over expecting upstream tools in `tools/list` (especially if the client ignores `tools/list_changed`).
 2. **Skills:** `discover_skill` → `load_skill` → obey the loaded body for the rest of the task.
 3. Prefer lazygate over configuring the same upstream MCP directly in Cursor when the gateway already catalogs it.
 

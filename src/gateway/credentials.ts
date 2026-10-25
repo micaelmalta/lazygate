@@ -7,7 +7,7 @@
 //    `auth.headers`; the result is handed to ProcessManager as RuntimeCredentials.
 
 import { resolve } from "path";
-import type { ServerConfig } from "../router.js";
+import { effectiveAuthScope, type ServerConfig } from "../router.js";
 import type { RuntimeCredentials } from "../process-manager.js";
 import { fileMtimeMs, readPrivateJson, writePrivateJson, ensurePrivateMode } from "./private-file.js";
 
@@ -158,7 +158,7 @@ export class CredentialResolver {
    * Empty when everything resolves.
    */
   missing(server: string, config: ServerConfig, user: UserCredentials): string[] {
-    const scope = config.auth?.scope ?? "server";
+    const scope = effectiveAuthScope(config);
     // Server-scope credentials are never overridable by what a user sends.
     const userFields = scope === "user" ? user.get(server) ?? {} : {};
     const out: string[] = [];
@@ -182,7 +182,7 @@ export class CredentialResolver {
     const missing = this.missing(server, config, user);
     if (missing.length) throw new MissingCredentialError(server, missing);
 
-    const userFields = (config.auth?.scope ?? "server") === "user" ? user.get(server) ?? {} : {};
+    const userFields = effectiveAuthScope(config) === "user" ? user.get(server) ?? {} : {};
     const used: string[] = [];
     const expand = (template: string): string =>
       template.replace(TEMPLATE, (_, kind: string, key: string) => {
@@ -204,8 +204,8 @@ export class CredentialResolver {
   }
 }
 
-/** A server is visible when it has no `groups`, or the caller is in one of them. */
-export function canAccess(config: ServerConfig, user: CallerIdentity): boolean {
+/** A server or skill is visible when it has no `groups`, or the caller is in one of them. */
+export function canAccess(config: { groups?: string[] }, user: CallerIdentity): boolean {
   if (!config.groups || config.groups.length === 0) return true;
   return config.groups.some((g) => user.groups.includes(g));
 }

@@ -11,6 +11,7 @@ import { UserProfileStore } from "./profile.js";
 import { TokenStore, parseDuration } from "./tokens.js";
 import { AuditLog } from "./audit.js";
 import { startGateway } from "./server.js";
+import { parseStdioCommandAllowlist } from "../stdio-policy.js";
 
 function flag(args: string[], name: string): string | undefined {
   const i = args.indexOf(name);
@@ -55,27 +56,45 @@ async function serve(args: string[]): Promise<void> {
   }
 
   const idleMin = Number(flag(args, "--idle-timeout-min") ?? 30);
+  const serverIdleTtlMin = Number(flag(args, "--server-idle-ttl-min") ?? 20);
   const allowedHosts = (flag(args, "--allowed-host") ?? "").split(",").filter(Boolean);
 
   const registry = loadRegistry(args);
+  const stdioCommandAllowlist = parseStdioCommandAllowlist();
+  // Prefer LAZYGATE_VAULT_KEY; never create vault.key beside vault.json in serve mode.
+  const vault = new UserVault(dir);
   const gateway = await startGateway({
     registry,
     tokens,
     secrets: new SecretStore(dir),
-    vault: new UserVault(dir),
+    vault,
     profiles: new UserProfileStore(dir),
     audit: new AuditLog(resolve(dir, "audit.log")),
     host,
     port,
     idleMs: idleMin * 60_000,
+    serverIdleTtlMs: serverIdleTtlMin * 60_000,
+    maxActiveServers: Number(flag(args, "--max-active-servers") ?? 8),
+    maxActiveTools: Number(flag(args, "--max-active-tools") ?? 64),
     maxSessions: Number(flag(args, "--max-sessions") ?? 100),
     allowedHosts,
     publicUrl: flag(args, "--public-url"),
+    stdioCommandAllowlist,
+    namespaceTools: has(args, "--namespace-tools"),
   });
 
   console.error(`${LOG_PREFIX} HTTP gateway listening on ${gateway.url}`);
   console.error(`${LOG_PREFIX} Web UI: ${gateway.publicUrl}/ui`);
+  if (vault.getKeySource() === "ephemeral") {
+    console.error(
+      `${LOG_PREFIX} warning: no LAZYGATE_VAULT_KEY and no existing vault.key — using an in-memory vault key; ` +
+        `stored credentials will not decrypt after restart. Set LAZYGATE_VAULT_KEY (base64, 32 bytes) for persistence.`
+    );
+  }
   if (!LOOPBACK.has(host)) console.error(`${LOG_PREFIX} warning: listening on ${host} without TLS`);
+  if (stdioCommandAllowlist?.length) {
+    console.error(`${LOG_PREFIX} stdio command allowlist: ${stdioCommandAllowlist.join(", ")}`);
+  }
 
   const stop = () => {
     void gateway.close().finally(() => process.exit(0));

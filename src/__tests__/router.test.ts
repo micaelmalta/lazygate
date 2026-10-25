@@ -175,8 +175,7 @@ describe('ToolRouter.rank() – keyword matching', () => {
 // ---------------------------------------------------------------------------
 
 describe('ToolRouter.rank() – description word matching', () => {
-  it('matches description words longer than 4 characters', () => {
-    // "integration" (11 chars) is in description and query
+  it('matches description words of 3+ characters (jira, repo, sql, logs, docs)', () => {
     const router = new ToolRouter({
       myserver: makeServer({ description: 'GitHub integration tool', keywords: [] }),
     });
@@ -185,12 +184,12 @@ describe('ToolRouter.rank() – description word matching', () => {
     expect(results[0].name).toBe('myserver');
   });
 
-  it('does NOT match description words of 4 characters or fewer', () => {
-    // "tool" is exactly 4 chars — should not match
+  it('does NOT match description words shorter than 3 characters', () => {
+    // "to" / "an" are below the minimum — should not match
     const router = new ToolRouter({
-      myserver: makeServer({ description: 'test tool only', keywords: [] }),
+      myserver: makeServer({ description: 'go to an app', keywords: [] }),
     });
-    const results = router.rank('tool');
+    const results = router.rank('to an');
     expect(results).toHaveLength(0);
   });
 

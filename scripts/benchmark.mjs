@@ -5,7 +5,7 @@
 // Strategies:
 //   baseline  — no MCP servers at all (pure system prompt cost)
 //   direct    — all servers loaded upfront every request (current worst case)
-//   broker    — only the broker's 6 meta-tools visible; servers loaded on demand
+//   broker    — only the broker's meta-tools visible (META_TOOLS); servers loaded on demand
 //   activated — broker + all servers loaded (broker worst case)
 //
 // Caveats: every run is a single cold-cache turn (--no-session-persistence), so the numbers

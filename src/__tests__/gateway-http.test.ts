@@ -84,6 +84,7 @@ beforeAll(async () => {
         shared: server("shared", { scope: "server", env: { TEST_TOKEN: "${secret:shared/token}" } }),
         fallbacky: server("fallbacky", { scope: "user", fallback: "server", env: { TEST_TOKEN: "${cred:token}" } }),
         sre: server("sre", undefined, { groups: ["sre"] }),
+        desktop: server("desktop", undefined, { local: true, keywords: ["desktop", "filesystem"] }),
       },
     })
   );
@@ -225,6 +226,17 @@ describe("group policy", () => {
   it("lets group members use them", async () => {
     const { client } = await connect(bobToken); // sre
     expect(text(await call(client, "activate_server", { server_name: "sre" }))).toMatch(/Activated "sre"/);
+  });
+});
+
+describe("local: true servers", () => {
+  it("hides local-only servers from discover and activate even when installed", async () => {
+    const { client } = await connect(aliceToken);
+    const discover = text(await call(client, "discover_tools", { query: "desktop filesystem" }));
+    expect(discover).not.toMatch(/\bdesktop\b \(score/);
+    const r = await call(client, "activate_server", { server_name: "desktop" });
+    expect(r.isError).toBe(true);
+    expect(text(r)).toMatch(/Unknown server/);
   });
 });
 

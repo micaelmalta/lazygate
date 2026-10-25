@@ -56,12 +56,91 @@ describe("createBroker", () => {
     });
   });
 
-  it("lists the meta-tools plus active server tools (prefixed)", async () => {
-    expect(broker.listTools().tools).toHaveLength(8);
+  it("lists meta-tools only by default (activated tools stay off tools/list)", async () => {
+    const names = broker.listTools().tools.map((t) => t.name);
+    expect(names).toEqual(
+      expect.arrayContaining([
+        "discover_tools",
+        "activate_server",
+        "describe_tool",
+        "call_tool",
+        "discover_skill",
+        "load_skill",
+      ])
+    );
+    expect(names).not.toContain("connect_server");
+    expect(names).not.toContain("disconnect_server");
+    expect(names).toContain("read_skill_file");
+    expect(names).toHaveLength(9);
+
     await broker.callTool("activate_server", { server_name: "github" });
-    const tools = broker.listTools().tools;
-    expect(tools).toHaveLength(9);
-    expect(tools.at(-1)!.description).toMatch(/^\[github\]/);
+    expect(broker.listTools().tools).toHaveLength(9);
+    expect(broker.listTools().tools.map((t) => t.name)).not.toContain("github_tool");
+  });
+
+  it("merges activated tools into tools/list when expose is all or an allowlist", async () => {
+    router = new ToolRouter({
+      github: server({
+        description: "GitHub repositories and issues",
+        keywords: ["github", "issue"],
+        expose: "all",
+      }),
+    });
+    broker = createBroker({
+      router,
+      manager: mk.manager as unknown as ProcessManager,
+      skillRouter: null,
+    });
+    mk.manager.activate.mockImplementationOnce(async (name: string) => {
+      const tools: MCPTool[] = [
+        { name: "github_tool", description: "d", inputSchema: {}, serverName: name },
+        { name: "other_tool", description: "o", inputSchema: {}, serverName: name },
+      ];
+      mk.active.set(name, tools);
+      return tools;
+    });
+    await broker.callTool("activate_server", { server_name: "github" });
+    const all = broker.listTools().tools;
+    expect(all.map((t) => t.name)).toEqual(expect.arrayContaining(["github_tool", "other_tool"]));
+    expect(all.find((t) => t.name === "github_tool")!.description).toMatch(/^\[github\]/);
+
+    router = new ToolRouter({
+      github: server({ description: "GitHub", keywords: ["github"], expose: ["github_tool"] }),
+    });
+    mk.active.set("github", [
+      { name: "github_tool", description: "d", inputSchema: {}, serverName: "github" },
+      { name: "other_tool", description: "o", inputSchema: {}, serverName: "github" },
+    ]);
+    broker = createBroker({
+      router,
+      manager: mk.manager as unknown as ProcessManager,
+      skillRouter: null,
+    });
+    const listed = broker.listTools().tools.map((t) => t.name);
+    expect(listed).toContain("github_tool");
+    expect(listed).not.toContain("other_tool");
+  });
+
+  it("hides connect_server / disconnect_server unless access.connect is set", () => {
+    expect(broker.listTools().tools.map((t) => t.name)).not.toEqual(
+      expect.arrayContaining(["connect_server", "disconnect_server"])
+    );
+
+    const withGateway = createBroker({
+      router,
+      manager: mk.manager as unknown as ProcessManager,
+      skillRouter: null,
+      access: {
+        canUse: () => true,
+        prepare: () => undefined,
+        connect: async () => "ok",
+        disconnect: async () => "ok",
+      },
+    });
+    const names = withGateway.listTools().tools.map((t) => t.name);
+    expect(names).toContain("connect_server");
+    expect(names).toContain("disconnect_server");
+    expect(names).toHaveLength(11);
   });
 
   describe("argument validation", () => {
@@ -86,9 +165,33 @@ describe("createBroker", () => {
       expect(text(r)).not.toContain("postgres");
     });
 
-    it("shows description matches when no keyword matched", async () => {
-      const r = await broker.callTool("discover_tools", { query: "repositories" });
-      expect(text(r)).toMatch(/Matched description: repositories/);
+    it("shows description matches when score meets the minimum", async () => {
+      // Two description words (≥ DISCOVER_MIN_SCORE) — a single word alone is too weak.
+      // "issues" also hits the github keyword, so the line may include keywords + description.
+      const r = await broker.callTool("discover_tools", { query: "repositories issues" });
+      expect(text(r)).toMatch(/description:.*repositories/);
+      expect(text(r)).toContain("github");
+    });
+
+    it("on zero matches lists names only (no descriptions)", async () => {
+      const r = await broker.callTool("discover_tools", { query: "zzz_unrelated" });
+      expect(text(r)).toMatch(/No matching servers/);
+      expect(text(r)).toContain("• github");
+      expect(text(r)).toContain("• postgres");
+      expect(text(r)).not.toContain("GitHub repositories");
+      expect(text(r)).not.toContain("PostgreSQL queries");
+    });
+
+    it("caps results at DISCOVER_TOP_K", async () => {
+      const many: Record<string, ReturnType<typeof server>> = {};
+      for (let i = 0; i < 8; i++) {
+        many[`s${i}`] = server({ description: "shared topic", keywords: ["alpha"] });
+      }
+      router = new ToolRouter(many);
+      broker = createBroker({ router, manager: mk.manager as unknown as ProcessManager, skillRouter: null });
+      const r = await broker.callTool("discover_tools", { query: "alpha" });
+      const hits = [...text(r).matchAll(/\| s\d+ \(score:/g)];
+      expect(hits).toHaveLength(5);
     });
 
     it("does not route 'digital' or 'prompt' to a server with keywords 'git'/'pr'", async () => {
@@ -110,6 +213,7 @@ describe("createBroker", () => {
     it("activates a known server", async () => {
       const r = await broker.callTool("activate_server", { server_name: "github" });
       expect(text(r)).toMatch(/Activated "github" with 1 tools/);
+      expect(text(r)).toMatch(/describe_tool|call_tool/);
     });
 
     it("lists only the first sentence of each tool description on activation", async () => {
@@ -170,6 +274,84 @@ describe("createBroker", () => {
     });
   });
 
+  describe("describe_tool / call_tool", () => {
+    it("describe_tool returns one tool schema and activates if needed", async () => {
+      const r = await broker.callTool("describe_tool", { server: "github", tool: "github_tool" });
+      expect(r.isError).toBeUndefined();
+      expect(mk.manager.activate).toHaveBeenCalledWith("github", expect.anything(), undefined);
+      const body = JSON.parse(text(r));
+      expect(body).toEqual({
+        name: "github_tool",
+        description: "d",
+        inputSchema: {},
+      });
+    });
+
+    it("describe_tool rejects unknown tools and bad args", async () => {
+      await broker.callTool("activate_server", { server_name: "github" });
+      const missing = await broker.callTool("describe_tool", { server: "github", tool: "nope" });
+      expect(missing.isError).toBe(true);
+      expect(text(missing)).toMatch(/not found/);
+      const bad = await broker.callTool("describe_tool", { server: "github" });
+      expect(bad.isError).toBe(true);
+      expect(text(bad)).toMatch(/Invalid arguments/);
+    });
+
+    it("call_tool proxies without merging schemas into tools/list", async () => {
+      const r = await broker.callTool("call_tool", {
+        server: "github",
+        tool: "github_tool",
+        args: { a: 1 },
+      });
+      expect(text(r)).toBe("called");
+      expect(mk.manager.callTool).toHaveBeenCalledWith("github", "github_tool", { a: 1 });
+      expect(broker.listTools().tools.map((t) => t.name)).not.toContain("github_tool");
+    });
+
+    it("call_tool defaults args to {} and surfaces proxy errors", async () => {
+      await broker.callTool("activate_server", { server_name: "github" });
+      expect(text(await broker.callTool("call_tool", { server: "github", tool: "github_tool" }))).toBe(
+        "called"
+      );
+      expect(mk.manager.callTool).toHaveBeenCalledWith("github", "github_tool", {});
+      mk.manager.callTool.mockRejectedValueOnce(new Error("timed out"));
+      const err = await broker.callTool("call_tool", { server: "github", tool: "github_tool", args: {} });
+      expect(err.isError).toBe(true);
+      expect(text(err)).toMatch(/Error calling github_tool: timed out/);
+    });
+
+    it("describe_tool / call_tool accept bare names when tools are namespaced", async () => {
+      router = new ToolRouter({
+        github: server({
+          description: "GitHub",
+          keywords: ["github"],
+          namespaceTools: true,
+          expose: "all",
+        }),
+      });
+      mk.manager.activate.mockImplementation(async (name: string) => {
+        const tools: MCPTool[] = [
+          { name: `${name}__search`, description: "d", inputSchema: {}, serverName: name },
+        ];
+        mk.active.set(name, tools);
+        return tools;
+      });
+      broker = createBroker({
+        router,
+        manager: mk.manager as unknown as ProcessManager,
+        skillRouter: null,
+      });
+
+      const desc = await broker.callTool("describe_tool", { server: "github", tool: "search" });
+      expect(JSON.parse(text(desc)).name).toBe("github__search");
+      expect(broker.listTools().tools.map((t) => t.name)).toContain("github__search");
+
+      const call = await broker.callTool("call_tool", { server: "github", tool: "search", args: {} });
+      expect(text(call)).toBe("called");
+      expect(mk.manager.callTool).toHaveBeenCalledWith("github", "search", {});
+    });
+  });
+
   describe("proxying", () => {
     it("forwards calls for active tools", async () => {
       await broker.callTool("activate_server", { server_name: "github" });
@@ -193,11 +375,65 @@ describe("createBroker", () => {
       expect(mk.manager.activate).toHaveBeenCalledWith("github", expect.anything(), undefined);
     });
 
+    it("prefers an exact ToolIndex hit over a higher lexical score", async () => {
+      const { ToolIndex } = await import("../tool-index.js");
+      const idx = new ToolIndex();
+      const gh = server({ description: "GitHub repositories and issues", keywords: ["github", "issue"] });
+      const jira = server({
+        description: "Jira issue tracker",
+        keywords: ["jira", "issue", "ticket"],
+        command: "npx",
+        args: ["jira"],
+      });
+      idx.record("jira", jira, [{ name: "create_issue", description: "Create a Jira issue" }]);
+      // github also scores on "issue" but does not index create_issue
+      router = new ToolRouter({ github: gh, jira }, undefined, idx);
+      broker = createBroker({ router, manager: mk.manager as unknown as ProcessManager, skillRouter: null });
+
+      mk.manager.activate.mockImplementation(async (name: string) => {
+        const tools =
+          name === "jira"
+            ? [{ name: "create_issue", description: "d", inputSchema: {}, serverName: name }]
+            : [{ name: `${name}_tool`, description: "d", inputSchema: {}, serverName: name }];
+        mk.active.set(name, tools);
+        return tools;
+      });
+
+      const r = await broker.callTool("create_issue", {});
+      expect(r.isError).toBeUndefined();
+      expect(mk.manager.activate).toHaveBeenCalledWith("jira", expect.anything(), undefined);
+      expect(mk.manager.activate.mock.calls[0][0]).toBe("jira");
+    });
+
+    it("deactivates a wrong auto-activated server and tries the next candidate", async () => {
+      // Both score on "issue"; first candidate (github) exposes github_tool only.
+      mk.manager.activate.mockImplementation(async (name: string) => {
+        const tools =
+          name === "jira"
+            ? [{ name: "create_issue", description: "d", inputSchema: {}, serverName: name }]
+            : [{ name: "github_tool", description: "d", inputSchema: {}, serverName: name }];
+        mk.active.set(name, tools);
+        return tools;
+      });
+      router = new ToolRouter({
+        github: server({ description: "GitHub issues", keywords: ["github", "issue", "create"] }),
+        jira: server({ description: "Jira issues", keywords: ["jira", "issue", "create"] }),
+      });
+      broker = createBroker({ router, manager: mk.manager as unknown as ProcessManager, skillRouter: null });
+
+      const r = await broker.callTool("create_issue", {});
+      expect(text(r)).toBe("called");
+      expect(mk.manager.activate.mock.calls.map((c) => c[0])).toEqual(["github", "jira"]);
+      expect(mk.manager.deactivate).toHaveBeenCalledWith("github");
+      expect(mk.active.has("github")).toBe(false);
+      expect(mk.active.has("jira")).toBe(true);
+    });
+
     it("turns auto-activation failures into tool errors instead of throwing", async () => {
       mk.manager.activate.mockRejectedValueOnce(new Error("boom"));
       const r = await broker.callTool("github_tool", {});
       expect(r.isError).toBe(true);
-      expect(text(r)).toMatch(/auto-activating "github" failed: boom/);
+      expect(text(r)).toMatch(/auto-activating candidates failed: boom/);
     });
 
     it("reports truly unknown tools as errors", async () => {
@@ -214,24 +450,72 @@ describe("createBroker", () => {
     });
 
     it("discovers and loads skills", async () => {
-      const { mkdtempSync, writeFileSync } = await import("fs");
+      const { mkdtempSync, mkdirSync, writeFileSync } = await import("fs");
       const { tmpdir } = await import("os");
       const { join } = await import("path");
       const dir = mkdtempSync(join(tmpdir(), "cb-skill-"));
       writeFileSync(join(dir, "SKILL.md"), "---\n---\n");
       writeFileSync(join(dir, "INSTRUCTIONS.md"), "Do the thing");
+      mkdirSync(join(dir, "scripts"), { recursive: true });
+      writeFileSync(join(dir, "scripts", "run.sh"), "#!/bin/sh\necho hi\n");
 
       const skills = new SkillRouter({
         pdf: { description: "Work with PDF files", keywords: ["pdf"], path: join(dir, "SKILL.md") },
+        docx: { description: "Word documents", keywords: ["docx"], path: join(dir, "SKILL.md") },
       });
       broker = createBroker({ router, manager: mk.manager as unknown as ProcessManager, skillRouter: skills });
 
       const d = await broker.callTool("discover_skill", { query: "merge a pdf" });
-      expect(text(d)).toMatch(/pdf \(score: 2\)/);
+      expect(text(d)).toMatch(/pdf \(score: 3\)/);
       const l = await broker.callTool("load_skill", { skill_name: "pdf" });
-      expect(text(l)).toBe("# Skill: pdf\n\nDo the thing");
+      expect(text(l)).toContain("# Skill: pdf");
+      expect(text(l)).toContain("Do the thing");
+      expect(text(l)).toMatch(/Bundled files/);
+      expect(text(l)).toContain("skill://pdf/scripts/run.sh");
       const bad = await broker.callTool("load_skill", { skill_name: "nope" });
       expect(bad.isError).toBe(true);
+
+      const read = await broker.callTool("read_skill_file", {
+        skill_name: "pdf",
+        path: "scripts/run.sh",
+      });
+      expect(text(read)).toContain("echo hi");
+      const viaUri = await broker.callTool("read_skill_file", {
+        skill_name: "pdf",
+        path: "skill://pdf/INSTRUCTIONS.md",
+      });
+      expect(text(viaUri)).toContain("Do the thing");
+      expect(
+        (
+          await broker.callTool("read_skill_file", {
+            skill_name: "pdf",
+            path: "../outside.txt",
+          })
+        ).isError
+      ).toBe(true);
+
+      const none = await broker.callTool("discover_skill", { query: "zzz_unrelated" });
+      expect(text(none)).toMatch(/No matching skills/);
+      expect(text(none)).toContain("• pdf");
+      expect(text(none)).not.toContain("Work with PDF");
+    });
+
+    it("truncates oversized skill bodies with a read-more pointer", async () => {
+      const { mkdtempSync, writeFileSync } = await import("fs");
+      const { tmpdir } = await import("os");
+      const { join } = await import("path");
+      const dir = mkdtempSync(join(tmpdir(), "cb-skill-big-"));
+      const body = "x".repeat(30_000);
+      writeFileSync(join(dir, "SKILL.md"), "---\n---\n");
+      writeFileSync(join(dir, "INSTRUCTIONS.md"), body);
+      const skills = new SkillRouter({
+        big: { description: "A large skill", keywords: ["big"], path: join(dir, "SKILL.md") },
+      });
+      broker = createBroker({ router, manager: mk.manager as unknown as ProcessManager, skillRouter: skills });
+      const l = await broker.callTool("load_skill", { skill_name: "big" });
+      expect(text(l)).toMatch(/truncated/);
+      expect(text(l)).toMatch(/Read more:/);
+      expect(text(l).length).toBeLessThan(body.length);
     });
 
     it("hides skills the caller has not installed when canUseSkill is set", async () => {

@@ -307,7 +307,7 @@ describe("interactive: false", () => {
 describe("remote authorization (gateway callback)", () => {
   it("exchanges a code at the given redirect URI and stores a per-user token", async () => {
     const redirectUri = "http://127.0.0.1:8787/oauth/callback";
-    const { authorizationUrl, state } = await startRemoteAuthorization({
+    const { authorizationUrl, state, bindToken } = await startRemoteAuthorization({
       serverName: "github",
       serverUrl: SERVER_URL,
       config: { clientId: "pre" },
@@ -320,7 +320,9 @@ describe("remote authorization (gateway callback)", () => {
     expect(auth.searchParams.get("state")).toBe(state);
     expect(auth.searchParams.get("code_challenge")).toBeTruthy();
 
-    const { serverName, owner } = await finishRemoteAuthorization(state, "auth-code-1");
+    await expect(finishRemoteAuthorization(state, "auth-code-1")).rejects.toThrow(/same browser/i);
+
+    const { serverName, owner } = await finishRemoteAuthorization(state, "auth-code-1", bindToken);
     expect(serverName).toBe("github");
     expect(owner).toBe("alice");
     expect(pendingAuthCount()).toBe(0);
@@ -330,20 +332,20 @@ describe("remote authorization (gateway callback)", () => {
     expect(tokenRequests[0].get("redirect_uri")).toBe(redirectUri);
 
     // state is single-use
-    await expect(finishRemoteAuthorization(state, "auth-code-1")).rejects.toThrow(/invalid or expired/);
+    await expect(finishRemoteAuthorization(state, "auth-code-1", bindToken)).rejects.toThrow(/invalid or expired/);
 
     expect(clearStoredToken("github", "alice")).toBe(true);
     expect(hasStoredToken("github", "alice")).toBe(false);
   });
 
   it("stores a shared token when owner is omitted", async () => {
-    const { state } = await startRemoteAuthorization({
+    const { state, bindToken } = await startRemoteAuthorization({
       serverName: "shared",
       serverUrl: SERVER_URL,
       config: { clientId: "pre" },
       redirectUri: "http://gw/oauth/callback",
     });
-    await finishRemoteAuthorization(state, "c");
+    await finishRemoteAuthorization(state, "c", bindToken);
     expect(hasStoredToken("shared")).toBe(true);
     expect(hasStoredToken("shared", "alice")).toBe(false);
   });
