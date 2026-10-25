@@ -2,7 +2,7 @@
 // The gateway web UI: static assets, token-gated API, admin split, stored per-user credentials.
 
 import { describe, it, expect, beforeAll, afterAll } from "@jest/globals";
-import { mkdtempSync, writeFileSync, readFileSync, readdirSync, rmSync } from "fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync, existsSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { fileURLToPath } from "url";
@@ -13,6 +13,7 @@ import { startGateway, type Gateway } from "../gateway/server.js";
 import { TokenStore } from "../gateway/tokens.js";
 import { SecretStore } from "../gateway/credentials.js";
 import { UserVault, mergeCreds } from "../gateway/vault.js";
+import { UserProfileStore } from "../gateway/profile.js";
 import { AuditLog } from "../gateway/audit.js";
 
 const FIXTURE = fileURLToPath(new URL("./fixtures/cred-server.mjs", import.meta.url));
@@ -84,7 +85,26 @@ beforeAll(async () => {
       },
     })
   );
-  writeFileSync(join(dir, "skills.json"), JSON.stringify({ skills: {} }));
+  const skillPath = join(dir, "docx-skill", "SKILL.md");
+  mkdirSync(join(dir, "docx-skill"), { recursive: true });
+  writeFileSync(skillPath, "---\nname: docx\n---\nMake a Word doc.\n");
+  writeFileSync(
+    join(dir, "skills.json"),
+    JSON.stringify({
+      skills: {
+        docx: {
+          description: "Create or edit Word documents",
+          keywords: ["word", "docx"],
+          path: skillPath,
+        },
+        missing: {
+          description: "Skill whose file is gone",
+          keywords: ["gone"],
+          path: join(dir, "nope", "SKILL.md"),
+        },
+      },
+    })
+  );
 
   const tokens = new TokenStore(dir);
   admin = tokens.create({ user: "root", admin: true }).token;
@@ -92,12 +112,25 @@ beforeAll(async () => {
   bob = tokens.create({ user: "bob" }).token;
   const secrets = new SecretStore(dir, {});
   secrets.set("shared/token", "shared-secret-value");
+  const profiles = new UserProfileStore(dir);
+  // Alice (and admin) install every server so credential/MCP tests match pre-profile behavior.
+  // Bob stays empty so marketplace install tests can start from uninstalled.
+  const registry = loadRegistry(["--config", join(dir, "servers.json")], dir);
+  for (const name of registry.router.listAll()) {
+    profiles.installServer("alice", name);
+    profiles.installServer("root", name);
+  }
+  for (const name of registry.skillRouter.listAll()) {
+    profiles.installSkill("alice", name);
+    profiles.installSkill("root", name);
+  }
 
   gw = await startGateway({
-    registry: loadRegistry(["--config", join(dir, "servers.json")], dir),
+    registry,
     tokens,
     secrets,
     vault: new UserVault(dir, {}),
+    profiles,
     audit: new AuditLog(join(dir, "audit.log")),
     port: 0,
     idleMs: 60_000,
@@ -122,6 +155,7 @@ describe("static assets", () => {
       expect(r.status).toBe(200);
       expect(r.headers.get("content-type")).toContain(type);
       expect(r.headers.get("content-security-policy")).toContain("script-src 'self'");
+      expect(r.headers.get("content-security-policy")).toContain("fonts.googleapis.com");
       expect(r.headers.get("x-frame-options")).toBe("DENY");
       expect(r.headers.get("cache-control")).toBe("no-store");
     }
@@ -134,6 +168,25 @@ describe("static assets", () => {
     expect(() => new Function(js)).not.toThrow();
     expect(js).not.toContain("innerHTML");
     expect(js).not.toMatch(/style\s*:/); // inline styles are blocked by the CSP
+    expect(js).toContain("catalog/servers");
+    expect(js).toContain("catalog/skills");
+    expect(js).toContain("profile/servers/");
+    expect(js).toContain("profile/skills/");
+    expect(js).toContain("Configure");
+    expect(js).toContain("Disable");
+    expect(js).toContain("Enable");
+    expect(js).toContain("serverSheet");
+    expect(js).toContain("skillSheet");
+    expect(js).toContain("Manage servers");
+    expect(js).toContain("Manage skills");
+    expect(js).toContain("USER_TABS");
+    expect(js).toContain("ADMIN_TABS");
+    expect(js).toContain("manage-mcps");
+    expect(js).toContain("manage-skills");
+    expect(js).toContain("adminCatalog");
+    expect(js).toContain("admin-menu");
+    expect(js).not.toContain("serversView");
+    expect(js).not.toContain("Server settings");
   });
 
   it("rejects foreign Host headers", async () => {
@@ -204,10 +257,21 @@ describe("secrets (admin)", () => {
     expect(list.json.secrets).toContain("datadog/api_key");
     expect(list.text).not.toContain("dd-super-secret");
     expect(readFileSync(join(dir, "secrets.json"), "utf-8")).toContain("dd-super-secret");
+    expect(list.json.required).toEqual(
+      expect.arrayContaining([expect.objectContaining({ path: "shared/token", servers: ["shared"], stored: true })])
+    );
 
     expect((await ui("PUT", "/ui/api/secrets", admin, { path: "../etc", value: "x" })).status).toBe(400);
     expect((await ui("DELETE", "/ui/api/secrets?path=datadog%2Fapi_key", admin)).status).toBe(204);
     expect((await ui("DELETE", "/ui/api/secrets?path=datadog%2Fapi_key", admin)).status).toBe(404);
+  });
+
+  it("exposes secretRefs on servers for the admin settings UI", async () => {
+    const r = await ui("GET", "/ui/api/servers", admin);
+    const shared = r.json.servers.find((s: any) => s.name === "shared");
+    expect(shared.secretRefs).toEqual(
+      expect.arrayContaining([expect.objectContaining({ path: "shared/token", stored: true })])
+    );
   });
 });
 
@@ -241,7 +305,8 @@ describe("my credentials (vault)", () => {
     expect((await call(client, "jira_probe")).content[0].text).toBe(`len:${KEY.length}:${rev(KEY)}`);
     expect((await call(client, "jira_echo")).content[0].text).toBe("[redacted]");
 
-    // Bob has nothing stored: told what to send.
+    // Bob has jira installed but nothing stored: told what to send.
+    await ui("POST", "/ui/api/profile/servers/jira", bob, {});
     const other = await connect(bob);
     const refused = await call(other, "activate_server", { server_name: "jira" });
     expect(refused.isError).toBe(true);
@@ -255,6 +320,7 @@ describe("my credentials (vault)", () => {
   });
 
   it("picks up a key saved after the session began", async () => {
+    await ui("POST", "/ui/api/profile/servers/jira", bob, {});
     const client = await connect(bob);
     expect((await call(client, "activate_server", { server_name: "jira" })).isError).toBe(true);
     await ui("PUT", "/ui/api/connections/jira/token", bob, { value: "bob-late-key" });
@@ -295,6 +361,187 @@ describe("status and activity", () => {
 
     const sneaky = await ui("GET", "/ui/api/audit?all=1", alice);
     expect(sneaky.json.events.every((e: any) => e.user === "alice")).toBe(true);
+  });
+});
+
+describe("marketplace catalog", () => {
+  beforeAll(async () => {
+    // Ensure bob starts this suite with an empty install list (other suites may install for him).
+    for (const name of ["githubish", "jira", "plain", "shared"]) {
+      await ui("DELETE", `/ui/api/profile/servers/${name}`, bob);
+    }
+    for (const name of ["docx", "missing"]) {
+      await ui("DELETE", `/ui/api/profile/skills/${name}`, bob);
+    }
+  });
+
+  it("lists MCP servers for any signed-in user with connect status", async () => {
+    const r = await ui("GET", "/ui/api/catalog/servers", bob);
+    expect(r.status).toBe(200);
+    const names = r.json.servers.map((s: any) => s.name).sort();
+    expect(names).toEqual(["githubish", "jira", "plain", "shared"]);
+    const jira = r.json.servers.find((s: any) => s.name === "jira");
+    expect(jira).toMatchObject({
+      needsCredentials: true,
+      connected: false,
+      installed: false,
+      transport: "stdio",
+      keywords: ["jira"],
+    });
+    const plain = r.json.servers.find((s: any) => s.name === "plain");
+    expect(plain).toMatchObject({ needsCredentials: false, connected: true, installed: false });
+  });
+
+  it("lists skills including availability on disk", async () => {
+    const r = await ui("GET", "/ui/api/catalog/skills", alice);
+    expect(r.status).toBe(200);
+    expect(r.json.configured).toBe(true);
+    expect(r.json.skills).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: "docx", available: true, installed: true, keywords: ["word", "docx"] }),
+        expect.objectContaining({ name: "missing", available: false, installed: true }),
+      ])
+    );
+  });
+
+  it("does not require admin for the catalog", async () => {
+    expect((await ui("GET", "/ui/api/catalog/servers", bob)).status).toBe(200);
+    expect((await ui("GET", "/ui/api/catalog/skills", bob)).status).toBe(200);
+    expect((await ui("GET", "/ui/api/catalog/servers")).status).toBe(401);
+  });
+
+  it("lets a user install and uninstall servers and skills", async () => {
+    expect((await ui("POST", "/ui/api/profile/servers/jira", bob, {})).status).toBe(200);
+    expect((await ui("GET", "/ui/api/catalog/servers", bob)).json.servers.find((s: any) => s.name === "jira").installed).toBe(true);
+    expect((await ui("DELETE", "/ui/api/profile/servers/jira", bob)).status).toBe(204);
+    expect((await ui("GET", "/ui/api/catalog/servers", bob)).json.servers.find((s: any) => s.name === "jira").installed).toBe(false);
+
+    expect((await ui("POST", "/ui/api/profile/skills/docx", bob, {})).status).toBe(200);
+    expect((await ui("GET", "/ui/api/catalog/skills", bob)).json.skills.find((s: any) => s.name === "docx").installed).toBe(true);
+    expect((await ui("DELETE", "/ui/api/profile/skills/docx", bob)).status).toBe(204);
+
+    expect((await ui("POST", "/ui/api/profile/servers/nope", bob, {})).status).toBe(404);
+    expect((await ui("POST", "/ui/api/profile/servers/jira", alice, {})).status).toBe(200); // already installed → still 200
+  });
+
+  it("hides uninstalled servers from discover_tools", async () => {
+    const client = await connect(bob);
+    const found = await call(client, "discover_tools", { query: "jira" });
+    expect(found.content[0].text).not.toMatch(/jira test server/);
+    expect((await call(client, "activate_server", { server_name: "jira" })).isError).toBe(true);
+
+    await ui("POST", "/ui/api/profile/servers/jira", bob, {});
+    // New session picks up the install list
+    const client2 = await connect(bob);
+    // Still needs credentials — but server is known
+    const act = await call(client2, "activate_server", { server_name: "jira" });
+    expect(act.isError).toBe(true);
+    expect(act.content[0].text).toMatch(/credentials|Failed to activate|needs/i);
+    await ui("DELETE", "/ui/api/profile/servers/jira", bob);
+  });
+});
+
+describe("admin catalog CRUD", () => {
+  it("refuses non-admins", async () => {
+    expect((await ui("POST", "/ui/api/servers", alice, { name: "x", command: "echo" })).status).toBe(403);
+    expect((await ui("POST", "/ui/api/skills", alice, { name: "x", body: "hi" })).status).toBe(403);
+  });
+
+  it("creates, edits and deletes an MCP server", async () => {
+    const created = await ui("POST", "/ui/api/servers", admin, {
+      name: "curlish",
+      description: "HTTP fetch helper",
+      keywords: ["curl", "http"],
+      command: process.execPath,
+      args: ["-e", "console.log(1)"],
+    });
+    expect(created.status).toBe(200);
+    expect(created.json.name).toBe("curlish");
+    const onDisk = JSON.parse(readFileSync(join(dir, "servers.json"), "utf-8"));
+    expect(onDisk.servers.curlish.command).toBe(process.execPath);
+
+    const patched = await ui("PATCH", "/ui/api/servers/curlish", admin, {
+      description: "Updated fetch helper",
+      keywords: ["curl"],
+    });
+    expect(patched.status).toBe(200);
+    expect(patched.json.description).toBe("Updated fetch helper");
+
+    expect((await ui("DELETE", "/ui/api/servers/curlish", admin)).status).toBe(204);
+    expect(JSON.parse(readFileSync(join(dir, "servers.json"), "utf-8")).servers.curlish).toBeUndefined();
+  });
+
+  it("creates, edits and deletes a managed skill with inline body", async () => {
+    const created = await ui("POST", "/ui/api/skills", admin, {
+      name: "memo",
+      description: "Write a short memo",
+      keywords: ["memo", "note"],
+      body: "Always start with a date line.",
+    });
+    expect(created.status).toBe(200);
+    expect(created.json.body).toContain("date line");
+    expect(created.json.managed).toBe(true);
+    expect(existsSync(created.json.path)).toBe(true);
+
+    const updated = await ui("PUT", "/ui/api/skills/memo", admin, {
+      description: "Memos",
+      keywords: ["memo"],
+      body: "Use bullet points.",
+    });
+    expect(updated.status).toBe(200);
+    expect(updated.json.body).toContain("bullet");
+
+    await ui("POST", "/ui/api/profile/skills/memo", alice, {});
+    const client = await connect(alice);
+    const loaded = await call(client, "load_skill", { skill_name: "memo" });
+    expect(loaded.isError).toBeFalsy();
+    expect(loaded.content[0].text).toContain("bullet points");
+
+    expect((await ui("DELETE", "/ui/api/skills/memo", admin)).status).toBe(204);
+    expect((await ui("GET", "/ui/api/catalog/skills", alice)).json.skills.find((s: any) => s.name === "memo")).toBeUndefined();
+  });
+
+  it("disables servers and skills for non-admins while admins still see them", async () => {
+    await ui("POST", "/ui/api/profile/servers/plain", bob, {});
+    expect((await ui("GET", "/ui/api/catalog/servers", bob)).json.servers.find((s: any) => s.name === "plain")).toBeTruthy();
+
+    const disabled = await ui("PATCH", "/ui/api/servers/plain", admin, { disabled: true });
+    expect(disabled.status).toBe(200);
+    expect(disabled.json.disabled).toBe(true);
+    expect(JSON.parse(readFileSync(join(dir, "servers.json"), "utf-8")).servers.plain.disabled).toBe(true);
+
+    expect((await ui("GET", "/ui/api/catalog/servers", bob)).json.servers.find((s: any) => s.name === "plain")).toBeUndefined();
+    const adminPlain = (await ui("GET", "/ui/api/catalog/servers", admin)).json.servers.find((s: any) => s.name === "plain");
+    expect(adminPlain).toMatchObject({ disabled: true });
+
+    const client = await connect(bob);
+    const act = await call(client, "activate_server", { server_name: "plain" });
+    expect(act.isError).toBe(true);
+    expect(act.content[0].text).toMatch(/Unknown server|"plain"/);
+
+    await ui("PATCH", "/ui/api/servers/plain", admin, { disabled: false });
+    expect((await ui("GET", "/ui/api/catalog/servers", bob)).json.servers.find((s: any) => s.name === "plain")).toBeTruthy();
+
+    await ui("POST", "/ui/api/skills", admin, {
+      name: "gated",
+      description: "Temporarily gated",
+      keywords: ["gated"],
+      body: "Secret instructions.",
+    });
+    await ui("POST", "/ui/api/profile/skills/gated", bob, {});
+    expect((await ui("PUT", "/ui/api/skills/gated", admin, { disabled: true })).json.disabled).toBe(true);
+    expect((await ui("GET", "/ui/api/catalog/skills", bob)).json.skills.find((s: any) => s.name === "gated")).toBeUndefined();
+    expect((await ui("GET", "/ui/api/catalog/skills", admin)).json.skills.find((s: any) => s.name === "gated").disabled).toBe(true);
+
+    const client2 = await connect(bob);
+    const load = await call(client2, "load_skill", { skill_name: "gated" });
+    expect(load.isError).toBe(true);
+
+    await ui("PUT", "/ui/api/skills/gated", admin, { disabled: false });
+    const client3 = await connect(bob);
+    expect((await call(client3, "load_skill", { skill_name: "gated" })).isError).toBeFalsy();
+    await ui("DELETE", "/ui/api/skills/gated", admin);
+    await ui("DELETE", "/ui/api/profile/servers/plain", bob);
   });
 });
 
