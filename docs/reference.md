@@ -251,34 +251,46 @@ lazygate revert --from cursor --servers   # or --skills / --plugins
 
 ## Benchmark
 
+Measures **your** catalog with `claude -p` (needs `claude` on `PATH` and a working Anthropic
+auth). Runs against `~/.config/lazygate/servers.json` and `skills.json` by default.
+
 ```bash
-lazygate benchmark
-lazygate benchmark --servers fetch-mcp,jira   # subset
-lazygate benchmark --rounds 3                 # average over rounds
+npm run build
+lazygate benchmark                                      # MCP + skills via `claude -p`
+lazygate benchmark --runner codex --model gpt-6-luna    # same via Codex / Bifrost
+lazygate benchmark --estimate                           # local chars÷4 preview, no API
+lazygate benchmark --mcp-only                           # servers only
+lazygate benchmark --skills-only                        # skills only
+lazygate benchmark --servers fetch-mcp,jira
+lazygate benchmark --skills loi,writer,rlm
+lazygate benchmark --rounds 3                           # average over rounds
 ```
 
-**Illustrative numbers** from one older run (`claude -p`, 9 real MCP servers, 2 rounds, an earlier
-build with only 4 meta-tools). Today there are 11 meta-tools (9 listed in stdio), so idle cost is
-higher — treat the table as order-of-magnitude idle savings, not a guarantee. Re-run on your catalog
-and current build for fresh figures:
+### What it measures
 
-| Strategy | Tokens | Cost / request |
-|---|---|---|
-| baseline — no MCP at all | 283 | $0.00091 |
-| direct — all 9 servers upfront | 30,076 | $0.11324 |
-| **lazygate idle** — meta-tools only | **1,056** | **$0.00342** |
-| activated — lazygate + all 9 servers | 30,352 | $0.11427 |
+| Strategy | Meaning |
+|---|---|
+| `baseline` | No MCP servers |
+| `mcp-direct` | All runnable servers loaded upfront |
+| `lazygate` | Meta-tools only (idle) |
+| `mcp-active` | Meta-tools + every server (worst case) |
+| `skills-full` | Every skill body appended to the system prompt |
+| `skills-stubs` | Frontmatter + pointer only (post-split) |
+| `skills-one` | Stubs for all + the largest skill loaded in full |
 
-That idle comparison was about 29,000 fewer tokens (~96%) **vs loading every server upfront, idle
-only**. Activating servers closes most of the gap (see “activated” vs “direct”).
+Skill strategies model what a client pays when it reads `SKILL.md` into context before vs after
+lazygate's split. They do not call `discover_skill` / `load_skill`.
 
-**Caveats.** Each run is a single cold-cache turn, so these are first-turn costs. In a long session tool
-schemas are prompt-cached and cost far less per turn, so the dollar figures overstate steady-state
-savings; the token reduction (context-window space) is real for idle. The worst case — every server
-active at once — costs about the same as loading everything directly; normal sessions activate one or
-two servers. A multi-turn “1–2 servers activated” strategy is not in the table yet — add it when you
-re-benchmark. HTTP servers are benchmarked only if they have a static `Authorization` header (OAuth
-can't run under `claude -p`); skipped servers are listed in the output.
+**Runners.** `--runner claude` (default) uses `claude -p` and is the better measure of MCP tool-schema
+cost. `--runner codex --model gpt-6-luna` is a solid measure of skill split savings; Codex carries a
+large fixed system prompt (~14k tokens) and often does not put MCP tool schemas into `input_tokens`
+the same way, so MCP deltas can look near-zero even when servers start.
+
+**Caveats.** Each run is a single cold-cache turn, so dollar figures overstate steady-state cost;
+the idle token reduction (context-window space) is real. Activating every server closes most of the
+MCP gap (`mcp-active` ≈ `mcp-direct`). HTTP servers are included only when they have a static
+`Authorization` header (OAuth can't run under `claude -p`); skipped entries are listed in the
+output. Re-run after catalog or meta-tool changes.
 
 ---
 
