@@ -76,7 +76,7 @@ Plain `.mjs` files, no build step (except `migrate.mjs`, which imports `dist/mig
 - `migrate.mjs` — reads servers from `~/.claude.json` / `~/.cursor/mcp.json` / `~/.config/opencode/opencode.json` (+ plugin `.mcp.json` files, labelled `plugin`), converts to broker format with a `migratedFrom` marker, extracts secrets (env and headers) to the shell file, registers skills/commands **in place** (no file moves), splits `SKILL.md`, adds the `SessionStart` hook, and registers the broker in the source client (`~/.claude.json`, Cursor `mcpServers`, OpenCode `mcp`). Every file it modifies is backed up (`.bak-<timestamp>`) and written atomically.
 - `revert-migration.mjs` — inverse: writes servers back in each client's own format, re-enables exactly the plugins migrate disabled, merges `INSTRUCTIONS.md` back, removes the hook, removes the broker from `~/.claude.json` only when no migrated servers remain.
 - `session-sync.mjs` — SessionStart hook; prunes stale entries, re-splits plugin skills, re-syncs skills while **preserving `migratedFrom`/`plugin`** markers. Never throws.
-- `benchmark.mjs` — runs `claude -p` with four strategies (no MCP, all servers direct, broker idle, broker + all activated); single cold-cache turn, so cost figures overstate steady-state savings.
+- `benchmark.mjs` — runs `claude -p` for MCP strategies (baseline, direct, lazygate idle, all activated) and skill strategies (full bodies, stubs, one loaded); single cold-cache turn, so cost figures overstate steady-state savings.
 
 ### Rename (context-broker → lazygate)
 
