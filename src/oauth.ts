@@ -55,7 +55,7 @@ export interface GetAccessTokenOptions {
 export class NeedsAuthorizationError extends Error {
   constructor(readonly serverName: string) {
     super(
-      `Server "${serverName}" needs OAuth. Open the gateway UI (My credentials → Connect) or call connect_server.`
+      `Server "${serverName}" needs OAuth. Open the gateway UI (Credentials → Connect) or call connect_server.`
     );
     this.name = "NeedsAuthorizationError";
   }

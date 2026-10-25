@@ -30,6 +30,7 @@ const { startGateway, type Gateway } = await import("../gateway/server.js");
 const { TokenStore } = await import("../gateway/tokens.js");
 const { SecretStore } = await import("../gateway/credentials.js");
 const { UserVault } = await import("../gateway/vault.js");
+const { UserProfileStore } = await import("../gateway/profile.js");
 const { AuditLog } = await import("../gateway/audit.js");
 const { hasStoredToken, tokenPath } = await import("../oauth.js");
 
@@ -86,11 +87,19 @@ beforeAll(async () => {
   alice = tokens.create({ user: "alice", groups: ["eng"] }).token;
   admin = tokens.create({ user: "root", admin: true }).token;
 
+  const registry = loadRegistry(["--config", join(dir, "servers.json")], dir);
+  const profiles = new UserProfileStore(dir);
+  for (const name of registry.router.listAll()) {
+    profiles.installServer("alice", name);
+    profiles.installServer("root", name);
+  }
+
   gw = await startGateway({
-    registry: loadRegistry(["--config", join(dir, "servers.json")], dir),
+    registry,
     tokens,
     secrets: new SecretStore(dir, {}),
     vault: new UserVault(dir, {}),
+    profiles,
     audit: new AuditLog(join(dir, "audit.log")),
     port: 0,
     idleMs: 60_000,

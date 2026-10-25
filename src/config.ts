@@ -44,6 +44,8 @@ const ServerSchema = z
     toolTimeoutMs: z.number().int().positive().optional(),
     migratedFrom: z.string().optional(),
     disabledPlugins: z.array(z.string()).optional(),
+    /** Soft-disable: hidden from non-admins; activate/load refuse for everyone. */
+    disabled: z.boolean().optional(),
   })
   .passthrough()
   .refine((c) => Boolean(c.command) || Boolean(c.url), {
@@ -57,6 +59,8 @@ const SkillSchema = z
     path: z.string().min(1),
     migratedFrom: z.string().optional(),
     plugin: z.string().optional(),
+    /** Soft-disable: hidden from non-admins; load_skill refuses for everyone. */
+    disabled: z.boolean().optional(),
   })
   .passthrough();
 

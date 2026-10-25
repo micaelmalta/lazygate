@@ -1,172 +1,132 @@
 # lazygate
 
-> A lazy-loading MCP gateway for Claude Code (and Cursor, OpenCode). Instead of putting every tool
-> schema in the context window on every request, lazygate exposes **6 meta-tools** and starts real
-> MCP servers and skills only when the task needs them.
+**Stop paying for every MCP tool on every prompt.**
+
+lazygate sits between your coding agent (Claude Code, Cursor, OpenCode) and your MCP servers. The agent sees a handful of meta-tools; real servers and skills start only when the task needs them.
 
 ```
-Claude Code ── discover_tools · activate_server · deactivate_server · list_active_servers
-               discover_skill · load_skill
-                         │
-                 ┌───────▼───────┐
-                 │   lazygate    │
-                 └───────┬───────┘
-          spawned on demand, only when needed
-            │        │         │         │
-          jira    github   postgres   fetch-mcp
+You  →  discover · activate · load skill
+              ↓
+         lazygate
+              ↓
+    jira · github · datadog · …  (on demand)
 ```
 
-**~96% fewer input tokens when idle** (30,000 → ~1,000 across 9 servers; see
-[benchmark](docs/reference.md#benchmark) for the method and caveats).
+**~96% fewer input tokens when idle** across a typical multi-server setup (see [benchmark notes](docs/reference.md#benchmark)).
 
-> Formerly `context-broker`. Existing installs upgrade in place — see
-> [Upgrading](docs/reference.md#upgrading-from-context-broker).
+Formerly `context-broker` — [existing installs upgrade in place](docs/reference.md#upgrading-from-context-broker).
 
 ---
 
-## Quick start
+## Why teams use it
+
+| Without lazygate | With lazygate |
+|---|---|
+| Every server’s tool schemas ride along on every turn | Only meta-tools until you activate something |
+| Secrets scattered in client JSON | Vault, `${secret:…}`, and per-user credentials |
+| Each developer maintains their own MCP zoo | One shared catalog; install what you need |
+| Skills dump full instructions into the session | Discover → load the body on demand |
+
+---
+
+## Two ways to run
+
+### Personal (stdio)
+
+One agent, one machine. Migrate your existing MCP config and go.
 
 ```bash
-# 1. Import your existing MCP servers and skills (backs up every file it touches)
-npx -y lazygate migrate --from claude        # or: cursor, opencode
-
-# 2. Restart your client and ask:  "list active servers"
-#    → "No servers currently active."   (lazygate is running; nothing spawned yet)
+npx -y lazygate migrate --from cursor   # or: claude, opencode
+# restart the client — ask “list active servers”
 ```
 
-`migrate` registers lazygate in your client for you, so there is nothing else to configure. Add
-`--dry-run` to preview. To undo: `npx -y lazygate revert --from claude`.
+Requires Node.js ≥ 18.17. Add `--dry-run` to preview; `npx -y lazygate revert --from cursor` to undo.
 
-Requires Node.js ≥ 18.17.
+### Team gateway (HTTP)
 
-### Manual install
+One shared instance for several people or clients — Streamable HTTP, personal access tokens, per-user sessions, and a web catalog.
+
+```bash
+npx -y lazygate token create --user you --admin
+npx -y lazygate serve
+# → MCP  http://127.0.0.1:8787/mcp
+# → UI   http://127.0.0.1:8787/ui
+```
+
+Open `/ui`, paste a token, **Install** servers and skills, **Connect** credentials. Full guide: [docs/gateway.md](docs/gateway.md).
+
+---
+
+## What the agent sees
+
+Six meta-tools instead of dozens of schemas:
+
+| Tool | Job |
+|---|---|
+| `discover_tools` | Find the right server for a task |
+| `activate_server` / `deactivate_server` | Start or stop it |
+| `list_active_servers` | What’s running in this session |
+| `discover_skill` / `load_skill` | Find and load playbooks on demand |
+
+Example:
+
+```
+You:    Search GitHub for issues labelled bug
+Agent:  discover_tools → activate_server("github") → search_issues(...)
+```
+
+Unknown tool calls auto-activate the best-matching server and retry. Details: [Routing](docs/reference.md#routing).
+
+---
+
+## Catalog & credentials
+
+- **Servers** — `~/.config/lazygate/servers.json` (stdio or HTTP/OAuth). `description` + `keywords` drive discovery.
+- **Skills** — `~/.config/lazygate/skills.json`; bodies load only via `load_skill`.
+- **Gateway UI** — browse, install, connect OAuth/API keys; admins manage the catalog, tokens, and shared secrets.
+- Edits to config apply without restarting.
+
+Example server entry and every field: [Configuration](docs/reference.md#configuration).
+
+---
+
+## Migrate from Claude, Cursor, or OpenCode
+
+```bash
+npx -y lazygate migrate --from claude [--dry-run] [--servers | --skills | --plugins]
+npx -y lazygate revert  --from claude [--dry-run]
+```
+
+`migrate` converts servers, extracts secrets to your shell, registers skills in place, wires lazygate into the client, and keeps backups of every file it touches. Limits and details: [Migration](docs/reference.md#migration).
+
+---
+
+## Manual install (stdio)
 
 ```bash
 claude mcp add --scope user lazygate -- npx -y lazygate
 ```
 
-or in `~/.claude.json` / `.mcp.json`:
+Or in `~/.claude.json` / Cursor `mcp.json`:
 
 ```json
 { "mcpServers": { "lazygate": { "command": "npx", "args": ["-y", "lazygate"] } } }
 ```
 
-From source:
-
-```bash
-git clone https://github.com/micaelmalta/lazygate.git && cd lazygate
-npm install && npm run build
-# then use: { "command": "node", "args": ["/absolute/path/to/lazygate/dist/index.js"] }
-```
-
-Use the name `lazygate` everywhere, so manual setup and `migrate` don't give you two instances.
+From source: `git clone` → `npm install && npm run build` → point the client at `dist/index.js`. Use the name **`lazygate`** so migrate doesn’t create a second entry.
 
 ---
 
-## Configure
+## Docs & development
 
-Servers live in `~/.config/lazygate/servers.json` (created by `migrate`, or write it by hand):
-
-```json
-{
-  "servers": {
-    "github": {
-      "description": "GitHub — search issues and pull requests, read repositories",
-      "keywords": ["github", "issue", "pull request"],
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-github"],
-      "env": { "GITHUB_TOKEN": "${GITHUB_TOKEN}" },
-      "autoActivate": false
-    },
-    "docs": {
-      "description": "Remote docs server",
-      "keywords": ["docs", "api"],
-      "type": "http",
-      "url": "https://mcp.example.com/mcp"
-    }
-  }
-}
-```
-
-- `description` and `keywords` are what `discover_tools` matches against.
-- `autoActivate: true` starts a server when lazygate starts; the default is on demand.
-- HTTP servers support static headers and OAuth (auto-discovered, with dynamic client registration).
-- Edits apply without a restart.
-
-Every field, OAuth, `inheritEnv` (limit which environment variables a server sees) and skills are in
-the [reference](docs/reference.md#configuration).
-
----
-
-## How it works
-
-| Tool | What it does |
+| Doc | Contents |
 |---|---|
-| `discover_tools` | Ranks configured servers against a query |
-| `activate_server` | Starts a server, does the MCP handshake, exposes its tools |
-| `deactivate_server` | Stops a server and frees it |
-| `list_active_servers` | Lists running servers and their tools |
-| `discover_skill` | Ranks configured skills against a query |
-| `load_skill` | Returns a skill's full instructions on demand |
-
-```
-You:    "Search GitHub for issues labelled 'bug'"
-Claude: discover_tools("search github issues")  → github, fetch-mcp
-Claude: activate_server("github")               → 12 tools now available
-Claude: search_issues(label: "bug")
-```
-
-If Claude calls a tool that isn't active yet, lazygate activates the best-matching server and retries.
-Whenever the tool set changes it sends `notifications/tools/list_changed`. Failures are returned with
-`isError: true`. More in [Routing](docs/reference.md#routing).
-
----
-
-## Migrate and revert
+| [docs/gateway.md](docs/gateway.md) | HTTP gateway, UI, tokens, vault |
+| [docs/reference.md](docs/reference.md) | Config, routing, migrate, benchmark |
+| [CLAUDE.md](CLAUDE.md) | Architecture for contributors |
 
 ```bash
-npx -y lazygate migrate --from claude [--dry-run] [--servers | --skills | --plugins]
-npx -y lazygate revert  --from claude [--dry-run] [--servers | --skills | --plugins]
+npm run build && npm test
+npm run dev          # run from source
+npm run benchmark    # token savings (needs `claude` on PATH)
 ```
-
-`--from` accepts `claude`, `cursor`, `opencode`, or a path to an `mcpServers` file. `migrate`:
-
-- converts servers (stdio and HTTP) and moves secrets out of the configs into your shell file;
-- registers skills and commands in place and splits each `SKILL.md` into a short stub plus an
-  `INSTRUCTIONS.md` that is loaded on demand;
-- registers lazygate in the source client and adds a `SessionStart` hook that keeps skills in sync;
-- backs up every file it modifies (`<file>.bak-<timestamp>`) and writes atomically.
-
-`revert` restores servers in each client's own format, merges `SKILL.md` files back and removes the hook.
-Details and limits (for example, project-scoped Claude servers are not migrated) are in the
-[reference](docs/reference.md#migration).
-
----
-
-## HTTP gateway (POC)
-
-`lazygate serve` shares one instance over Streamable HTTP, with a token per user, per-user credentials
-sent as headers (`X-Lazygate-Cred-<server>-<field>`), shared server secrets, and per-user OAuth tokens:
-
-```bash
-npx -y lazygate token create --user alice --groups eng   # shown once
-npx -y lazygate serve                                    # http://127.0.0.1:8787/mcp
-```
-
-A web UI at `/ui` manages your own keys, and (with an admin token) tokens, secrets and servers.
-See [docs/gateway.md](docs/gateway.md).
-
----
-
-## Development
-
-```bash
-npm run build       # tsc → dist/
-npm run typecheck
-npm test            # builds first, then jest
-npm run dev         # run from source
-npm run benchmark   # measure token savings (needs `claude` on PATH)
-```
-
-See [CLAUDE.md](CLAUDE.md) for the architecture and [docs/reference.md](docs/reference.md) for the full
-reference.

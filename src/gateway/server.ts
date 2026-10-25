@@ -20,6 +20,7 @@ import { TokenStore, bearerToken, type UserIdentity } from "./tokens.js";
 import { AuditLog } from "./audit.js";
 import { Redactor } from "./redact.js";
 import { UserVault, mergeCreds } from "./vault.js";
+import { UserProfileStore } from "./profile.js";
 import { readBody, sendJson } from "./http-util.js";
 import { handleUi, isUiPath } from "./ui-api.js";
 import {
@@ -38,6 +39,8 @@ export interface GatewayOptions {
   secrets: SecretStore;
   /** Per-user credentials entered in the web UI (encrypted). Optional. */
   vault?: UserVault;
+  /** Per-user marketplace install lists. Required for opt-in discovery. */
+  profiles: UserProfileStore;
   audit: AuditLog;
   /** Default 127.0.0.1. Anything else is the caller's responsibility (TLS, firewall). */
   host?: string;
@@ -108,7 +111,7 @@ const firstText = (r: ToolResult): string => {
 };
 
 export async function startGateway(opts: GatewayOptions): Promise<Gateway> {
-  const { registry, tokens, secrets, audit } = opts;
+  const { registry, tokens, secrets, audit, profiles } = opts;
   const host = opts.host ?? "127.0.0.1";
   const idleMs = opts.idleMs ?? 30 * 60_000;
   const maxSessions = opts.maxSessions ?? 100;
@@ -181,7 +184,12 @@ export async function startGateway(opts: GatewayOptions): Promise<Gateway> {
     session.transport.onclose = () => closeSession(session);
 
     const access: BrokerAccess = {
-      canUse: (_name, cfg) => canAccess(cfg, user),
+      canUse: (name, cfg) =>
+        !cfg.disabled && canAccess(cfg, user) && profiles.isServerInstalled(user.id, name),
+      canUseSkill: (name) => {
+        const cfg = registry.skillRouter.getConfig(name);
+        return Boolean(cfg) && !cfg!.disabled && profiles.isSkillInstalled(user.id, name);
+      },
       prepare: (name, cfg) => {
         const r = resolver.resolve(name, cfg, session.creds);
         redactor.add(r.secretValues);
@@ -209,7 +217,7 @@ export async function startGateway(opts: GatewayOptions): Promise<Gateway> {
           );
         }
         return (
-          `Server "${name}" needs an API key. Save it in the gateway UI (${publicUrl}/ui → My credentials)` +
+          `Server "${name}" needs an API key. Save it in the gateway UI (${publicUrl}/ui → Credentials)` +
           (gaps.length ? `,\n  or send: ${gaps.filter((g) => g.startsWith("X-Lazygate-Cred-")).join(", ")}` : "") +
           `.`
         );
@@ -271,7 +279,7 @@ export async function startGateway(opts: GatewayOptions): Promise<Gateway> {
     server.oninitialized = () => {
       for (const name of registry.router.listAll()) {
         const cfg = registry.router.getConfig(name);
-        if (!cfg || !cfg.autoActivate || !canAccess(cfg, user)) continue;
+        if (!cfg || !cfg.autoActivate || !access.canUse(name, cfg)) continue;
         let runtime;
         try {
           runtime = access.prepare(name, cfg);
@@ -357,6 +365,7 @@ export async function startGateway(opts: GatewayOptions): Promise<Gateway> {
           tokens,
           secrets,
           vault: opts.vault,
+          profiles,
           audit,
           startedAt,
           publicUrl,

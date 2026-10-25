@@ -233,6 +233,31 @@ describe("createBroker", () => {
       const bad = await broker.callTool("load_skill", { skill_name: "nope" });
       expect(bad.isError).toBe(true);
     });
+
+    it("hides skills the caller has not installed when canUseSkill is set", async () => {
+      const { mkdtempSync, writeFileSync } = await import("fs");
+      const { tmpdir } = await import("os");
+      const { join } = await import("path");
+      const dir = mkdtempSync(join(tmpdir(), "cb-skill-acl-"));
+      writeFileSync(join(dir, "SKILL.md"), "---\n---\n");
+      writeFileSync(join(dir, "INSTRUCTIONS.md"), "secret skill");
+      const skills = new SkillRouter({
+        pdf: { description: "Work with PDF files", keywords: ["pdf"], path: join(dir, "SKILL.md") },
+      });
+      broker = createBroker({
+        router,
+        manager: mk.manager as unknown as ProcessManager,
+        skillRouter: skills,
+        access: {
+          canUse: () => true,
+          canUseSkill: () => false,
+          prepare: () => undefined,
+        },
+      });
+      const d = await broker.callTool("discover_skill", { query: "pdf" });
+      expect(text(d)).toMatch(/none installed/i);
+      expect((await broker.callTool("load_skill", { skill_name: "pdf" })).isError).toBe(true);
+    });
   });
 });
 
