@@ -46,6 +46,15 @@ const ServerSchema = z
     disabledPlugins: z.array(z.string()).optional(),
     /** Soft-disable: hidden from non-admins; activate/load refuse for everyone. */
     disabled: z.boolean().optional(),
+    /** Local-only: hidden/refused in gateway mode (see ServerConfig.local). */
+    local: z.boolean().optional(),
+    /**
+     * Which tools merge into the broker's tools/list after activate.
+     * Default `"none"` — use describe_tool / call_tool instead.
+     */
+    expose: z.union([z.literal("none"), z.literal("all"), z.array(z.string())]).optional(),
+    /** Expose/call tools as `server__tool` to avoid name collisions (default false). */
+    namespaceTools: z.boolean().optional(),
   })
   .passthrough()
   .refine((c) => Boolean(c.command) || Boolean(c.url), {
@@ -61,6 +70,8 @@ const SkillSchema = z
     plugin: z.string().optional(),
     /** Soft-disable: hidden from non-admins; load_skill refuses for everyone. */
     disabled: z.boolean().optional(),
+    /** Gateway: only users in one of these groups can see/install (omit = everyone). */
+    groups: z.array(z.string()).optional(),
   })
   .passthrough();
 

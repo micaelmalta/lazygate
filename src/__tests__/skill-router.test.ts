@@ -5,15 +5,19 @@ import { jest, describe, it, expect, beforeEach } from "@jest/globals";
 
 // ── fs mock setup (must happen before dynamic import of skill-router) ─────────
 const mockExistsSync = jest.fn<(path: string) => boolean>();
-const mockReadFileSync = jest.fn<(path: string, encoding: string) => string>();
+const mockReadFileSync = jest.fn<(path: string, encoding?: string) => string | Buffer>();
+const mockStatSync = jest.fn<(path: string) => { mtimeMs: number; isFile: () => boolean }>();
+const mockReaddirSync = jest.fn<(path: string, opts?: { withFileTypes?: boolean }) => unknown>();
 
 jest.unstable_mockModule("fs", () => ({
   existsSync: mockExistsSync,
   readFileSync: mockReadFileSync,
+  statSync: mockStatSync,
+  readdirSync: mockReaddirSync,
 }));
 
 // Dynamic import after mock registration
-const { SkillRouter } = await import("../skill-router.js");
+const { SkillRouter, truncateUtf8, capSkillBody } = await import("../skill-router.js");
 type SkillConfig = import("../skill-router.js").SkillConfig;
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -96,16 +100,15 @@ describe("SkillRouter.rank()", () => {
     expect(result.score).toBe(2);
   });
 
-  it("ignores description words with 4 or fewer characters", () => {
+  it("ignores description words shorter than 3 characters", () => {
     const registry = {
       skill: makeSkillConfig({
-        description: "run this now",
+        description: "go to an app",
         keywords: [],
       }),
     };
     const router = new SkillRouter(registry);
-    // "run"(3), "this"(4), "now"(3) — all ≤4 chars, none score
-    const results = router.rank("run this now");
+    const results = router.rank("to an");
     expect(results).toEqual([]);
   });
 
@@ -117,12 +120,9 @@ describe("SkillRouter.rank()", () => {
       }),
     };
     const router = new SkillRouter(registry);
-    // keyword "word" → 2 pts
-    // desc words >4 in query "create word documents":
-    //   "create"(6) in query ✓, "microsoft"(9) not in query ✗, "word"(4) ≤4 skip, "documents"(9) in query ✓
-    // → desc matches = 2
+    // keyword "word" → 2; desc: create + word + documents (len ≥ 3) → +3; total 5
     const [result] = router.rank("create word documents");
-    expect(result.score).toBe(4); // 2 (keyword) + 2 (desc)
+    expect(result.score).toBe(5);
   });
 
   it("includes matched keywords in the reason array", () => {
@@ -347,6 +347,38 @@ describe("SkillRouter.load()", () => {
     const router = new SkillRouter(makeSampleRegistry());
     router.load("translate");
     expect(mockReadFileSync).toHaveBeenCalledTimes(1);
+  });
+
+  it("truncates bodies over the byte cap and points at the file", () => {
+    mockExistsSync.mockReturnValue(true);
+    mockReadFileSync.mockReturnValue("abcdefghij");
+
+    const router = new SkillRouter(makeSampleRegistry());
+    const out = router.load("search", { maxBytes: 5 });
+    expect(out.startsWith("abcde")).toBe(true);
+    expect(out).toMatch(/truncated/);
+    expect(out).toMatch(/Read more: skill:\/\/search\//);
+    expect(out).toMatch(/read_skill_file or resources\/read/);
+    expect(out).toMatch(/showing first 5 of 10 bytes/);
+  });
+
+  it("skips truncation when maxBytes is 0", () => {
+    mockExistsSync.mockReturnValue(true);
+    const body = "x".repeat(100);
+    mockReadFileSync.mockReturnValue(body);
+    const router = new SkillRouter(makeSampleRegistry());
+    expect(router.load("search", { maxBytes: 0 })).toBe(body);
+  });
+});
+
+describe("truncateUtf8 / capSkillBody", () => {
+  it("does not split a multibyte code point", () => {
+    // "é" is 2 UTF-8 bytes; capping mid-sequence must not leave a lone continuation byte.
+    const cut = truncateUtf8("aé", 2);
+    expect(Buffer.byteLength(cut, "utf8")).toBeLessThanOrEqual(2);
+    expect(cut).not.toMatch(/\uFFFD/);
+    const capped = capSkillBody("hello world", 5, "skill://x/SKILL.md");
+    expect(capped).toMatch(/Read more: skill:\/\/x\/SKILL\.md \(via read_skill_file/);
   });
 });
 

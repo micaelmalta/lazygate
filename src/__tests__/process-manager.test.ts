@@ -134,7 +134,12 @@ describe("ProcessManager", () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
-    manager = new ProcessManager();
+    // Disable idle/budgets in the shared fixture so unrelated tests stay isolated.
+    manager = new ProcessManager({ idleTtlMs: 0, maxActiveServers: 0, maxActiveTools: 0 });
+  });
+
+  afterEach(() => {
+    manager.dispose();
   });
 
   // -------------------------------------------------------------------------
@@ -208,13 +213,19 @@ describe("ProcessManager", () => {
       delete process.env.MY_SECRET;
     });
 
-    it("passes the full environment by default", async () => {
+    it("passes the full environment by default but strips LAZYGATE_*", async () => {
       process.env.CB_TEST_SECRET = "s3cret";
+      process.env.LAZYGATE_VAULT_KEY = "must-not-leak";
+      process.env.LAZYGATE_SECRET_X = "must-not-leak";
       setupFakeProcess([]);
       await manager.activate("srv", makeStdioConfig());
       const env = (mockSpawnFn.mock.calls[0] as [string, string[], { env: Record<string, string> }])[2].env;
       expect(env.CB_TEST_SECRET).toBe("s3cret");
+      expect(env.LAZYGATE_VAULT_KEY).toBeUndefined();
+      expect(env.LAZYGATE_SECRET_X).toBeUndefined();
       delete process.env.CB_TEST_SECRET;
+      delete process.env.LAZYGATE_VAULT_KEY;
+      delete process.env.LAZYGATE_SECRET_X;
     });
 
     it("scopes the environment with inheritEnv", async () => {
@@ -229,6 +240,30 @@ describe("ProcessManager", () => {
       expect(env.PATH).toBe(process.env.PATH);
       delete process.env.CB_TEST_SECRET;
       delete process.env.CB_ALLOWED;
+    });
+
+    it("uses defaultInheritEnv when the server omits inheritEnv (gateway mode)", async () => {
+      process.env.CB_GATEWAY_ONLY = "private";
+      const gw = new ProcessManager({ defaultInheritEnv: false });
+      setupFakeProcess([]);
+      await gw.activate("srv", makeStdioConfig()); // no inheritEnv on config
+      const env = (mockSpawnFn.mock.calls[0] as [string, string[], { env: Record<string, string> }])[2].env;
+      expect(env.CB_GATEWAY_ONLY).toBeUndefined();
+      expect(env.PATH).toBe(process.env.PATH);
+      delete process.env.CB_GATEWAY_ONLY;
+      gw.dispose();
+    });
+
+    it("rejects stdio commands outside the allowlist", async () => {
+      const gw = new ProcessManager({ stdioCommandAllowlist: ["node", "/usr/bin/allowed"] });
+      // Do not queue a spawn mock before the reject — activate must fail before spawn.
+      await expect(gw.activate("srv", makeStdioConfig({ command: "evil-mcp" }))).rejects.toThrow(/allowlist/);
+      expect(mockSpawnFn).not.toHaveBeenCalled();
+
+      setupFakeProcess([]);
+      await gw.activate("ok", makeStdioConfig({ command: "node" }));
+      expect(mockSpawnFn).toHaveBeenCalledTimes(1);
+      gw.dispose();
     });
 
     it("respawns when inheritEnv changes", async () => {
@@ -568,12 +603,14 @@ describe("ProcessManager", () => {
       fetchMock.mockResolvedValueOnce(jsonResponse({}, 401));
       mockHttpFlow([{ name: "secure_tool", description: "Secure", inputSchema: {} }]);
 
-      const result = await manager.activate("hq", makeHttpConfig("https://mcp.example.com/mcp"));
+      // Loopback IP avoids SSRF DNS lookup in tests (safeFetch → assertSafeUrl).
+      const url = "https://127.0.0.1:4443/mcp";
+      const result = await manager.activate("hq", makeHttpConfig(url));
 
       expect(result.map((t) => t.name)).toEqual(["secure_tool"]);
       expect(mockGetAccessTokenFn).toHaveBeenCalledWith(
         "hq",
-        "https://mcp.example.com/mcp",
+        url,
         {},
         { force: true, owner: undefined, interactive: true }
       );
@@ -601,20 +638,29 @@ describe("ProcessManager", () => {
 
     it("stores OAuth tokens per user only for user-scope servers", async () => {
       const gw = new ProcessManager({ owner: "alice" });
+      // Loopback IPs avoid SSRF DNS in tests.
       // user scope: first request 401 → OAuth with owner
       fetchMock.mockResolvedValueOnce(jsonResponse({}, 401));
       mockHttpFlow([{ name: "a", description: "A", inputSchema: {} }]);
-      await gw.activate("per-user", makeHttpConfig("https://mcp.example.com/mcp", { auth: { scope: "user" } }));
+      await gw.activate("per-user", makeHttpConfig("https://127.0.0.1:4443/mcp", { auth: { scope: "user" } }));
       expect(mockGetAccessTokenFn).toHaveBeenLastCalledWith(
-        "per-user", "https://mcp.example.com/mcp", {}, { force: true, owner: "alice", interactive: true }
+        "per-user", "https://127.0.0.1:4443/mcp", {}, { force: true, owner: "alice", interactive: true }
       );
 
-      // server scope (default): shared token, no owner
+      // HTTP with no auth.scope defaults to user (per-user token)
       fetchMock.mockResolvedValueOnce(jsonResponse({}, 401));
       mockHttpFlow([{ name: "b", description: "B", inputSchema: {} }]);
-      await gw.activate("shared", makeHttpConfig("https://mcp2.example.com/mcp"));
+      await gw.activate("default-user", makeHttpConfig("https://127.0.0.1:4444/mcp"));
       expect(mockGetAccessTokenFn).toHaveBeenLastCalledWith(
-        "shared", "https://mcp2.example.com/mcp", {}, { force: true, owner: undefined, interactive: true }
+        "default-user", "https://127.0.0.1:4444/mcp", {}, { force: true, owner: "alice", interactive: true }
+      );
+
+      // explicit server scope: shared token, no owner
+      fetchMock.mockResolvedValueOnce(jsonResponse({}, 401));
+      mockHttpFlow([{ name: "c", description: "C", inputSchema: {} }]);
+      await gw.activate("shared", makeHttpConfig("https://127.0.0.1:4445/mcp", { auth: { scope: "server" } }));
+      expect(mockGetAccessTokenFn).toHaveBeenLastCalledWith(
+        "shared", "https://127.0.0.1:4445/mcp", {}, { force: true, owner: undefined, interactive: true }
       );
     });
 
@@ -725,11 +771,11 @@ describe("ProcessManager", () => {
     });
 
     it("re-initializes once when the session has expired (404)", async () => {
-      const withSession = (body: unknown) => {
+      const withSession = (body: unknown, sessionId = "s1") => {
         const r = jsonResponse(body);
         (r as unknown as { headers: Headers }).headers = new Headers({
           "content-type": "application/json",
-          "mcp-session-id": "s1",
+          "mcp-session-id": sessionId,
         });
         return r;
       };
@@ -741,13 +787,64 @@ describe("ProcessManager", () => {
 
       fetchMock.mockResolvedValueOnce(jsonResponse({}, 404)); // expired
       fetchMock
-        .mockResolvedValueOnce(withSession({ result: { protocolVersion: "2025-06-18" } }))
+        .mockResolvedValueOnce(withSession({ result: { protocolVersion: "2025-06-18" } }, "s2"))
         .mockResolvedValueOnce(jsonResponse({}))
         .mockResolvedValueOnce(jsonResponse({ result: { tools: [{ name: "t", description: "T", inputSchema: {} }] } }));
       fetchMock.mockResolvedValueOnce(jsonResponse({ result: { content: [{ type: "text", text: "again" }] } }));
 
       const result = await manager.callTool("sess", "t", {});
       expect(result).toEqual({ content: [{ type: "text", text: "again" }] });
+    });
+
+    it("dedupes concurrent HTTP re-inits, uses fresh headers, and emits tools changed", async () => {
+      const onToolsChanged = jest.fn();
+      const mgr = new ProcessManager({
+        onToolsChanged,
+        idleTtlMs: 0,
+        maxActiveServers: 0,
+        maxActiveTools: 0,
+      });
+      const withSession = (body: unknown, sessionId: string) => {
+        const r = jsonResponse(body);
+        (r as unknown as { headers: Headers }).headers = new Headers({
+          "content-type": "application/json",
+          "mcp-session-id": sessionId,
+        });
+        return r;
+      };
+
+      fetchMock
+        .mockResolvedValueOnce(withSession({ result: { protocolVersion: "2025-06-18" } }, "old"))
+        .mockResolvedValueOnce(jsonResponse({}))
+        .mockResolvedValueOnce(jsonResponse({ result: { tools: [{ name: "t", description: "T", inputSchema: {} }] } }));
+      await mgr.activate("sess", makeHttpConfig());
+      onToolsChanged.mockClear();
+
+      // Two concurrent calls both see 404, then share one re-init handshake.
+      fetchMock
+        .mockResolvedValueOnce(jsonResponse({}, 404))
+        .mockResolvedValueOnce(jsonResponse({}, 404))
+        .mockResolvedValueOnce(withSession({ result: { protocolVersion: "2025-06-18" } }, "new"))
+        .mockResolvedValueOnce(jsonResponse({}))
+        .mockResolvedValueOnce(jsonResponse({ result: { tools: [{ name: "t", description: "T", inputSchema: {} }] } }))
+        .mockResolvedValueOnce(jsonResponse({ result: { content: [{ type: "text", text: "a" }] } }))
+        .mockResolvedValueOnce(jsonResponse({ result: { content: [{ type: "text", text: "b" }] } }));
+
+      const results = await Promise.all([
+        mgr.callTool("sess", "t", {}),
+        mgr.callTool("sess", "t", {}),
+      ]);
+      const texts = results.map((r) => (r.content[0] as { text: string }).text).sort();
+      expect(texts).toEqual(["a", "b"]);
+      expect(onToolsChanged).toHaveBeenCalled();
+
+      // initialize during re-init should appear only once (3 activate + 1 re-init initialize).
+      const initPosts = fetchMock.mock.calls.filter((c) => {
+        const init = c[1] as RequestInit | undefined;
+        const body = typeof init?.body === "string" ? init.body : "";
+        return body.includes('"method":"initialize"');
+      });
+      expect(initPosts).toHaveLength(2); // activate + one shared re-init
     });
 
     it("picks the SSE message whose id matches the request", async () => {
@@ -882,10 +979,62 @@ describe("ProcessManager", () => {
       expect(a).toBe(b);
     });
 
-    it("honours a per-server toolTimeoutMs", async () => {
-      silentFake((parsed, f) => answerHandshake(parsed, f, [{ name: "slow", description: "S", inputSchema: {} }]));
+    it("does not share an in-flight activation across different credential signatures", async () => {
+      function answer(parsed: Record<string, unknown>, f: FakeChildProcess) {
+        if (!parsed?.id) return;
+        if (parsed.method === "initialize") {
+          setImmediate(() => f.respond(parsed.id as number, { protocolVersion: "2024-11-05", capabilities: {} }));
+        } else if (parsed.method === "tools/list") {
+          setImmediate(() =>
+            f.respond(parsed.id as number, { tools: [{ name: "t", description: "T", inputSchema: {} }] })
+          );
+        }
+      }
+      const f1 = new FakeChildProcess();
+      const f2 = new FakeChildProcess();
+      mockSpawnFn.mockReturnValueOnce(f1).mockReturnValueOnce(f2);
+      f1.stdin.write.mockImplementation((msg: unknown) => {
+        try {
+          answer(JSON.parse(String(msg).trim()), f1);
+        } catch {
+          /* ignore */
+        }
+      });
+      f2.stdin.write.mockImplementation((msg: unknown) => {
+        try {
+          answer(JSON.parse(String(msg).trim()), f2);
+        } catch {
+          /* ignore */
+        }
+      });
+
+      await Promise.all([
+        manager.activate("srv", makeStdioConfig(), { env: { TOKEN: "a" } }),
+        manager.activate("srv", makeStdioConfig(), { env: { TOKEN: "b" } }),
+      ]);
+      expect(mockSpawnFn).toHaveBeenCalledTimes(2);
+      // Exactly one remains active (last registration wins; the other child is disposed).
+      expect(manager.listActive()).toEqual(["srv"]);
+      expect([f1.killed, f2.killed].filter(Boolean).length).toBe(1);
+    });
+
+    it("honours a per-server toolTimeoutMs and sends notifications/cancelled", async () => {
+      const fake = silentFake((parsed, f) =>
+        answerHandshake(parsed, f, [{ name: "slow", description: "S", inputSchema: {} }])
+      );
       await manager.activate("srv", makeStdioConfig({ toolTimeoutMs: 30 }));
       await expect(manager.callTool("srv", "slow", {})).rejects.toThrow(/timed out after 30ms/);
+      const cancelled = (fake.stdin.write.mock.calls as unknown[][])
+        .map((c) => {
+          try {
+            return JSON.parse(String(c[0]));
+          } catch {
+            return null;
+          }
+        })
+        .find((m) => m?.method === "notifications/cancelled");
+      expect(cancelled?.params?.requestId).toEqual(expect.any(Number));
+      expect(cancelled?.params?.reason).toMatch(/timed out/i);
     });
 
     it("allows tool calls longer than the old 10s default", async () => {
@@ -963,6 +1112,46 @@ describe("ProcessManager", () => {
       expect(fake.killed).toBe(true);
     });
 
+    it("allows identical upstream tool names when namespaceTools is set", async () => {
+      setupFakeProcess([{ name: "search", description: "A", inputSchema: {}, serverName: "a" }]);
+      await manager.activate("a", makeStdioConfig({ namespaceTools: true }));
+
+      setupFakeProcess([{ name: "search", description: "B", inputSchema: {}, serverName: "b" }]);
+      const tools = await manager.activate("b", makeStdioConfig({ args: ["b.js"], namespaceTools: true }));
+      expect(tools.map((t) => t.name)).toEqual(["b__search"]);
+      expect(manager.getAllActiveTools().map((t) => t.name).sort()).toEqual(["a__search", "b__search"]);
+      expect(manager.findServerForTool("a__search")).toBe("a");
+      expect(manager.findServerForTool("b__search")).toBe("b");
+      expect(manager.findServerForTool("search")).toBeUndefined();
+
+      const r = await manager.callTool("a", "a__search", { q: 1 });
+      expect(r).toEqual({ content: [{ type: "text", text: "ok" }] });
+      // Upstream call must use the bare tool name, not the exposed one.
+      const fakeA = mockSpawnFn.mock.results[0]?.value as FakeChildProcess;
+      const callMsgs = fakeA.stdin.write.mock.calls
+        .map((c) => {
+          try {
+            return JSON.parse(String(c[0]));
+          } catch {
+            return null;
+          }
+        })
+        .filter((m) => m && m.method === "tools/call");
+      expect(callMsgs.some((m) => m.params?.name === "search")).toBe(true);
+      expect(callMsgs.every((m) => m.params?.name !== "a__search")).toBe(true);
+    });
+
+    it("gateway-wide namespaceTools default coexists with reserved bare names", async () => {
+      const mgr = new ProcessManager({
+        namespaceTools: true,
+        reservedToolNames: ["discover_tools"],
+      });
+      setupFakeProcess([{ name: "discover_tools", description: "X", inputSchema: {}, serverName: "x" }]);
+      const tools = await mgr.activate("x", makeStdioConfig());
+      expect(tools.map((t) => t.name)).toEqual(["x__discover_tools"]);
+      mgr.dispose();
+    });
+
     it("notifies on activate, deactivate and unexpected exit", async () => {
       const onToolsChanged = jest.fn();
       const mgr = new ProcessManager({ onToolsChanged });
@@ -1036,6 +1225,195 @@ describe("ProcessManager", () => {
       const active = manager.listActive();
       expect(active).toContain("stdio-srv");
       expect(active).toContain("http-srv");
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // dispose() — session teardown must not orphan in-flight children
+  // -------------------------------------------------------------------------
+  describe("dispose()", () => {
+    function silentFake(onWrite: (parsed: Record<string, unknown>, fake: FakeChildProcess) => void) {
+      const fake = new FakeChildProcess();
+      mockSpawnFn.mockReturnValueOnce(fake);
+      fake.stdin.write.mockImplementation((msg: unknown) => {
+        let parsed: Record<string, unknown>;
+        try { parsed = JSON.parse(String(msg).trim()); } catch { return; }
+        onWrite(parsed, fake);
+      });
+      return fake;
+    }
+
+    it("kills an in-flight stdio child and leaves no active server", async () => {
+      const fake = silentFake(() => { /* never complete handshake */ });
+      const pending = manager.activate("srv", makeStdioConfig());
+      await new Promise((r) => setImmediate(r));
+      expect(mockSpawnFn).toHaveBeenCalledTimes(1);
+
+      manager.dispose();
+
+      expect(fake.killed).toBe(true);
+      await expect(pending).rejects.toThrow(/ProcessManager disposed/);
+      expect(manager.listActive()).toEqual([]);
+    });
+
+    it("does not register a child that finishes handshake after dispose", async () => {
+      let releaseInit: ((fake: FakeChildProcess, id: number) => void) | undefined;
+      const fake = silentFake((parsed, f) => {
+        if (parsed.method === "initialize" && parsed.id != null) {
+          releaseInit = (target, id) => {
+            target.respond(id, { protocolVersion: "2024-11-05", capabilities: {} });
+          };
+        } else if (parsed.method === "tools/list" && parsed.id != null) {
+          setImmediate(() => f.respond(parsed.id as number, { tools: [] }));
+        }
+      });
+
+      const pending = manager.activate("srv", makeStdioConfig());
+      await new Promise((r) => setImmediate(r));
+      expect(releaseInit).toBeDefined();
+
+      manager.dispose();
+      expect(fake.killed).toBe(true);
+
+      // Even if a late response arrives, activation must not land in `active`.
+      releaseInit?.(fake, 1);
+      await expect(pending).rejects.toThrow(/ProcessManager disposed/);
+      expect(manager.listActive()).toEqual([]);
+      expect(fake.killed).toBe(true);
+    });
+
+    it("deactivates already-active servers and rejects later activate()", async () => {
+      setupFakeProcess([{ name: "t", description: "T", inputSchema: {}, serverName: "srv" }]);
+      await manager.activate("srv", makeStdioConfig());
+      expect(manager.listActive()).toEqual(["srv"]);
+
+      manager.dispose();
+      expect(manager.listActive()).toEqual([]);
+      await expect(manager.activate("srv", makeStdioConfig())).rejects.toThrow(/ProcessManager disposed/);
+    });
+
+    it("is idempotent", () => {
+      expect(() => {
+        manager.dispose();
+        manager.dispose();
+      }).not.toThrow();
+    });
+
+    it("does not leave an HTTP server active when dispose races the handshake", async () => {
+      let resolveInit!: (value: Response) => void;
+      const initGate = new Promise<Response>((r) => { resolveInit = r; });
+      const jsonResponse = (body: unknown, status = 200) =>
+        ({
+          ok: status >= 200 && status < 300,
+          status,
+          headers: new Headers({ "content-type": "application/json" }),
+          text: async () => JSON.stringify(body),
+          json: async () => body,
+        }) as unknown as Response;
+      const fetchMock = jest.fn<typeof fetch>();
+      global.fetch = fetchMock as unknown as typeof fetch;
+      fetchMock
+        .mockImplementationOnce(() => initGate)
+        .mockResolvedValueOnce(jsonResponse({})) // initialized notification
+        .mockResolvedValueOnce(jsonResponse({ result: { tools: [] } })); // tools/list
+
+      const pending = manager.activate("http-srv", makeHttpConfig());
+      // safeFetch awaits assertSafeUrl (async DNS) before calling fetch.
+      for (let i = 0; i < 50 && fetchMock.mock.calls.length === 0; i++) {
+        await new Promise((r) => setImmediate(r));
+      }
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+
+      manager.dispose();
+
+      resolveInit(jsonResponse({ result: { protocolVersion: "2025-06-18" } }));
+
+      await expect(pending).rejects.toThrow(/ProcessManager disposed/);
+      expect(manager.listActive()).toEqual([]);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Idle TTL + maxActive budgets (FEEDBACK 2.2)
+  // -------------------------------------------------------------------------
+  describe("idle TTL and budgets", () => {
+    const tool = (name: string, serverName: string): MCPTool => ({
+      name,
+      description: name,
+      inputSchema: {},
+      serverName,
+    });
+
+    it("deactivates servers past idleTtlMs on sweepIdle", async () => {
+      const mgr = new ProcessManager({ idleTtlMs: 50, maxActiveServers: 0, maxActiveTools: 0 });
+      try {
+        setupFakeProcess([tool("t", "a")]);
+        await mgr.activate("a", makeStdioConfig());
+        expect(mgr.listActive()).toEqual(["a"]);
+        await new Promise((r) => setTimeout(r, 60));
+        expect(mgr.sweepIdle()).toEqual(["a"]);
+        expect(mgr.listActive()).toEqual([]);
+      } finally {
+        mgr.dispose();
+      }
+    });
+
+    it("tool calls refresh last-used and prevent idle eviction", async () => {
+      const mgr = new ProcessManager({ idleTtlMs: 80, maxActiveServers: 0, maxActiveTools: 0 });
+      try {
+        setupFakeProcess([tool("t", "a")]);
+        await mgr.activate("a", makeStdioConfig());
+        await new Promise((r) => setTimeout(r, 40));
+        await mgr.callTool("a", "t", {});
+        await new Promise((r) => setTimeout(r, 40));
+        expect(mgr.sweepIdle()).toEqual([]);
+        expect(mgr.listActive()).toEqual(["a"]);
+      } finally {
+        mgr.dispose();
+      }
+    });
+
+    it("evicts LRU servers when maxActiveServers is exceeded", async () => {
+      const mgr = new ProcessManager({ idleTtlMs: 0, maxActiveServers: 2, maxActiveTools: 0 });
+      try {
+        setupFakeProcess([tool("t1", "a")]);
+        await mgr.activate("a", makeStdioConfig());
+        setupFakeProcess([tool("t2", "b")]);
+        await mgr.activate("b", makeStdioConfig());
+        setupFakeProcess([tool("t3", "c")]);
+        await mgr.activate("c", makeStdioConfig());
+        expect(mgr.listActive().sort()).toEqual(["b", "c"]);
+        expect(mgr.listActive()).not.toContain("a");
+      } finally {
+        mgr.dispose();
+      }
+    });
+
+    it("evicts LRU servers when maxActiveTools is exceeded", async () => {
+      const mgr = new ProcessManager({ idleTtlMs: 0, maxActiveServers: 0, maxActiveTools: 2 });
+      try {
+        setupFakeProcess([tool("a1", "a"), tool("a2", "a")]);
+        await mgr.activate("a", makeStdioConfig());
+        setupFakeProcess([tool("b1", "b")]);
+        await mgr.activate("b", makeStdioConfig());
+        // a has 2 tools already at the cap; activating b (1 tool) must evict a.
+        expect(mgr.listActive()).toEqual(["b"]);
+        expect(mgr.getAllActiveTools()).toHaveLength(1);
+      } finally {
+        mgr.dispose();
+      }
+    });
+
+    it("never evicts the server just activated even if it alone exceeds the tool budget", async () => {
+      const mgr = new ProcessManager({ idleTtlMs: 0, maxActiveServers: 0, maxActiveTools: 1 });
+      try {
+        setupFakeProcess([tool("a1", "a"), tool("a2", "a")]);
+        await mgr.activate("a", makeStdioConfig());
+        expect(mgr.listActive()).toEqual(["a"]);
+        expect(mgr.getAllActiveTools()).toHaveLength(2);
+      } finally {
+        mgr.dispose();
+      }
     });
   });
 });

@@ -9,9 +9,6 @@ export const UI_HTML = String.raw`<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>lazygate</title>
 <link rel="icon" href="data:,">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap">
 <link rel="stylesheet" href="/ui/app.css">
 </head>
 <body>
@@ -50,8 +47,8 @@ export const UI_CSS = String.raw`
   --mcp-soft: #ccfbf1;
   --shadow: 0 1px 0 rgba(18,21,26,.04), 0 12px 32px -16px rgba(18,21,26,.18);
   --radius: 14px;
-  --font: "Instrument Sans", "Segoe UI", sans-serif;
-  --mono: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+  --font: "Segoe UI", system-ui, -apple-system, sans-serif;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
 }
 * { box-sizing: border-box; }
 html { color-scheme: light; }
@@ -616,7 +613,21 @@ label { display: block; font-size: 12px; color: var(--muted); margin: 8px 0 4px;
 export const UI_JS = String.raw`(function () {
   "use strict";
   var KEY = "lazygate.token";
-  var token = sessionStorage.getItem(KEY) || "";
+  var KEY_AT = "lazygate.tokenAt";
+  /** Clear the pasted token from sessionStorage after this long (tab close already clears it). */
+  var TOKEN_TTL_MS = 30 * 60 * 1000;
+  function loadStoredToken() {
+    var t = sessionStorage.getItem(KEY) || "";
+    var at = Number(sessionStorage.getItem(KEY_AT) || 0);
+    if (!t) return "";
+    if (!at || Date.now() - at > TOKEN_TTL_MS) {
+      sessionStorage.removeItem(KEY);
+      sessionStorage.removeItem(KEY_AT);
+      return "";
+    }
+    return t;
+  }
+  var token = loadStoredToken();
   var me = null;
   var tab = null;
   var focusServer = null;
@@ -645,6 +656,7 @@ export const UI_JS = String.raw`(function () {
   function clear(el) { while (el.firstChild) el.removeChild(el.firstChild); }
 
   function api(method, path, body) {
+    if (token && !loadStoredToken()) { signOut(); return Promise.reject(new Error("Signed out — session timed out after 30 minutes")); }
     var opts = { method: method, headers: { Authorization: "Bearer " + token } };
     if (body !== undefined) { opts.headers["Content-Type"] = "application/json"; opts.body = JSON.stringify(body); }
     return fetch("/ui/api/" + path, opts).then(function (r) {
@@ -691,16 +703,22 @@ export const UI_JS = String.raw`(function () {
   }
 
   // ── sign in / out ────────────────────────────────────────────────────────
-  function signOut() { token = ""; me = null; sessionStorage.removeItem(KEY); render(); }
+  function signOut() { token = ""; me = null; sessionStorage.removeItem(KEY); sessionStorage.removeItem(KEY_AT); render(); }
 
   function loginView() {
     var box = h("div"), input = h("input", { type: "password", placeholder: "lzg_…", autocomplete: "new-password" });
     var form = h("form", { onsubmit: guard(box, function () {
       token = input.value.trim();
-      return api("GET", "me").then(function (m) { me = m; sessionStorage.setItem(KEY, token); render(); }).catch(function (e) { token = ""; throw e; });
+      return api("GET", "me").then(function (m) {
+        me = m;
+        sessionStorage.setItem(KEY, token);
+        sessionStorage.setItem(KEY_AT, String(Date.now()));
+        render();
+      }).catch(function (e) { token = ""; throw e; });
     }) }, h("label", null, "Access token"), input,
       h("p", { class: "row" }, h("button", { class: "btn primary", type: "submit" }, "Sign in")),
-      h("p", { class: "muted" }, "Create one with: lazygate token create --user <you> [--admin]"), box);
+      h("p", { class: "muted" }, "Create one with: lazygate token create --user <you> [--admin]"),
+      h("p", { class: "muted" }, "The token stays in this tab only and is cleared after 30 minutes or when you close the tab."), box);
     return h("div", { class: "login" },
       h("h1", null, "Sign in"),
       h("p", { class: "lede" }, "Browse MCP servers and skills on this gateway, then connect credentials when a tool needs them."),
@@ -876,7 +894,9 @@ export const UI_JS = String.raw`(function () {
           else if (s.installed && s.needsCredentials && !s.connected) hints.push(h("span", { class: "hint warn" }, "needs connect"));
           else if (s.installed) hints.push(h("span", { class: "hint good" }, "installed"));
           else hints.push(h("span", { class: "hint" }, s.transport));
+          if (s.local) hints.push(h("span", { class: "hint bad" }, "local-only"));
           if (adminCatalog && !s.disabled && s.missingSecrets > 0) hints.push(h("span", { class: "hint bad" }, "missing " + s.missingSecrets + " secret" + (s.missingSecrets === 1 ? "" : "s")));
+          if (adminCatalog && s.sharedScopeMultiGroup) hints.push(h("span", { class: "hint warn" }, "shared creds, multi-group"));
 
           var actions = h("div", { class: "item-actions" });
           if (!adminCatalog) {
@@ -913,10 +933,14 @@ export const UI_JS = String.raw`(function () {
 
   function serverSheet(root, name) {
     var isNew = name === "__new__";
-    var load = isNew ? Promise.resolve(null) : api("GET", "servers").then(function (d) {
-      return (d.servers || []).filter(function (s) { return s.name === name; })[0] || null;
+    var load = api("GET", "servers").then(function (d) {
+      var existing = isNew ? null : (d.servers || []).filter(function (s) { return s.name === name; })[0] || null;
+      return { existing: existing, commandAllowlist: d.commandAllowlist || null };
     });
-    load.then(function (existing) {
+    load.then(function (info) {
+      var existing = info.existing;
+      var allow = info.commandAllowlist;
+      var canSetCommand = Array.isArray(allow) && allow.length > 0;
       if (!isNew && !existing) { focusConfig = null; return mcpsView(root, true); }
       clear(root);
       root.appendChild(h("button", { class: "back", type: "button", onclick: function () { focusConfig = null; mcpsView(root, true); } }, "← Manage servers"));
@@ -929,9 +953,9 @@ export const UI_JS = String.raw`(function () {
       var keywords = h("input", { type: "text", placeholder: "github, issues" });
       if (existing) keywords.value = (existing.keywords || []).join(", ");
       var transport = h("select", null, h("option", { value: "stdio" }, "stdio"), h("option", { value: "http" }, "http"));
-      transport.value = existing && existing.transport === "http" ? "http" : "stdio";
-      var command = h("input", { type: "text", placeholder: "npx" });
-      var args = h("input", { type: "text", placeholder: "-y @modelcontextprotocol/server-github" });
+      transport.value = existing && existing.transport === "http" ? "http" : (isNew && !canSetCommand ? "http" : "stdio");
+      var command = h("input", { type: "text", placeholder: canSetCommand ? allow[0] : "set via servers.json", disabled: !canSetCommand && isNew });
+      var args = h("input", { type: "text", placeholder: "-y @modelcontextprotocol/server-github", disabled: !canSetCommand && isNew });
       var url = h("input", { type: "text", placeholder: "https://mcp.example.com/mcp" });
       if (existing) {
         if (existing.transport === "http") url.value = existing.target || "";
@@ -939,6 +963,8 @@ export const UI_JS = String.raw`(function () {
           var parts = (existing.target || "").split(" ");
           command.value = parts[0] || "";
           args.value = parts.slice(1).join(" ");
+          command.disabled = !canSetCommand;
+          args.disabled = !canSetCommand;
         }
       }
       var a = existing && existing.auth;
@@ -956,18 +982,23 @@ export const UI_JS = String.raw`(function () {
         h("div", { class: "sheet-top" },
           h("h1", null, isNew ? "New server" : existing.name),
           !isNew && existing.disabled ? h("span", { class: "pill miss" }, "disabled") : null),
+        existing && existing.sharedScopeMultiGroup
+          ? h("p", { class: "warn" }, "Shared credentials (auth.scope=server) are visible to more than one group — every caller acts as the same identity. Prefer scope \"user\", or restrict Groups to one group.")
+          : null,
         h("div", { class: "sheet-sec" },
           h("h3", null, "Basics"),
           isNew ? h("label", null, "Name") : null, isNew ? nameIn : null,
           h("label", null, "Description"), description,
           h("label", null, "Keywords"), keywords,
           h("label", null, "Transport"), transport,
-          h("div", { class: "stdio-fields" }, h("label", null, "Command"), command, h("label", null, "Args"), args),
+          h("div", { class: "stdio-fields" },
+            h("label", null, "Command"), command, h("label", null, "Args"), args,
+            !canSetCommand ? h("p", { class: "muted" }, "Stdio command/args are CLI-only unless LAZYGATE_ALLOWED_COMMANDS is set on the gateway.") : h("p", { class: "muted" }, "Allowed: " + allow.join(", "))),
           h("div", { class: "http-fields" }, h("label", null, "URL"), url),
           !isNew ? h("label", { class: "inline" }, disabledIn, " Disabled (hidden from users; activate refused)") : null),
         h("div", { class: "sheet-sec" },
           h("h3", null, "Access"),
-          h("p", { class: "sec-lede" }, "Who can install this server, and how credentials are resolved."),
+          h("p", { class: "sec-lede" }, "Who can install this server, and how credentials are resolved. HTTP defaults to per-user scope."),
           h("div", { class: "row" },
             h("div", null, h("label", null, "Credential scope"), scope),
             h("label", { class: "inline top" }, fallback, " fall back to shared secret"),
@@ -991,7 +1022,12 @@ export const UI_JS = String.raw`(function () {
           };
           if (!isNew) payload.disabled = disabledIn.checked;
           if (transport.value === "http") payload.url = url.value.trim();
-          else { payload.command = command.value.trim(); payload.args = args.value.trim() ? args.value.trim().split(/\s+/) : []; }
+          else if (canSetCommand) {
+            payload.command = command.value.trim();
+            payload.args = args.value.trim() ? args.value.trim().split(/\s+/) : [];
+          } else if (isNew) {
+            return Promise.reject(new Error("Stdio servers need LAZYGATE_ALLOWED_COMMANDS, or pick HTTP transport"));
+          }
           if (isNew) {
             payload.name = nameIn.value.trim();
             return api("POST", "servers", payload).then(function (created) { focusConfig = created.name; mcpsView(root, true); });
@@ -1168,6 +1204,8 @@ export const UI_JS = String.raw`(function () {
       if (existing) description.value = existing.description || "";
       var keywords = h("input", { type: "text", placeholder: "word, docx" });
       if (existing) keywords.value = (existing.keywords || []).join(", ");
+      var groups = h("input", { type: "text", placeholder: "everyone" });
+      if (existing) groups.value = (existing.groups || []).join(", ");
       var body = h("textarea", { class: "body", placeholder: "Full skill instructions…" });
       if (existing) body.value = existing.body || "";
       var disabledIn = h("input", { type: "checkbox" }); disabledIn.checked = Boolean(existing && existing.disabled);
@@ -1180,16 +1218,18 @@ export const UI_JS = String.raw`(function () {
           isNew ? h("label", null, "Name") : null, isNew ? nameIn : null,
           h("label", null, "Description"), description,
           h("label", null, "Keywords"), keywords,
+          h("label", null, "Groups (comma separated, blank = everyone)"), groups,
           !isNew ? h("label", { class: "inline" }, disabledIn, " Disabled (hidden from users; load refused)") : null),
         h("div", { class: "sheet-sec" },
           h("h3", null, "Instructions"),
-          h("p", { class: "sec-lede" }, "Loaded on demand via load_skill."),
+          h("p", { class: "sec-lede" }, "Loaded on demand via load_skill. Bundled files are available as skill:// resources."),
           body),
         h("div", { class: "sheet-actions" },
           h("button", { class: "btn primary", type: "button", onclick: guard(box, function () {
             var payload = {
               description: description.value,
               keywords: keywords.value.split(",").map(function (x) { return x.trim(); }).filter(Boolean),
+              groups: groups.value.split(",").map(function (x) { return x.trim(); }).filter(Boolean),
               body: body.value
             };
             if (isNew) {
@@ -1229,6 +1269,12 @@ export const UI_JS = String.raw`(function () {
           h("p", { class: "muted" }, c.description));
         if (c.oauth) {
           var obox = h("div");
+          if (c.oauthShared) {
+            card.appendChild(h("p", { class: "warn" },
+              c.sharedScopeMultiGroup
+                ? "Shared OAuth visible to more than one group — every caller acts as this connection."
+                : "Shared OAuth — every user of this server acts as this connection."));
+          }
           card.appendChild(h("p", { class: "row" },
             c.oauthConnected ? h("span", { class: "good" }, "connected") : h("span", { class: "bad" }, "not connected"),
             h("button", { class: "btn accent", type: "button", onclick: guard(obox, function () {
@@ -1266,9 +1312,9 @@ export const UI_JS = String.raw`(function () {
     var all = me.admin ? "&all=1" : "";
     api("GET", "audit?limit=200" + all).then(function (d) {
       clear(root);
-      root.appendChild(h("div", { class: "card" }, h("h2", null, me.admin ? "Recent tool calls (everyone)" : "Your recent tool calls"),
-        table(["When", "User", "Tool", "Server", "Result", "ms"], d.events.map(function (e) {
-          return [ago(e.ts), e.user, h("code", null, e.tool), e.server || "", e.ok ? h("span", { class: "good" }, "ok") : h("span", { class: "bad", title: e.error || "" }, "error"), String(e.ms)];
+      root.appendChild(h("div", { class: "card" }, h("h2", null, me.admin ? "Recent activity (everyone)" : "Your recent activity"),
+        table(["When", "User", "Action", "Target", "Result", "ms"], d.events.map(function (e) {
+          return [ago(e.ts), e.user, h("code", null, e.tool || e.action || ""), e.server || e.target || "", e.ok !== false ? h("span", { class: "good" }, "ok") : h("span", { class: "bad", title: e.error || "" }, "error"), String(e.ms || 0)];
         }), "Nothing yet.")));
     }).catch(function (e) { show(root, notice("error", e.message)); });
   }
@@ -1277,9 +1323,22 @@ export const UI_JS = String.raw`(function () {
   function sessionsView(root) {
     api("GET", "status").then(function (s) {
       clear(root);
+      var indexBox = h("div");
       root.appendChild(h("div", { class: "card" }, h("h2", null, "Gateway"),
         h("p", null, "Up " + Math.round(s.uptimeSec / 60) + " min · " + s.servers + " servers · " + (s.skills || 0) + " skills · " + s.tokens + " tokens · " + s.secrets + " secrets · " + s.sessions.length + " live sessions"),
-        h("button", { class: "btn", onclick: function () { sessionsView(root); } }, "Refresh")));
+        h("p", { class: "row" },
+          h("button", { class: "btn", onclick: function () { sessionsView(root); } }, "Refresh"),
+          h("button", { class: "btn accent", type: "button", onclick: guard(indexBox, function () {
+            return api("POST", "tool-index/rebuild", {}).then(function (r) {
+              var msg = "Indexed " + (r.indexed || []).length +
+                ", skipped " + (r.skipped || []).length +
+                ", failed " + (r.failed || []).length +
+                ". Only shared-scope servers are indexed (never user credentials).";
+              show(indexBox, notice((r.failed || []).length ? "error" : "ok", msg));
+            });
+          }) }, "Index all tools")),
+        indexBox,
+        h("p", { class: "muted" }, "Index all activates each shared-scope catalog server once to populate discovery, then deactivates it. User-scoped servers are skipped so private tool lists never enter the shared index.")));
       root.appendChild(h("div", { class: "card" }, h("h2", null, "Live sessions"),
         table(["Session", "User", "Started", "Last seen", "Active servers"], s.sessions.map(function (x) {
           return [h("code", null, x.id.slice(0, 8)), x.user, ago(x.createdAt), ago(x.lastSeen), pills(x.servers)];
