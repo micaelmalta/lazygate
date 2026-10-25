@@ -40,7 +40,7 @@ npx -y lazygate migrate --from cursor   # or: claude, opencode
 # restart the client — ask “list active servers”
 ```
 
-Requires Node.js ≥ 18.17. Add `--dry-run` to preview; `npx -y lazygate revert --from cursor` to undo.
+Requires Node.js ≥ 26. Add `--dry-run` to preview; `npx -y lazygate revert --from cursor` to undo.
 
 ### Team gateway (HTTP)
 
