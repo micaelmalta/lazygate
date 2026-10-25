@@ -31,9 +31,10 @@ are examples only and are never loaded implicitly.
 
 Entries are validated on load and on every reload. An invalid entry is skipped and reported once on
 stderr by name (``servers.github — keywords: Expected array``) instead of breaking discovery for
-everyone. `servers.json` is re-read on `discover_tools` / `activate_server` and `skills.json` on
-`discover_skill` / `load_skill`, so edits apply without a restart; a half-written file keeps the
-previous config.
+everyone. `servers.json` is checked on `discover_tools` / `activate_server` (and related meta-tools)
+and `skills.json` on `discover_skill` / `load_skill`; each file is re-parsed only when its mtime
+changes, so edits apply without a restart and unchanged files are not re-read every call. A
+half-written file keeps the previous config.
 
 ### servers.json
 
@@ -76,21 +77,30 @@ previous config.
 | `inheritEnv` | environment passed to a stdio child — see below |
 | `toolTimeoutMs` | per-call `tools/call` timeout for stdio and HTTP. Default 5 minutes |
 | `autoActivate` | `false` (default): spawned on `activate_server` or auto-activation. `true`: spawned when lazygate starts, in the background after it has connected, so a slow server never delays startup. Use `true` for servers you reach every session; keep heavy ones (`docker build`, `npm install` on first launch) `false` |
+| `expose` | which tools merge into the broker's `tools/list` after activate: omit / `"none"` (default) — none, use `describe_tool` / `call_tool`; `"all"` — every schema (legacy); string array — allowlist of tool names (bare upstream names) |
+| `namespaceTools` | when `true`, expose and accept tools as `server__tool` so identical upstream names across servers do not collide. Default `false`. Gateway-wide: `lazygate serve --namespace-tools` (per-server `true`/`false` overrides) |
 | `auth`, `groups` | gateway mode only — credential sources and access policy; see [gateway.md](gateway.md) |
+| `local` | gateway mode: hide from remote users / refuse activate (needs the caller's machine) |
 | `migratedFrom`, `disabledPlugins` | set by `migrate`; `revert` relies on them |
 
-**Environment inheritance.** By default a stdio child gets lazygate's full environment plus its own
-`env`. Everything you export globally — including the secrets `migrate` writes to your shell file — is
-visible to every server. Set `inheritEnv` to limit that:
+**Environment inheritance.** In personal stdio mode, a child gets lazygate's full environment plus its
+own `env` by default. In `lazygate serve` (gateway) mode the default is `inheritEnv: false`. Set
+`inheritEnv` explicitly to override:
 
 - `false` — only a minimal base set (`PATH`, `HOME`, locale, temp dirs, proxy and CA settings, `XDG_*`, …)
 - `["GITHUB_TOKEN", "AWS_*"]` — the base set plus the named variables (trailing `*` is a prefix match)
+- `true` / omit (stdio mode) — full parent environment
 
-The server's own `env` entries are always added on top.
+`LAZYGATE_*` is always stripped from the child environment (vault key, `LAZYGATE_SECRET_*`, …), even
+when inherit is full. The server's own `env` entries are always added on top (then stripped if they
+use the `LAZYGATE_` prefix).
 
-**Tool names.** A server may not expose a tool whose name is already provided by another active server,
-or that shadows one of lazygate's meta-tools. Activation fails with a message naming the clash;
-deactivate the other server first.
+**Tool names.** By default a server may not expose a tool whose name is already provided by another
+active server, or that shadows one of lazygate's meta-tools. Activation fails with a message naming
+the clash; deactivate the other server first, or set `namespaceTools: true` (per server or
+`--namespace-tools` on the gateway) so tools are exposed as `server__tool`. With namespacing,
+`describe_tool` / `call_tool` still accept the bare upstream name when `server` is set; direct
+`tools/call` and `tools/list` use the namespaced form.
 
 **Errors** from lazygate and from proxied calls are returned with `isError: true`.
 
@@ -158,30 +168,47 @@ Each migrated `SKILL.md` is split into:
 - learned tool words (servers only): up to +2 in total
 - light plural handling, so `git` does not match "digital" and `pr` does not match "prompt"
 
-**Learned tool descriptions.** Migrated servers only have a generic description. Each time a server is
-activated, lazygate records its tool names and descriptions in `tool-index.json` (keyed by the server's
+**Learned tool descriptions.** Migrated servers only have a generic description. Each time a
+shared-scope server is activated (or an admin runs **Index all tools** in the gateway Sessions tab),
+lazygate records its tool names and descriptions in `tool-index.json` (keyed by the server's
 command/URL, so edits invalidate it). Later `discover_tools` calls also match against that text, shown
-as `tools:` in the match line.
+as `tools:` in the match line. In gateway mode, user-scoped servers never write to the shared index
+(tool lists fetched with one user's credentials must not leak to everyone).
 
 **Auto-activation.** If the client calls a tool that isn't active, lazygate scores all servers against the
 tool name, activates the best match and retries once. Failures come back as tool errors.
 
-lazygate sends `notifications/tools/list_changed` whenever the exposed tool set changes: on activate,
-on deactivate, when a server exits unexpectedly, and when a server announces a change itself.
+lazygate sends `notifications/tools/list_changed` whenever the exposed tool set changes: on activate
+(when `expose` merges schemas), on deactivate, when a server exits unexpectedly, and when a server
+announces a change itself. With the default `expose: "none"`, activation does not add schemas to
+`tools/list` — use `describe_tool` / `call_tool`.
+
+**Prompt-cache cost.** In clients that cache prompts (Claude API, etc.), the tools block sits early
+in the prompt. A `tools/list_changed` that alters `tools/list` invalidates the cache for
+**everything after the tools block** on the next turn — often the whole conversation prefix. Prefer
+keeping `expose: "none"` (default) and calling through `describe_tool` / `call_tool` so the
+advertised tool list stays stable and list_changed does not churn schemas. Use `expose: "all"` or an
+allowlist only when you need upstream tools in `tools/list` and accept the cache cost.
+
+**Clients that ignore `tools/list_changed`** never pick up newly exposed schemas even when `expose`
+is set. Prefer `call_tool` / `describe_tool` so those clients still work. There are **11** meta-tools
+in `META_TOOLS` (9 listed in stdio; gateway also advertises `connect_server` / `disconnect_server`).
 
 ---
 
 ## Migration
 
 ```bash
-npx lazygate migrate --from claude        # ~/.claude.json, ~/.claude/skills, plugin cache
-npx lazygate migrate --from cursor        # ~/.cursor/mcp.json
-npx lazygate migrate --from opencode      # ~/.config/opencode/opencode.json
-npx lazygate migrate --from /path/to.json # any file with an mcpServers map
+lazygate migrate --from claude        # ~/.claude.json, ~/.claude/skills, plugin cache
+lazygate migrate --from cursor        # ~/.cursor/mcp.json
+lazygate migrate --from opencode      # ~/.config/opencode/opencode.json
+lazygate migrate --from /path/to.json # any file with an mcpServers map
 
-npx lazygate migrate --from claude --dry-run
-npx lazygate migrate --from claude --servers   # or --skills / --plugins
+lazygate migrate --from claude --dry-run
+lazygate migrate --from claude --servers   # or --skills / --plugins
 ```
+
+(`lazygate` is the binary from a [source install](../README.md#install); the package is not on npm yet.)
 
 **What it does**
 
@@ -206,9 +233,9 @@ npx lazygate migrate --from claude --servers   # or --skills / --plugins
 ### Undo
 
 ```bash
-npx lazygate revert --from claude             # everything
-npx lazygate revert --from claude --dry-run
-npx lazygate revert --from cursor --servers   # or --skills / --plugins
+lazygate revert --from claude             # everything
+lazygate revert --from claude --dry-run
+lazygate revert --from cursor --servers   # or --skills / --plugins
 ```
 
 - **Servers** — finds entries by `migratedFrom` and writes them back in that client's own format
@@ -225,13 +252,15 @@ npx lazygate revert --from cursor --servers   # or --skills / --plugins
 ## Benchmark
 
 ```bash
-npx lazygate benchmark
-npx lazygate benchmark --servers fetch-mcp,jira   # subset
-npx lazygate benchmark --rounds 3                 # average over rounds
+lazygate benchmark
+lazygate benchmark --servers fetch-mcp,jira   # subset
+lazygate benchmark --rounds 3                 # average over rounds
 ```
 
-Measured with `claude -p` across 9 real MCP servers, 2 rounds each (with an earlier build exposing 4
-meta-tools; there are now 6, so idle cost is slightly higher — re-run for current numbers):
+**Illustrative numbers** from one older run (`claude -p`, 9 real MCP servers, 2 rounds, an earlier
+build with only 4 meta-tools). Today there are 11 meta-tools (9 listed in stdio), so idle cost is
+higher — treat the table as order-of-magnitude idle savings, not a guarantee. Re-run on your catalog
+and current build for fresh figures:
 
 | Strategy | Tokens | Cost / request |
 |---|---|---|
@@ -240,14 +269,16 @@ meta-tools; there are now 6, so idle cost is slightly higher — re-run for curr
 | **lazygate idle** — meta-tools only | **1,056** | **$0.00342** |
 | activated — lazygate + all 9 servers | 30,352 | $0.11427 |
 
-Idle lazygate injects about 29,000 fewer tokens per request (−96%).
+That idle comparison was about 29,000 fewer tokens (~96%) **vs loading every server upfront, idle
+only**. Activating servers closes most of the gap (see “activated” vs “direct”).
 
 **Caveats.** Each run is a single cold-cache turn, so these are first-turn costs. In a long session tool
 schemas are prompt-cached and cost far less per turn, so the dollar figures overstate steady-state
-savings; the token reduction (context-window space) is real. The worst case — every server active at
-once — costs about the same as loading everything directly; normal sessions activate one or two servers.
-HTTP servers are benchmarked only if they have a static `Authorization` header (OAuth can't run under
-`claude -p`); skipped servers are listed in the output.
+savings; the token reduction (context-window space) is real for idle. The worst case — every server
+active at once — costs about the same as loading everything directly; normal sessions activate one or
+two servers. A multi-turn “1–2 servers activated” strategy is not in the table yet — add it when you
+re-benchmark. HTTP servers are benchmarked only if they have a static `Authorization` header (OAuth
+can't run under `claude -p`); skipped servers are listed in the output.
 
 ---
 
@@ -258,8 +289,9 @@ The project was renamed from `context-broker` to `lazygate`. Existing installs u
 - `~/.config/context-broker` is moved to `~/.config/lazygate` the first time lazygate, `migrate`,
   `revert` or `session-sync` runs. The old path is left as a symlink so an old hook keeps working.
   (`--dry-run` moves nothing.)
-- Re-run `npx lazygate migrate` to replace a `context-broker` entry in your client configs and the old
+- Re-run `lazygate migrate` to replace a `context-broker` entry in your client configs and the old
   `SessionStart` hook with `lazygate` ones. `revert` removes either name.
 - Skills split before the rename keep their old `<!-- context-broker: -->` pointer; it is still
   recognised when merging back.
-- If you registered the broker by hand, change the command to `lazygate` (or `npx -y lazygate`).
+- If you registered the broker by hand, point the client at the built `dist/index.js` (or a linked
+  `lazygate` binary).

@@ -30,6 +30,7 @@ import {
 } from "@modelcontextprotocol/sdk/client/auth.js";
 import { APP_NAME, configDir } from "./paths.js";
 import type { AuthorizationServerMetadata } from "@modelcontextprotocol/sdk/shared/auth.js";
+import { assertSafeUrl, assertTokenEndpointMatchesIssuer, safeFetch } from "./ssrf.js";
 
 /** Explicit overrides; all fields optional — missing values are auto-discovered. */
 export interface OAuthConfig {
@@ -69,8 +70,14 @@ interface PendingAuth {
   redirectUri: string;
   resource: string;
   tokenEndpoint: string;
+  /** IdP authorize URL (after the gateway /oauth/start confirmation). */
+  authorizationUrl: string;
+  /** Bound to an HttpOnly cookie so only the browser that confirmed Connect can finish. */
+  bindToken: string;
   expiresAt: number;
 }
+
+export const OAUTH_BIND_COOKIE = "lzg_oauth";
 
 interface TokenSet {
   access_token: string;
@@ -276,20 +283,36 @@ interface Discovery {
   meta: OAuthMeta;
 }
 
+/** Validate AS endpoints from discovery (SSRF + token_endpoint origin). */
+async function validateDiscoveryEndpoints(info: OAuthServerInfo, meta: OAuthMeta): Promise<void> {
+  const issuer = info.authorizationServerUrl || meta.authorization_endpoint;
+  await assertSafeUrl(meta.authorization_endpoint);
+  await assertSafeUrl(meta.token_endpoint);
+  if (meta.registration_endpoint) await assertSafeUrl(meta.registration_endpoint);
+  assertTokenEndpointMatchesIssuer(meta.token_endpoint, issuer);
+}
+
 /** Discover AS metadata for an MCP resource URL (RFC 9728 → RFC 8414). */
 async function discover(serverUrl: string): Promise<Discovery> {
-  const info = await discoverOAuthServerInfo(serverUrl);
+  // Admin-configured MCP URL may be internal; SSRF applies to AS metadata endpoints below.
+  const info = await discoverOAuthServerInfo(serverUrl, { fetchFn: safeFetch });
   if (info.authorizationServerMetadata) {
-    return { info, meta: asOAuthMeta(info.authorizationServerMetadata) };
+    const meta = asOAuthMeta(info.authorizationServerMetadata);
+    await validateDiscoveryEndpoints(info, meta);
+    return { info, meta };
   }
 
   // Fallback: origin well-known (older deployments)
   const base = new URL(serverUrl).origin;
-  const res = await fetch(`${base}/.well-known/oauth-authorization-server`);
+  const wellKnown = `${base}/.well-known/oauth-authorization-server`;
+  await assertSafeUrl(wellKnown);
+  const res = await safeFetch(wellKnown);
   if (!res.ok) {
     throw new Error(`OAuth discovery failed for ${serverUrl}: no AS metadata`);
   }
-  return { info, meta: (await res.json()) as OAuthMeta };
+  const meta = (await res.json()) as OAuthMeta;
+  await validateDiscoveryEndpoints(info, meta);
+  return { info, meta };
 }
 
 async function registerDynamicClient(
@@ -325,6 +348,7 @@ async function registerDynamicClient(
       token_endpoint_auth_method: "none",
       ...(scopes.length ? { scope: scopes.join(" ") } : {}),
     },
+    fetchFn: safeFetch,
   });
 
   saveClient(serverName, {
@@ -497,7 +521,7 @@ async function tokenRequest(
   params: Record<string, string>,
   what: string
 ): Promise<Record<string, unknown>> {
-  const res = await fetch(tokenEndpoint, {
+  const res = await safeFetch(tokenEndpoint, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams(params).toString(),
@@ -727,7 +751,7 @@ export async function startRemoteAuthorization(opts: {
   /** When set, the token is stored per user; omit for a shared server-level token. */
   owner?: string;
   redirectUri: string;
-}): Promise<{ authorizationUrl: string; state: string }> {
+}): Promise<{ authorizationUrl: string; state: string; bindToken: string }> {
   const { serverName, serverUrl, owner, redirectUri } = opts;
   const config = opts.config ?? {};
   const resource = canonicalResource(serverUrl);
@@ -745,6 +769,18 @@ export async function startRemoteAuthorization(opts: {
   const clientId = await resolveClientId(serverName, resource, discovery, redirectUri, port, config, scopes);
   const { verifier, challenge } = generatePKCE();
   const state = base64url(randomBytes(16));
+  const bindToken = base64url(randomBytes(24));
+
+  const authUrl = new URL(meta.authorization_endpoint);
+  authUrl.searchParams.set("client_id", clientId);
+  authUrl.searchParams.set("response_type", "code");
+  authUrl.searchParams.set("redirect_uri", redirectUri);
+  if (scopes.length) authUrl.searchParams.set("scope", scopes.join(" "));
+  authUrl.searchParams.set("state", state);
+  authUrl.searchParams.set("code_challenge", challenge);
+  authUrl.searchParams.set("code_challenge_method", "S256");
+  authUrl.searchParams.set("resource", resource);
+  const authorizationUrl = authUrl.toString();
 
   purgeExpiredPending();
   // One in-flight connect per (owner, server) — a new Connect replaces the previous pending state.
@@ -759,35 +795,51 @@ export async function startRemoteAuthorization(opts: {
     redirectUri,
     resource,
     tokenEndpoint: meta.token_endpoint,
+    authorizationUrl,
+    bindToken,
     expiresAt: Date.now() + PENDING_TTL_MS,
   });
 
-  const authUrl = new URL(meta.authorization_endpoint);
-  authUrl.searchParams.set("client_id", clientId);
-  authUrl.searchParams.set("response_type", "code");
-  authUrl.searchParams.set("redirect_uri", redirectUri);
-  if (scopes.length) authUrl.searchParams.set("scope", scopes.join(" "));
-  authUrl.searchParams.set("state", state);
-  authUrl.searchParams.set("code_challenge", challenge);
-  authUrl.searchParams.set("code_challenge_method", "S256");
-  authUrl.searchParams.set("resource", resource);
+  return { authorizationUrl, state, bindToken };
+}
 
-  return { authorizationUrl: authUrl.toString(), state };
+/** Peek a pending remote auth (for the /oauth/start confirmation page). */
+export function peekPendingAuth(state: string): {
+  serverName: string;
+  owner?: string;
+  authorizationUrl: string;
+  bindToken: string;
+} | null {
+  purgeExpiredPending();
+  const pending = pendingAuth.get(state);
+  if (!pending || pending.expiresAt <= Date.now()) return null;
+  return {
+    serverName: pending.serverName,
+    owner: pending.owner,
+    authorizationUrl: pending.authorizationUrl,
+    bindToken: pending.bindToken,
+  };
 }
 
 /**
  * Finish a remote authorization: exchange the code, store the token for the pending owner.
- * Returns the server name on success. Throws on a bad/expired state or exchange failure.
+ * `bindToken` must match the HttpOnly cookie set at /oauth/start (browser binding).
  */
 export async function finishRemoteAuthorization(
   state: string,
-  code: string
+  code: string,
+  bindToken?: string
 ): Promise<{ serverName: string; owner?: string }> {
   purgeExpiredPending();
   const pending = pendingAuth.get(state);
   if (!pending || pending.expiresAt <= Date.now()) {
     pendingAuth.delete(state);
     throw new Error("OAuth state is invalid or expired — start Connect again from the UI");
+  }
+  if (!bindToken || bindToken !== pending.bindToken) {
+    throw new Error(
+      "OAuth callback was not started from this browser — open Connect again and continue in the same browser"
+    );
   }
   pendingAuth.delete(state); // single use
 
@@ -804,6 +856,26 @@ export async function finishRemoteAuthorization(
     `[oauth] ${pending.serverName} authorized` + (pending.owner ? ` for ${pending.owner}` : " (shared)")
   );
   return { serverName: pending.serverName, owner: pending.owner };
+}
+
+/** Confirmation page before redirecting to the IdP (binds the flow to this browser via cookie). */
+export function oauthStartPage(opts: {
+  serverName: string;
+  owner?: string;
+  confirmUrl: string;
+  uiUrl?: string;
+}): string {
+  const who = opts.owner ? escapeHtml(opts.owner) : "a shared gateway connection";
+  const link = opts.uiUrl ? `<p><a href="${escapeHtml(opts.uiUrl)}">Cancel</a></p>` : "";
+  return (
+    `<!doctype html><html><head><meta charset="utf-8"><title>Connect ${escapeHtml(opts.serverName)}</title></head>` +
+    `<body style="font:14px system-ui;max-width:420px;margin:60px auto">` +
+    `<h2>Connect “${escapeHtml(opts.serverName)}”</h2>` +
+    `<p>You are connecting as <strong>${who}</strong>. Continue only if that is you.</p>` +
+    `<p><a href="${escapeHtml(opts.confirmUrl)}" style="display:inline-block;padding:8px 14px;background:#111;color:#fff;text-decoration:none;border-radius:4px">Continue</a></p>` +
+    link +
+    `</body></html>`
+  );
 }
 
 /** HTML response body for the browser tab that lands on `/oauth/callback`. */

@@ -3,10 +3,18 @@
 
 import { createHash } from "crypto";
 import { spawn, ChildProcess } from "child_process";
-import { ServerConfig, OAuthConfig } from "./router.js";
+import { ServerConfig, OAuthConfig, effectiveAuthScope } from "./router.js";
 import { getAccessToken } from "./oauth.js";
 import { VERSION, LOG_PREFIX } from "./version.js";
-import { buildChildEnv } from "./child-env.js";
+import { buildChildEnv, resolveInheritEnv } from "./child-env.js";
+import { assertStdioCommandAllowed } from "./stdio-policy.js";
+import { assertSafeUrl, safeFetch } from "./ssrf.js";
+import {
+  bareToolName,
+  exposedToolName,
+  isToolsNamespaced,
+  parseNamespacedTool,
+} from "./tool-names.js";
 
 /** Streamable HTTP MCP clients must advertise both JSON and SSE. */
 const MCP_HTTP_ACCEPT = "application/json, text/event-stream";
@@ -15,6 +23,12 @@ const PROTOCOL_VERSION = "2025-06-18";
 
 /** Default per-call timeout for tools/call (override with `toolTimeoutMs`). */
 export const DEFAULT_TOOL_TIMEOUT_MS = 5 * 60 * 1000;
+/** Deactivate a server after this long without a tool call (0 disables). */
+export const DEFAULT_IDLE_TTL_MS = 20 * 60 * 1000;
+/** Soft cap on concurrently active servers; LRU-evict when exceeded (0 = unlimited). */
+export const DEFAULT_MAX_ACTIVE_SERVERS = 8;
+/** Soft cap on total tools across active servers; LRU-evict when exceeded (0 = unlimited). */
+export const DEFAULT_MAX_ACTIVE_TOOLS = 64;
 /** Sandbox wrappers may `docker build` on first launch before speaking MCP. */
 const STDIO_HANDSHAKE_TIMEOUT_MS = 600_000;
 const HTTP_HANDSHAKE_TIMEOUT_MS = 60_000;
@@ -150,19 +164,27 @@ export async function readMcpHttpResponse(
 export interface ActiveServer {
   name: string;
   process: ChildProcess;
+  /** Upstream (bare) tool names — use getAllActiveTools() for exposed names. */
   tools: MCPTool[];
   activatedAt: Date;
+  /** Last activate or tools/call; used for idle TTL and LRU eviction. */
+  lastUsedAt: number;
   /** Stable hash of stdio spawn inputs; if config changes, ProcessManager respawns. */
   spawnSig: string;
   toolTimeoutMs: number;
+  /** When true, exposed names are `server__tool` (collision check uses those). */
+  namespaced: boolean;
 }
 
 export interface ActiveHttpServer {
   name: string;
   url: string;
   headers: Record<string, string>;
+  /** Upstream (bare) tool names — use getAllActiveTools() for exposed names. */
   tools: MCPTool[];
   activatedAt: Date;
+  /** Last activate or tools/call; used for idle TTL and LRU eviction. */
+  lastUsedAt: number;
   nextId: number;
   config: ServerConfig; // kept for token refresh on 401
   /** Resolved OAuth overrides (may be empty when fully auto-discovered). */
@@ -172,6 +194,8 @@ export interface ActiveHttpServer {
   /** Hash of the URL/headers/credentials this session was opened with. */
   sig: string;
   toolTimeoutMs: number;
+  /** When true, exposed names are `server__tool` (collision check uses those). */
+  namespaced: boolean;
 }
 
 export interface MCPTool {
@@ -198,6 +222,44 @@ export interface ProcessManagerOptions {
    * connect_server). Default true so local stdio mode is unchanged.
    */
   oauthInteractive?: boolean;
+  /**
+   * Used when a server omits `inheritEnv`. Gateway mode passes `false` so children
+   * do not see the gateway process environment by default. Stdio mode leaves this
+   * unset (full inherit, with `LAZYGATE_*` still stripped).
+   */
+  defaultInheritEnv?: boolean | string[];
+  /**
+   * When non-empty, stdio `command` must be an exact match (see
+   * `LAZYGATE_STDIO_ALLOWLIST` / GatewayOptions.stdioCommandAllowlist).
+   */
+  stdioCommandAllowlist?: readonly string[];
+  /**
+   * Deactivate a server after this many ms without a tool call.
+   * Default {@link DEFAULT_IDLE_TTL_MS}; `0` disables the idle sweep.
+   */
+  idleTtlMs?: number;
+  /**
+   * Max concurrently active servers. Default {@link DEFAULT_MAX_ACTIVE_SERVERS};
+   * `0` means unlimited. Excess servers are LRU-evicted after activate.
+   */
+  maxActiveServers?: number;
+  /**
+   * Max total tools across active servers. Default {@link DEFAULT_MAX_ACTIVE_TOOLS};
+   * `0` means unlimited. Excess servers are LRU-evicted after activate.
+   */
+  maxActiveTools?: number;
+  /**
+   * Gateway: receive secret values (runtime credentials, resolved env/headers) so a
+   * session redactor can scrub them from tool results and logs.
+   */
+  onSecrets?: (values: Iterable<string | undefined>) => void;
+  /** Gateway: scrub a stderr / log line before writing it. */
+  redactLog?: (line: string) => string;
+  /**
+   * Default for `namespaceTools` when a server omits the flag.
+   * Per-server `namespaceTools: true|false` always wins. Default false.
+   */
+  namespaceTools?: boolean;
 }
 
 /**
@@ -223,8 +285,15 @@ function hasHeader(headers: Record<string, string>, name: string): boolean {
 export class ProcessManager {
   private active = new Map<string, ActiveServer>();
   private activeHttp = new Map<string, ActiveHttpServer>();
-  /** In-flight activations, so concurrent callers share one spawn / OAuth flow. */
+  /**
+   * In-flight activations keyed by `name\0sig` so concurrent callers with the same
+   * spawn/HTTP signature share one flow, while a credential change does not.
+   */
   private activating = new Map<string, Promise<MCPTool[]>>();
+  /** In-flight HTTP session re-inits (one per server name). */
+  private httpReinit = new Map<string, Promise<void>>();
+  /** Stdio children spawned but not yet in `active` (handshake still in flight). */
+  private pendingStdio = new Map<string, ChildProcess>();
   // Keyed by child process so IDs are scoped per-child and never collide
   private pendingRequests = new Map<ChildProcess, Map<number, {
     resolve: (val: unknown) => void;
@@ -234,19 +303,100 @@ export class ProcessManager {
   private stdoutBuffers = new Map<ChildProcess, string>();
   // Per-child monotonic request counter
   private requestIds = new Map<ChildProcess, number>();
+  /** Set by `dispose()`; in-flight activations must not call `active.set` afterwards. */
+  private disposed = false;
+  /** Periodic idle-TTL sweep; cleared by `dispose()`. */
+  private idleTimer: ReturnType<typeof setInterval> | undefined;
 
   private readonly onToolsChanged?: () => void;
   private readonly onServerTools?: (serverName: string, tools: MCPTool[]) => void;
+  private readonly onSecrets?: (values: Iterable<string | undefined>) => void;
+  private readonly redactLog?: (line: string) => string;
   private readonly reserved: Set<string>;
   private readonly owner?: string;
   private readonly oauthInteractive: boolean;
+  private readonly defaultInheritEnv?: boolean | string[];
+  private readonly stdioCommandAllowlist?: readonly string[];
+  private readonly idleTtlMs: number;
+  private readonly maxActiveServers: number;
+  private readonly maxActiveTools: number;
+  private readonly namespaceToolsDefault: boolean;
 
   constructor(opts: ProcessManagerOptions = {}) {
     this.owner = opts.owner;
     this.oauthInteractive = opts.oauthInteractive !== false;
     this.onToolsChanged = opts.onToolsChanged;
     this.onServerTools = opts.onServerTools;
+    this.onSecrets = opts.onSecrets;
+    this.redactLog = opts.redactLog;
     this.reserved = new Set(opts.reservedToolNames ?? []);
+    this.defaultInheritEnv = opts.defaultInheritEnv;
+    this.stdioCommandAllowlist = opts.stdioCommandAllowlist;
+    this.idleTtlMs = opts.idleTtlMs ?? DEFAULT_IDLE_TTL_MS;
+    this.maxActiveServers = opts.maxActiveServers ?? DEFAULT_MAX_ACTIVE_SERVERS;
+    this.maxActiveTools = opts.maxActiveTools ?? DEFAULT_MAX_ACTIVE_TOOLS;
+    this.namespaceToolsDefault = opts.namespaceTools === true;
+    if (this.idleTtlMs > 0) {
+      const every = Math.min(60_000, Math.max(1_000, this.idleTtlMs / 2));
+      this.idleTimer = setInterval(() => this.sweepIdle(), every);
+      this.idleTimer.unref?.();
+    }
+  }
+
+  private assertNotDisposed(): void {
+    if (this.disposed) throw new Error("ProcessManager disposed");
+  }
+
+  private touch(name: string): void {
+    const s = this.active.get(name) ?? this.activeHttp.get(name);
+    if (s) s.lastUsedAt = Date.now();
+  }
+
+  private lastUsedAt(name: string): number {
+    return this.active.get(name)?.lastUsedAt ?? this.activeHttp.get(name)?.lastUsedAt ?? 0;
+  }
+
+  /** Deactivate servers idle longer than `idleTtlMs`. */
+  sweepIdle(): string[] {
+    if (this.disposed || this.idleTtlMs <= 0) return [];
+    const cutoff = Date.now() - this.idleTtlMs;
+    const dropped: string[] = [];
+    for (const name of this.listActive()) {
+      if (this.lastUsedAt(name) < cutoff) {
+        console.error(`${LOG_PREFIX} idle TTL: deactivating "${name}"`);
+        this.deactivate(name);
+        dropped.push(name);
+      }
+    }
+    return dropped;
+  }
+
+  /**
+   * Evict LRU servers until under `maxActiveServers` / `maxActiveTools`.
+   * Never evicts `protect` (typically the server just activated).
+   */
+  private enforceBudgets(protect?: string): void {
+    if (this.disposed) return;
+    this.sweepIdle();
+
+    const overBudget = (): boolean => {
+      const n = this.listActive().length;
+      const tools = this.getAllActiveTools().length;
+      return (
+        (this.maxActiveServers > 0 && n > this.maxActiveServers) ||
+        (this.maxActiveTools > 0 && tools > this.maxActiveTools)
+      );
+    };
+
+    while (overBudget()) {
+      const victims = this.listActive()
+        .filter((n) => n !== protect)
+        .sort((a, b) => this.lastUsedAt(a) - this.lastUsedAt(b));
+      if (victims.length === 0) break;
+      const victim = victims[0]!;
+      console.error(`${LOG_PREFIX} budget: evicting "${victim}" (LRU)`);
+      this.deactivate(victim);
+    }
   }
 
   private emitChanged(): void {
@@ -265,13 +415,37 @@ export class ProcessManager {
     }
   }
 
+  private reportSecrets(...maps: Array<Record<string, string> | undefined>): void {
+    if (!this.onSecrets) return;
+    const values: string[] = [];
+    for (const m of maps) {
+      if (!m) continue;
+      for (const v of Object.values(m)) if (v) values.push(v);
+    }
+    if (values.length === 0) return;
+    try {
+      this.onSecrets(values);
+    } catch {
+      /* redactor must never break lifecycle handling */
+    }
+  }
+
+  private logLine(line: string): void {
+    const text = this.redactLog ? this.redactLog(line) : line;
+    console.error(text);
+  }
+
+  private effectiveInheritEnv(config: ServerConfig): boolean | string[] | undefined {
+    return resolveInheritEnv(config.inheritEnv, this.defaultInheritEnv);
+  }
+
   /** Inputs that determine the stdio child process; any change requires a new spawn. */
   private stdioSpawnSignature(config: ServerConfig, runtime?: RuntimeCredentials): string {
     return JSON.stringify({
       command: config.command ?? null,
       args: config.args ?? [],
       env: config.env ?? {},
-      inheritEnv: config.inheritEnv ?? null,
+      inheritEnv: this.effectiveInheritEnv(config) ?? null,
       // A changed credential means a fresh process (hashed so secrets never sit in a map key).
       runtimeEnv: runtime?.env ? hashOf(runtime.env) : null,
     });
@@ -286,15 +460,49 @@ export class ProcessManager {
     });
   }
 
+  private activationKey(name: string, config: ServerConfig, runtime?: RuntimeCredentials): string {
+    const sig =
+      config.type === "http" || config.url
+        ? this.httpSignature(config, runtime)
+        : this.stdioSpawnSignature(config, runtime);
+    return `${name}\0${sig}`;
+  }
+
   activate(name: string, config: ServerConfig, runtime?: RuntimeCredentials): Promise<MCPTool[]> {
-    const inFlight = this.activating.get(name);
+    if (this.disposed) {
+      return Promise.reject(new Error("ProcessManager disposed"));
+    }
+    const key = this.activationKey(name, config, runtime);
+    const inFlight = this.activating.get(key);
     if (inFlight) return inFlight;
 
     const p = this.doActivate(name, config, runtime).finally(() => {
-      this.activating.delete(name);
+      this.activating.delete(key);
     });
-    this.activating.set(name, p);
+    this.activating.set(key, p);
     return p;
+  }
+
+  /**
+   * Tear down every active server and abort in-flight activations.
+   * After this, `activate` rejects and late handshake completions must not
+   * register orphaned children (gateway session close / process shutdown).
+   */
+  dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    if (this.idleTimer) {
+      clearInterval(this.idleTimer);
+      this.idleTimer = undefined;
+    }
+    this.activating.clear();
+    this.httpReinit.clear();
+    for (const name of this.listActive()) this.deactivate(name);
+    const reason = new Error("ProcessManager disposed");
+    for (const [, child] of this.pendingStdio) {
+      this.disposeChild(child, reason);
+    }
+    this.pendingStdio.clear();
   }
 
   private async doActivate(
@@ -302,11 +510,15 @@ export class ProcessManager {
     config: ServerConfig,
     runtime?: RuntimeCredentials
   ): Promise<MCPTool[]> {
+    this.assertNotDisposed();
     if (config.type === "http" || config.url) {
       const existing = this.activeHttp.get(name);
       const httpSig = this.httpSignature(config, runtime);
       if (existing) {
-        if (existing.sig === httpSig) return existing.tools;
+        if (existing.sig === httpSig) {
+          this.touch(name);
+          return this.exposeTools(name, existing.tools, existing.namespaced);
+        }
         this.deactivate(name);
       }
       return this.activateHttp(name, config, runtime, httpSig);
@@ -315,25 +527,36 @@ export class ProcessManager {
     const sig = this.stdioSpawnSignature(config, runtime);
     const existingStdio = this.active.get(name);
     if (existingStdio) {
-      if (existingStdio.spawnSig === sig) return existingStdio.tools;
+      if (existingStdio.spawnSig === sig) {
+        this.touch(name);
+        return this.exposeTools(name, existingStdio.tools, existingStdio.namespaced);
+      }
       this.deactivate(name);
     }
-    if (this.activeHttp.has(name)) return this.activeHttp.get(name)!.tools;
+    if (this.activeHttp.has(name)) {
+      const http = this.activeHttp.get(name)!;
+      this.touch(name);
+      return this.exposeTools(name, http.tools, http.namespaced);
+    }
 
     if (!config.command) {
       throw new Error(`Server "${name}" has no command or url configured`);
     }
+    assertStdioCommandAllowed(config.command, this.stdioCommandAllowlist);
 
-    console.error(`${LOG_PREFIX} Activating server: ${name}`);
+    this.assertNotDisposed();
+    this.logLine(`${LOG_PREFIX} Activating server: ${name}`);
 
     const env = { ...this.resolveEnv(config.env ?? {}, name), ...(runtime?.env ?? {}) };
+    this.reportSecrets(config.env, env, runtime?.env);
     const child = spawn(config.command, config.args ?? [], {
-      env: buildChildEnv(process.env, config.inheritEnv, env),
+      env: buildChildEnv(process.env, this.effectiveInheritEnv(config), env),
     }) as ChildProcess;
 
     this.stdoutBuffers.set(child, "");
     this.pendingRequests.set(child, new Map());
     this.requestIds.set(child, 1);
+    this.pendingStdio.set(name, child);
 
     // Without these listeners a bad command (ENOENT) or a dead pipe (EPIPE)
     // would be an unhandled 'error' event and take down the whole broker.
@@ -345,7 +568,7 @@ export class ProcessManager {
     });
 
     child.stderr?.on("data", (data) => {
-      console.error(`[${name}] ${data.toString().trim()}`);
+      this.logLine(`[${name}] ${data.toString().trim()}`);
     });
 
     child.stdout?.on("data", (chunk) => {
@@ -377,30 +600,51 @@ export class ProcessManager {
       }
     });
 
+    const namespaced = this.namespacedFor(config);
     let tools: MCPTool[];
     try {
       await this.handshake(child, { timeoutMs: STDIO_HANDSHAKE_TIMEOUT_MS });
+      this.assertNotDisposed();
       tools = await this.listToolsStdio(child, name, STDIO_HANDSHAKE_TIMEOUT_MS);
-      this.assertNoToolCollisions(name, tools);
+      this.assertNotDisposed();
+      this.assertNoToolCollisions(name, tools, namespaced);
     } catch (err) {
       // Never leak a half-initialised child.
       this.disposeChild(child, err as Error);
       throw err;
+    } finally {
+      this.pendingStdio.delete(name);
     }
+
+    this.assertNotDisposed();
+    // Another activation of this name may have finished while we were handshaking.
+    const raced = this.active.get(name);
+    if (raced) {
+      if (raced.spawnSig === sig) {
+        this.disposeChild(child, new Error(`Server "${name}" already active`));
+        this.touch(name);
+        return this.exposeTools(name, raced.tools, raced.namespaced);
+      }
+      this.deactivate(name);
+    }
+    if (this.activeHttp.has(name)) this.deactivate(name);
 
     this.active.set(name, {
       name,
       process: child,
       tools,
       activatedAt: new Date(),
+      lastUsedAt: Date.now(),
       spawnSig: sig,
       toolTimeoutMs: config.toolTimeoutMs ?? DEFAULT_TOOL_TIMEOUT_MS,
+      namespaced,
     });
+    this.enforceBudgets(name);
 
     console.error(`${LOG_PREFIX} ${name} activated with ${tools.length} tools`);
     this.reportTools(name, tools);
     this.emitChanged();
-    return tools;
+    return this.exposeTools(name, tools, namespaced);
   }
 
   // ── stdio message handling ───────────────────────────────────────────────
@@ -479,24 +723,49 @@ export class ProcessManager {
     }
   }
 
-  private assertNoToolCollisions(name: string, tools: MCPTool[]): void {
+  private namespacedFor(config: ServerConfig): boolean {
+    return isToolsNamespaced(config, this.namespaceToolsDefault);
+  }
+
+  /** Map upstream (bare) tools to the names clients see. */
+  private exposeTools(serverName: string, tools: MCPTool[], namespaced: boolean): MCPTool[] {
+    if (!namespaced) return tools.map((t) => ({ ...t, serverName }));
+    return tools.map((t) => ({
+      ...t,
+      serverName,
+      name: exposedToolName(serverName, t.name, true),
+    }));
+  }
+
+  /**
+   * Collision check uses exposed names (`server__tool` when namespaced).
+   * Namespaced servers therefore coexist with identical upstream tool names
+   * (and with reserved meta-tool bare names).
+   */
+  private assertNoToolCollisions(name: string, tools: MCPTool[], namespaced: boolean): void {
     const owners = new Map<string, string>();
     for (const [other, s] of this.active) {
-      if (other !== name) for (const t of s.tools) owners.set(t.name, other);
+      if (other === name) continue;
+      for (const t of s.tools) owners.set(exposedToolName(other, t.name, s.namespaced), other);
     }
     for (const [other, s] of this.activeHttp) {
-      if (other !== name) for (const t of s.tools) owners.set(t.name, other);
+      if (other === name) continue;
+      for (const t of s.tools) owners.set(exposedToolName(other, t.name, s.namespaced), other);
     }
 
     const clashes: string[] = [];
     for (const t of tools) {
-      if (this.reserved.has(t.name)) clashes.push(`${t.name} (reserved broker tool)`);
-      else if (owners.has(t.name)) clashes.push(`${t.name} (provided by "${owners.get(t.name)}")`);
+      const exposed = exposedToolName(name, t.name, namespaced);
+      if (this.reserved.has(exposed)) clashes.push(`${exposed} (reserved broker tool)`);
+      else if (owners.has(exposed)) {
+        clashes.push(`${exposed} (provided by "${owners.get(exposed)}")`);
+      }
     }
     if (clashes.length > 0) {
       throw new Error(
         `Cannot activate "${name}": tool name collision — ${clashes.join(", ")}. ` +
-          `Deactivate the other server first.`
+          `Deactivate the other server first` +
+          (namespaced ? "." : `, or set namespaceTools: true.`)
       );
     }
   }
@@ -509,6 +778,11 @@ export class ProcessManager {
     return oauth;
   }
 
+  private noteSecrets(...values: Array<string | undefined>): void {
+    if (!this.onSecrets) return;
+    this.onSecrets(values);
+  }
+
   private async attachOAuth(
     name: string,
     url: string,
@@ -518,7 +792,7 @@ export class ProcessManager {
     config: ServerConfig
   ): Promise<OAuthConfig> {
     const resolved = oauth ?? {};
-    const owner = config.auth?.scope === "user" ? this.owner : undefined;
+    const owner = effectiveAuthScope(config) === "user" ? this.owner : undefined;
     // Gateway sessions have an owner: never open a browser on the gateway host — the user
     // connects through the UI / connect_server instead.
     const token = await getAccessToken(name, url, resolved, {
@@ -526,6 +800,7 @@ export class ProcessManager {
       owner,
       interactive: this.oauthInteractive,
     });
+    this.noteSecrets(token);
     headers["Authorization"] = `Bearer ${token}`;
     return resolved;
   }
@@ -549,6 +824,7 @@ export class ProcessManager {
     }
     // Gateway credentials go in last and are never re-expanded.
     Object.assign(headers, runtime?.headers ?? {});
+    this.reportSecrets(config.headers, headers, runtime?.headers, resolvedEnv);
 
     const staticAuth = hasHeader(headers, "authorization");
     const oauthAllowed = config.oauth !== false && !staticAuth;
@@ -557,22 +833,38 @@ export class ProcessManager {
     // Explicit `oauth` config → authenticate up front. Otherwise only on a 401.
     if (oauthAllowed && oauth !== undefined) {
       oauth = await this.attachOAuth(name, url, headers, oauth, false, config);
+      this.assertNotDisposed();
     }
 
     let tools: MCPTool[];
     try {
       tools = await this.fetchToolsHttp(url, headers, name);
+      this.assertNotDisposed();
     } catch (err) {
       if (err instanceof HttpStatusError && err.status === 401 && oauthAllowed) {
         console.error(`${LOG_PREFIX} ${name} returned 401 on activate — starting OAuth`);
         oauth = await this.attachOAuth(name, url, headers, oauth, true, config);
+        this.assertNotDisposed();
         tools = await this.fetchToolsHttp(url, headers, name);
+        this.assertNotDisposed();
       } else {
         throw err;
       }
     }
 
-    this.assertNoToolCollisions(name, tools);
+    const namespaced = this.namespacedFor(config);
+    this.assertNoToolCollisions(name, tools, namespaced);
+    this.assertNotDisposed();
+
+    const raced = this.activeHttp.get(name);
+    if (raced) {
+      if (raced.sig === sig) {
+        this.touch(name);
+        return this.exposeTools(name, raced.tools, raced.namespaced);
+      }
+      this.deactivate(name);
+    }
+    if (this.active.has(name)) this.deactivate(name);
 
     this.activeHttp.set(name, {
       name,
@@ -584,14 +876,54 @@ export class ProcessManager {
       staticAuth,
       sig,
       activatedAt: new Date(),
+      lastUsedAt: Date.now(),
       nextId: 1,
       toolTimeoutMs: config.toolTimeoutMs ?? DEFAULT_TOOL_TIMEOUT_MS,
+      namespaced,
     });
+    this.enforceBudgets(name);
 
     console.error(`${LOG_PREFIX} ${name} (http) activated with ${tools.length} tools`);
     this.reportTools(name, tools);
     this.emitChanged();
-    return tools;
+    return this.exposeTools(name, tools, namespaced);
+  }
+
+  /**
+   * Re-handshake an HTTP session after a 404 (expired session id).
+   * Dedupes concurrent callers, uses a fresh headers object so in-flight requests
+   * keep their snapshot, then runs the same collision / notify steps as activate.
+   */
+  private reinitHttpSession(server: ActiveHttpServer): Promise<void> {
+    const existing = this.httpReinit.get(server.name);
+    if (existing) return existing;
+
+    const p = (async () => {
+      this.assertNotDisposed();
+      // Copy headers without the stale session — do not mutate the shared object
+      // while other calls may still be using it.
+      const headers: Record<string, string> = { ...server.headers };
+      delete headers["mcp-session-id"];
+      delete headers["MCP-Protocol-Version"];
+
+      const tools = await this.fetchToolsHttp(server.url, headers, server.name);
+      this.assertNotDisposed();
+
+      const current = this.activeHttp.get(server.name);
+      if (!current || current !== server) return; // deactivated or replaced
+
+      this.assertNoToolCollisions(server.name, tools, current.namespaced);
+      current.headers = headers;
+      current.tools = tools;
+      current.lastUsedAt = Date.now();
+      this.reportTools(server.name, tools);
+      this.emitChanged();
+    })().finally(() => {
+      this.httpReinit.delete(server.name);
+    });
+
+    this.httpReinit.set(server.name, p);
+    return p;
   }
 
   private async httpFetch(
@@ -601,7 +933,23 @@ export class ProcessManager {
     timeoutMs: number
   ): Promise<Response> {
     try {
-      return await fetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
+      // Prefer https for non-loopback; never auto-follow redirects (SSRF via Location).
+      const target = new URL(url);
+      if (target.protocol === "http:" && !["localhost", "127.0.0.1", "::1"].includes(target.hostname)) {
+        console.error(`${LOG_PREFIX} warning: ${serverName} uses non-HTTPS URL ${target.origin}`);
+      }
+      const signal = AbortSignal.timeout(timeoutMs);
+      try {
+        await assertSafeUrl(url);
+        return await safeFetch(url, { ...init, signal });
+      } catch (err) {
+        // Admin-configured MCP hosts may be on a private network — allow the configured URL only.
+        // Redirects are never followed (redirect: "manual"), so Location cannot pivot to metadata IPs.
+        if ((err as Error).name === "UnsafeUrlError" && /private\/link-local/i.test((err as Error).message)) {
+          return fetch(url, { ...init, redirect: "manual", signal });
+        }
+        throw err;
+      }
     } catch (err) {
       const e = err as Error;
       if (e?.name === "TimeoutError" || e?.name === "AbortError") {
@@ -616,14 +964,19 @@ export class ProcessManager {
     toolName: string,
     args: Record<string, unknown>
   ): Promise<{ content: unknown[] }> {
+    // Clients may pass the exposed `server__tool` name; upstream always wants the bare name.
+    const upstream = bareToolName(serverName, toolName);
+
     const httpServer = this.activeHttp.get(serverName);
     if (httpServer) {
-      return this.callToolHttp(httpServer, toolName, args);
+      this.touch(serverName);
+      return this.callToolHttp(httpServer, upstream, args);
     }
 
     const server = this.active.get(serverName);
     if (!server) throw new Error(`Server ${serverName} is not active`);
 
+    this.touch(serverName);
     const child = server.process;
     const id = this.nextId(child);
     return this.sendRequest(
@@ -632,7 +985,7 @@ export class ProcessManager {
         jsonrpc: "2.0",
         id,
         method: "tools/call",
-        params: { name: toolName, arguments: args },
+        params: { name: upstream, arguments: args },
       },
       server.toolTimeoutMs
     ) as Promise<{ content: unknown[] }>;
@@ -678,8 +1031,24 @@ export class ProcessManager {
     // 404 with a session id means the session expired: re-initialize, retry once.
     if (res.status === 404 && server.headers["mcp-session-id"]) {
       console.error(`${LOG_PREFIX} ${server.name} session expired — re-initializing`);
-      server.tools = await this.fetchToolsHttp(server.url, server.headers, server.name);
-      res = await send();
+      await this.reinitHttpSession(server);
+      // Session object may have been replaced; use the live entry for the retry.
+      const live = this.activeHttp.get(server.name) ?? server;
+      res = await this.httpFetch(
+        live.name,
+        live.url,
+        {
+          method: "POST",
+          headers: live.headers,
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            id,
+            method: "tools/call",
+            params: { name: toolName, arguments: args },
+          }),
+        },
+        live.toolTimeoutMs
+      );
     }
 
     if (!res.ok) {
@@ -730,17 +1099,33 @@ export class ProcessManager {
 
   getAllActiveTools(): MCPTool[] {
     return [
-      ...Array.from(this.active.values()).flatMap(s => s.tools),
-      ...Array.from(this.activeHttp.values()).flatMap(s => s.tools),
+      ...Array.from(this.active.entries()).flatMap(([name, s]) =>
+        this.exposeTools(name, s.tools, s.namespaced)
+      ),
+      ...Array.from(this.activeHttp.entries()).flatMap(([name, s]) =>
+        this.exposeTools(name, s.tools, s.namespaced)
+      ),
     ];
   }
 
   findServerForTool(toolName: string): string | undefined {
+    const parsed = parseNamespacedTool(toolName);
+    if (parsed) {
+      const s = this.active.get(parsed.server) ?? this.activeHttp.get(parsed.server);
+      if (s?.tools.some((t) => t.name === parsed.tool)) return parsed.server;
+    }
+    const match = (name: string, server: { tools: MCPTool[]; namespaced: boolean }): boolean => {
+      if (server.namespaced) {
+        // Only the exposed `server__tool` form — bare names are ambiguous across servers.
+        return server.tools.some((t) => exposedToolName(name, t.name, true) === toolName);
+      }
+      return server.tools.some((t) => t.name === toolName);
+    };
     for (const [name, server] of this.active.entries()) {
-      if (server.tools.some(t => t.name === toolName)) return name;
+      if (match(name, server)) return name;
     }
     for (const [name, server] of this.activeHttp.entries()) {
-      if (server.tools.some(t => t.name === toolName)) return name;
+      if (match(name, server)) return name;
     }
     return undefined;
   }
@@ -765,6 +1150,7 @@ export class ProcessManager {
         );
         return "";
       }
+      this.noteSecrets(v);
       return v;
     });
   }
@@ -938,6 +1324,12 @@ export class ProcessManager {
 
       const timer = setTimeout(() => {
         if (childPending.delete(id)) {
+          const reason = `Request timed out after ${timeoutMs}ms`;
+          this.writeLine(child, {
+            jsonrpc: "2.0",
+            method: "notifications/cancelled",
+            params: { requestId: id, reason },
+          });
           reject(new Error(`Request ${id} (${String(request.method)}) timed out after ${timeoutMs}ms`));
         }
       }, timeoutMs);

@@ -90,7 +90,7 @@ async function runStdio(): Promise<void> {
 
   const shutdown = (): void => {
     connected = false;
-    for (const name of manager.listActive()) manager.deactivate(name);
+    manager.dispose();
     process.exit(0);
   };
   process.on("SIGINT", shutdown);

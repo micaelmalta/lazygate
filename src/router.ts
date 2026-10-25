@@ -1,22 +1,30 @@
 // src/router.ts
 // Scores and selects relevant servers based on a query
 
-import { readFileSync } from "fs";
+import { readFileSync, statSync } from "fs";
 import type { OAuthConfig } from "./oauth.js";
 import { parseServersConfig, reportConfigErrors } from "./config.js";
 import { scoreEntry } from "./scoring.js";
 import { ToolIndex, toolText } from "./tool-index.js";
 import { LOG_PREFIX } from "./version.js";
 
+function fileMtimeMs(path: string): number {
+  try {
+    return statSync(path).mtimeMs;
+  } catch {
+    return 0;
+  }
+}
+
 export type { OAuthConfig };
 
 /**
  * Where a server's credentials come from (gateway mode; ignored by plain stdio mode unless
  * `${secret:…}` / `${cred:…}` templates are used).
- * - scope "server" (default): one credential for everyone — `${secret:path}` from the gateway's
- *   secret store.
+ * - scope "server": one credential for everyone — `${secret:path}` from the gateway's secret store
+ *   (default for stdio).
  * - scope "user": each user's own — `${cred:field}` from the `X-Lazygate-Cred-<Server>-<Field>`
- *   request headers, and per-user OAuth tokens for HTTP servers.
+ *   request headers, and per-user OAuth tokens (default for HTTP).
  * - fallback "server": when the user sent nothing, `${cred:field}` falls back to the secret
  *   `<server>/<field>`.
  * `env` (stdio) and `headers` (HTTP) are templates applied on top of the server's own.
@@ -50,10 +58,10 @@ export interface ServerConfig {
   autoActivate: boolean;
   /**
    * Environment passed to a stdio child.
-   * - omit / true: the broker's whole environment (default)
+   * - omit / true: the broker's whole environment (default in stdio mode; gateway defaults omit → false)
    * - false: only a minimal base set (PATH, HOME, locale, temp dirs, proxies, …)
    * - string[]: the base set plus the listed variable names (`PREFIX_*` allowed)
-   * The server's own `env` entries are always added on top.
+   * The server's own `env` entries are always added on top. `LAZYGATE_*` is always stripped.
    */
   inheritEnv?: boolean | string[];
   /** Credential sources (see AuthConfig). */
@@ -68,6 +76,42 @@ export interface ServerConfig {
   disabledPlugins?: string[];
   /** Soft-disable: hidden from non-admins; activate/discover refuse for everyone. */
   disabled?: boolean;
+  /**
+   * Needs the caller's local machine (filesystem, desktop apps, …). Hidden from the
+   * gateway catalog and refused for activate/discover in serve mode — use personal
+   * stdio lazygate instead.
+   */
+  local?: boolean;
+  /**
+   * Which of this server's tools appear in the broker's tools/list after activate.
+   * - omit / `"none"` (default): none — use `describe_tool` / `call_tool` so the list stays stable
+   * - `"all"`: merge every tool schema into tools/list (legacy behaviour)
+   * - string[]: allowlist of tool names to merge
+   */
+  expose?: "none" | "all" | string[];
+  /**
+   * When true, expose and accept tools as `server__tool` so identical upstream names
+   * across servers do not collide. Per-server value overrides a gateway-wide default.
+   * Default off (omit / false).
+   */
+  namespaceTools?: boolean;
+}
+
+/** Effective credential scope. HTTP servers default to per-user; stdio defaults to shared. */
+export function effectiveAuthScope(cfg: ServerConfig): "user" | "server" {
+  if (cfg.auth?.scope) return cfg.auth.scope;
+  if (cfg.url || cfg.type === "http") return "user";
+  return "server";
+}
+
+/**
+ * True when a shared-scope HTTP server is visible to more than one group (or to everyone).
+ * Those callers all act under the same shared credential / OAuth identity.
+ */
+export function sharedScopeMultiGroup(cfg: ServerConfig): boolean {
+  if (effectiveAuthScope(cfg) !== "server") return false;
+  if (!cfg.url && cfg.type !== "http") return false;
+  return !cfg.groups || cfg.groups.length !== 1;
 }
 
 export interface RouterResult {
@@ -84,6 +128,8 @@ export interface RouterResult {
 export class ToolRouter {
   private servers: Record<string, ServerConfig>;
   private readonly configPath?: string;
+  /** Last successfully applied (or failed-with-keep) mtime; skip re-read when unchanged. */
+  private configMtime = -1;
 
   private readonly toolIndex?: ToolIndex;
 
@@ -91,23 +137,30 @@ export class ToolRouter {
     this.servers = servers;
     this.configPath = configPath;
     this.toolIndex = toolIndex;
+    if (configPath) this.configMtime = fileMtimeMs(configPath);
   }
 
   /**
    * Re-read server definitions from disk (same path as at startup).
    * Picks up edits to servers.json without restarting the broker process.
+   * Skips the read when the file mtime is unchanged.
    * On any read/parse/validation failure the previous definitions are kept.
    * Returns true when the registry was refreshed.
    */
   reloadServersFromDisk(): boolean {
     if (!this.configPath) return false;
+    const mtime = fileMtimeMs(this.configPath);
+    if (mtime === this.configMtime) return false;
     try {
       const raw = JSON.parse(readFileSync(this.configPath, "utf-8"));
       const { entries, errors } = parseServersConfig(raw, this.configPath);
       reportConfigErrors(errors);
       this.servers = entries;
+      this.configMtime = mtime;
       return true;
     } catch (err) {
+      // Remember mtime so a persistently broken file isn't re-parsed every call.
+      this.configMtime = mtime;
       console.error(
         `${LOG_PREFIX} Could not reload ${this.configPath}: ${(err as Error).message} — keeping previous config`
       );
@@ -148,6 +201,11 @@ export class ToolRouter {
    */
   select(query: string, topK = 3): string[] {
     return this.rank(query).slice(0, topK).map((r) => r.name);
+  }
+
+  /** Servers whose learned tool index lists this exact tool name (signature-fresh). */
+  serversWithTool(toolName: string): string[] {
+    return this.toolIndex?.findServersWithTool(toolName, this.servers) ?? [];
   }
 
   getConfig(name: string): ServerConfig | undefined {

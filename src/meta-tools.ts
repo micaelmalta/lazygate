@@ -1,5 +1,7 @@
 // src/meta-tools.ts
-// The six meta-tools the broker always exposes, plus their argument schemas.
+// Meta-tool definitions the broker advertises (11 total), plus their argument schemas.
+// Stdio lists 9; gateway-only connect/disconnect are filtered when access.connect is absent.
+// Prefer describe_tool / call_tool when the client ignores notifications/tools/list_changed.
 
 import { z } from "zod";
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
@@ -21,8 +23,8 @@ export const META_TOOLS: Tool[] = [
   {
     name: "activate_server",
     description:
-      "Load and connect a tool server, making its tools available. " +
-      "Call discover_tools first to find the right server name.",
+      "Load and connect a tool server. Its tools stay off tools/list by default — " +
+      "use describe_tool for a schema and call_tool to invoke (or set expose in servers.json).",
     inputSchema: {
       type: "object",
       properties: {
@@ -48,6 +50,38 @@ export const META_TOOLS: Tool[] = [
     inputSchema: { type: "object", properties: {} },
   },
   {
+    name: "describe_tool",
+    description:
+      "Return one tool's full schema (name, description, inputSchema) from an active server. " +
+      "Activates the server if needed. Prefer this over dumping every schema into tools/list.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        server: { type: "string", description: "Server name (from discover_tools / activate_server)" },
+        tool: { type: "string", description: "Tool name on that server" },
+      },
+      required: ["server", "tool"],
+    },
+  },
+  {
+    name: "call_tool",
+    description:
+      "Call a tool on a server without adding its schema to tools/list. " +
+      "Activates the server if needed. Use describe_tool first when you need the argument shape.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        server: { type: "string", description: "Server name" },
+        tool: { type: "string", description: "Tool name on that server" },
+        args: {
+          type: "object",
+          description: "Arguments for the tool (object; default {})",
+        },
+      },
+      required: ["server", "tool"],
+    },
+  },
+  {
     name: "discover_skill",
     description:
       "Find the right skill for a task before executing it. " +
@@ -63,13 +97,34 @@ export const META_TOOLS: Tool[] = [
   },
   {
     name: "load_skill",
-    description: "Load a skill's full instructions into context.",
+    description:
+      "Load a skill's full instructions into context. " +
+      "Also lists bundled files (scripts, templates, references) as skill:// URIs — " +
+      "use read_skill_file or resources/read to fetch them.",
     inputSchema: {
       type: "object",
       properties: {
         skill_name: { type: "string", description: "Name returned by discover_skill" },
       },
       required: ["skill_name"],
+    },
+  },
+  {
+    name: "read_skill_file",
+    description:
+      "Read a file bundled with a skill (script, template, reference). " +
+      "Paths are relative to the skill directory; prefer URIs from load_skill " +
+      "(skill://<name>/<path>). Fallback when the client has no MCP resources support.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        skill_name: { type: "string", description: "Skill name" },
+        path: {
+          type: "string",
+          description: "Relative path within the skill (e.g. scripts/helper.py), or a skill:// URI",
+        },
+      },
+      required: ["skill_name", "path"],
     },
   },
   {
@@ -99,6 +154,15 @@ export const META_TOOLS: Tool[] = [
   },
 ];
 
+/** Meta-tools only useful when BrokerAccess.connect is present (HTTP gateway). */
+export const GATEWAY_ONLY_META_TOOL_NAMES = new Set(["connect_server", "disconnect_server"]);
+
+/** Meta-tools advertised in tools/list for this session. */
+export function listedMetaTools(includeGateway: boolean): Tool[] {
+  if (includeGateway) return META_TOOLS;
+  return META_TOOLS.filter((t) => !GATEWAY_ONLY_META_TOOL_NAMES.has(t.name));
+}
+
 export const META_TOOL_NAMES = META_TOOLS.map((t) => t.name);
 
 export const QuerySchema = z.object({ query: z.string().min(1, "`query` must be a non-empty string") });
@@ -107,4 +171,17 @@ export const ServerNameSchema = z.object({
 });
 export const SkillNameSchema = z.object({
   skill_name: z.string().min(1, "`skill_name` must be a non-empty string"),
+});
+export const ReadSkillFileSchema = z.object({
+  skill_name: z.string().min(1, "`skill_name` must be a non-empty string"),
+  path: z.string().min(1, "`path` must be a non-empty string"),
+});
+export const DescribeToolSchema = z.object({
+  server: z.string().min(1, "`server` must be a non-empty string"),
+  tool: z.string().min(1, "`tool` must be a non-empty string"),
+});
+export const CallToolSchema = z.object({
+  server: z.string().min(1, "`server` must be a non-empty string"),
+  tool: z.string().min(1, "`tool` must be a non-empty string"),
+  args: z.record(z.string(), z.unknown()).optional().default({}),
 });

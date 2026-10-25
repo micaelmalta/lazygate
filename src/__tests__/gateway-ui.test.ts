@@ -155,12 +155,14 @@ describe("static assets", () => {
       expect(r.status).toBe(200);
       expect(r.headers.get("content-type")).toContain(type);
       expect(r.headers.get("content-security-policy")).toContain("script-src 'self'");
-      expect(r.headers.get("content-security-policy")).toContain("fonts.googleapis.com");
+      expect(r.headers.get("content-security-policy")).not.toContain("fonts.googleapis.com");
+      expect(r.headers.get("content-security-policy")).toContain("style-src 'self'");
       expect(r.headers.get("x-frame-options")).toBe("DENY");
       expect(r.headers.get("cache-control")).toBe("no-store");
     }
     const page = (await ui("GET", "/ui")).text;
     expect(page).not.toMatch(/<script>[^<]/); // no inline script
+    expect(page).not.toContain("fonts.googleapis.com");
   });
 
   it("ships a script that parses and never uses innerHTML", async () => {
@@ -185,6 +187,9 @@ describe("static assets", () => {
     expect(js).toContain("manage-skills");
     expect(js).toContain("adminCatalog");
     expect(js).toContain("admin-menu");
+    expect(js).toContain("TOKEN_TTL_MS");
+    expect(js).toContain("lazygate.tokenAt");
+    expect(js).toContain("commandAllowlist");
     expect(js).not.toContain("serversView");
     expect(js).not.toContain("Server settings");
   });
@@ -216,10 +221,26 @@ describe("API authentication", () => {
       ["GET", "/ui/api/secrets"],
       ["GET", "/ui/api/status"],
       ["GET", "/ui/api/servers"],
+      ["POST", "/ui/api/tool-index/rebuild"],
     ]) {
-      expect((await ui(m, p, alice)).status).toBe(403);
+      expect((await ui(m, p, alice, m === "POST" ? {} : undefined)).status).toBe(403);
     }
   });
+});
+
+describe("tool-index rebuild (admin)", () => {
+  it("indexes shared-scope servers and skips user-scoped ones", async () => {
+    const r = await ui("POST", "/ui/api/tool-index/rebuild", admin, {});
+    expect(r.status).toBe(200);
+    const names = (r.json.indexed || []).map((x: { name: string }) => x.name);
+    expect(names).toEqual(expect.arrayContaining(["plain", "shared"]));
+    expect(names).not.toContain("jira");
+    expect(r.json.skipped).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: "jira", reason: expect.stringMatching(/user-scoped/) }),
+      ])
+    );
+  }, 60_000);
 });
 
 describe("tokens (admin)", () => {
@@ -275,6 +296,73 @@ describe("secrets (admin)", () => {
   });
 });
 
+describe("admin mutation audit", () => {
+  it("records token, secret, server and skill mutations with hashes (never secret values)", async () => {
+    const prev = process.env.LAZYGATE_ALLOWED_COMMANDS;
+    process.env.LAZYGATE_ALLOWED_COMMANDS = process.execPath;
+    try {
+      const made = await ui("POST", "/ui/api/tokens", admin, { user: "auditee", groups: ["eng"], expires: "1h" });
+      expect(made.status).toBe(200);
+      expect((await ui("DELETE", `/ui/api/tokens/${made.json.id}`, admin)).status).toBe(204);
+
+      expect((await ui("PUT", "/ui/api/secrets", admin, { path: "audit/probe", value: "never-log-this-secret" })).status).toBe(200);
+      expect((await ui("DELETE", "/ui/api/secrets?path=audit%2Fprobe", admin)).status).toBe(204);
+
+      const srv = await ui("POST", "/ui/api/servers", admin, {
+        name: "audited-srv",
+        command: process.execPath,
+        args: ["-e", "1"],
+      });
+      expect(srv.status).toBe(200);
+      expect((await ui("PATCH", "/ui/api/servers/audited-srv", admin, { description: "audited" })).status).toBe(200);
+      expect((await ui("DELETE", "/ui/api/servers/audited-srv", admin)).status).toBe(204);
+
+      const sk = await ui("POST", "/ui/api/skills", admin, {
+        name: "audited-skill",
+        description: "x",
+        body: "do the thing",
+      });
+      expect(sk.status).toBe(200);
+      expect((await ui("PUT", "/ui/api/skills/audited-skill", admin, { description: "y", body: "updated" })).status).toBe(200);
+      expect((await ui("DELETE", "/ui/api/skills/audited-skill", admin)).status).toBe(204);
+
+      const log = readFileSync(join(dir, "audit.log"), "utf-8");
+      expect(log).not.toContain("never-log-this-secret");
+      expect(log).not.toContain(made.json.token);
+
+      const events = (await ui("GET", "/ui/api/audit?all=1&limit=500", admin)).json.events as Array<Record<string, unknown>>;
+      const actions = new Set(events.map((e) => e.action).filter(Boolean));
+      for (const a of [
+        "token.create",
+        "token.revoke",
+        "secret.set",
+        "secret.delete",
+        "server.create",
+        "server.patch",
+        "server.delete",
+        "skill.create",
+        "skill.update",
+        "skill.delete",
+      ]) {
+        expect(actions.has(a)).toBe(true);
+      }
+
+      const secretSet = events.find((e) => e.action === "secret.set" && e.target === "audit/probe");
+      expect(secretSet).toMatchObject({ user: "root", ok: true });
+      expect(typeof secretSet?.beforeHash).toBe("string");
+      expect(typeof secretSet?.afterHash).toBe("string");
+
+      const serverPatch = events.find((e) => e.action === "server.patch" && e.target === "audited-srv");
+      expect(serverPatch?.beforeHash).toBeTruthy();
+      expect(serverPatch?.afterHash).toBeTruthy();
+      expect(serverPatch?.beforeHash).not.toBe(serverPatch?.afterHash);
+    } finally {
+      if (prev === undefined) delete process.env.LAZYGATE_ALLOWED_COMMANDS;
+      else process.env.LAZYGATE_ALLOWED_COMMANDS = prev;
+    }
+  });
+});
+
 describe("my credentials (vault)", () => {
   it("lists only servers that need a personal credential", async () => {
     const r = await ui("GET", "/ui/api/connections", alice);
@@ -296,7 +384,7 @@ describe("my credentials (vault)", () => {
     expect(list.json.connections[0].fields[0].stored).toBe(true);
     expect(list.text).not.toContain(KEY);
     expect(readFileSync(join(dir, "vault.json"), "utf-8")).not.toContain(KEY);
-    expect(readdirSync(dir)).toContain("vault.key");
+    expect(readdirSync(dir)).not.toContain("vault.key");
 
     // No credential header: the stored key is used.
     const client = await connect(alice);
@@ -388,6 +476,7 @@ describe("marketplace catalog", () => {
       transport: "stdio",
       keywords: ["jira"],
     });
+    expect(jira.target).toBeUndefined();
     const plain = r.json.servers.find((s: any) => s.name === "plain");
     expect(plain).toMatchObject({ needsCredentials: false, connected: true, installed: false });
   });
@@ -402,6 +491,19 @@ describe("marketplace catalog", () => {
         expect.objectContaining({ name: "missing", available: false, installed: true }),
       ])
     );
+    expect(r.json.skills.find((s: any) => s.name === "docx").path).toBeUndefined();
+  });
+
+  it("shows catalog target and skill path to admins only", async () => {
+    const bobServers = (await ui("GET", "/ui/api/catalog/servers", bob)).json.servers;
+    expect(bobServers.every((s: any) => s.target === undefined)).toBe(true);
+    const adminServers = (await ui("GET", "/ui/api/catalog/servers", admin)).json.servers;
+    expect(adminServers.find((s: any) => s.name === "jira").target).toMatch(/cred-server|node/);
+
+    const bobSkills = (await ui("GET", "/ui/api/catalog/skills", bob)).json.skills;
+    expect(bobSkills.every((s: any) => s.path === undefined)).toBe(true);
+    const adminSkills = (await ui("GET", "/ui/api/catalog/skills", admin)).json.skills;
+    expect(adminSkills.find((s: any) => s.name === "docx").path).toMatch(/SKILL\.md$/);
   });
 
   it("does not require admin for the catalog", async () => {
@@ -448,27 +550,83 @@ describe("admin catalog CRUD", () => {
   });
 
   it("creates, edits and deletes an MCP server", async () => {
-    const created = await ui("POST", "/ui/api/servers", admin, {
-      name: "curlish",
-      description: "HTTP fetch helper",
-      keywords: ["curl", "http"],
-      command: process.execPath,
-      args: ["-e", "console.log(1)"],
-    });
-    expect(created.status).toBe(200);
-    expect(created.json.name).toBe("curlish");
-    const onDisk = JSON.parse(readFileSync(join(dir, "servers.json"), "utf-8"));
-    expect(onDisk.servers.curlish.command).toBe(process.execPath);
+    const prev = process.env.LAZYGATE_ALLOWED_COMMANDS;
+    process.env.LAZYGATE_ALLOWED_COMMANDS = process.execPath;
+    try {
+      const created = await ui("POST", "/ui/api/servers", admin, {
+        name: "curlish",
+        description: "HTTP fetch helper",
+        keywords: ["curl", "http"],
+        command: process.execPath,
+        args: ["-e", "console.log(1)"],
+      });
+      expect(created.status).toBe(200);
+      expect(created.json.name).toBe("curlish");
+      const onDisk = JSON.parse(readFileSync(join(dir, "servers.json"), "utf-8"));
+      expect(onDisk.servers.curlish.command).toBe(process.execPath);
 
-    const patched = await ui("PATCH", "/ui/api/servers/curlish", admin, {
-      description: "Updated fetch helper",
-      keywords: ["curl"],
-    });
-    expect(patched.status).toBe(200);
-    expect(patched.json.description).toBe("Updated fetch helper");
+      const patched = await ui("PATCH", "/ui/api/servers/curlish", admin, {
+        description: "Updated fetch helper",
+        keywords: ["curl"],
+      });
+      expect(patched.status).toBe(200);
+      expect(patched.json.description).toBe("Updated fetch helper");
 
-    expect((await ui("DELETE", "/ui/api/servers/curlish", admin)).status).toBe(204);
-    expect(JSON.parse(readFileSync(join(dir, "servers.json"), "utf-8")).servers.curlish).toBeUndefined();
+      expect((await ui("DELETE", "/ui/api/servers/curlish", admin)).status).toBe(204);
+      expect(JSON.parse(readFileSync(join(dir, "servers.json"), "utf-8")).servers.curlish).toBeUndefined();
+    } finally {
+      if (prev === undefined) delete process.env.LAZYGATE_ALLOWED_COMMANDS;
+      else process.env.LAZYGATE_ALLOWED_COMMANDS = prev;
+    }
+  });
+
+  it("refuses stdio command edits unless the command is allowlisted", async () => {
+    const prev = process.env.LAZYGATE_ALLOWED_COMMANDS;
+    const prevStdio = process.env.LAZYGATE_STDIO_ALLOWLIST;
+    delete process.env.LAZYGATE_ALLOWED_COMMANDS;
+    delete process.env.LAZYGATE_STDIO_ALLOWLIST;
+    try {
+      const blocked = await ui("POST", "/ui/api/servers", admin, {
+        name: "evil",
+        command: "/bin/sh",
+        args: ["-c", "id"],
+      });
+      expect(blocked.status).toBe(403);
+      expect(blocked.json.error).toMatch(/LAZYGATE_ALLOWED_COMMANDS|allowlist|disabled/i);
+
+      process.env.LAZYGATE_ALLOWED_COMMANDS = process.execPath;
+      expect(
+        (
+          await ui("POST", "/ui/api/servers", admin, {
+            name: "evil",
+            command: "/bin/sh",
+            args: ["-c", "id"],
+          })
+        ).status
+      ).toBe(403);
+
+      const ok = await ui("POST", "/ui/api/servers", admin, {
+        name: "oknode",
+        command: process.execPath,
+        args: ["-e", "1"],
+      });
+      expect(ok.status).toBe(200);
+
+      // Changing args without an allowlisted command fails; same command may keep args unchanged.
+      expect(
+        (await ui("PATCH", "/ui/api/servers/oknode", admin, { args: ["-e", "2"] })).status
+      ).toBe(200);
+      expect(
+        (await ui("PATCH", "/ui/api/servers/oknode", admin, { command: "/bin/sh" })).status
+      ).toBe(403);
+
+      await ui("DELETE", "/ui/api/servers/oknode", admin);
+    } finally {
+      if (prev === undefined) delete process.env.LAZYGATE_ALLOWED_COMMANDS;
+      else process.env.LAZYGATE_ALLOWED_COMMANDS = prev;
+      if (prevStdio === undefined) delete process.env.LAZYGATE_STDIO_ALLOWLIST;
+      else process.env.LAZYGATE_STDIO_ALLOWLIST = prevStdio;
+    }
   });
 
   it("creates, edits and deletes a managed skill with inline body", async () => {
@@ -497,8 +655,39 @@ describe("admin catalog CRUD", () => {
     expect(loaded.isError).toBeFalsy();
     expect(loaded.content[0].text).toContain("bullet points");
 
+    const memoPath = created.json.path as string;
+    const memoDir = join(dir, "managed-skills", "memo");
+    expect(existsSync(memoDir)).toBe(true);
+
+    // Sibling under managed-skills must survive delete of memo only.
+    const keep = await ui("POST", "/ui/api/skills", admin, {
+      name: "keep-sibling",
+      description: "Stay",
+      body: "Do not delete me.",
+    });
+    expect(keep.status).toBe(200);
+    const keepDir = join(dir, "managed-skills", "keep-sibling");
+
     expect((await ui("DELETE", "/ui/api/skills/memo", admin)).status).toBe(204);
+    expect(existsSync(memoDir)).toBe(false);
+    expect(existsSync(memoPath)).toBe(false);
+    expect(existsSync(keepDir)).toBe(true);
+    expect(existsSync(join(dir, "managed-skills"))).toBe(true);
     expect((await ui("GET", "/ui/api/catalog/skills", alice)).json.skills.find((s: any) => s.name === "memo")).toBeUndefined();
+
+    // Path aimed at the managed root must not wipe other skills.
+    const skillsPath = join(dir, "skills.json");
+    const skillsFile = JSON.parse(readFileSync(skillsPath, "utf-8"));
+    skillsFile.skills["bogus-root"] = {
+      description: "unsafe path",
+      keywords: [],
+      path: join(dir, "managed-skills"),
+    };
+    writeFileSync(skillsPath, JSON.stringify(skillsFile, null, 2) + "\n");
+    expect((await ui("DELETE", "/ui/api/skills/bogus-root", admin)).status).toBe(204);
+    expect(existsSync(keepDir)).toBe(true);
+
+    await ui("DELETE", "/ui/api/skills/keep-sibling", admin);
   });
 
   it("disables servers and skills for non-admins while admins still see them", async () => {
@@ -542,6 +731,88 @@ describe("admin catalog CRUD", () => {
     expect((await call(client3, "load_skill", { skill_name: "gated" })).isError).toBeFalsy();
     await ui("DELETE", "/ui/api/skills/gated", admin);
     await ui("DELETE", "/ui/api/profile/servers/plain", bob);
+  });
+
+  it("restricts skill catalog/install by groups (parity with servers)", async () => {
+    const created = await ui("POST", "/ui/api/skills", admin, {
+      name: "sre-only-skill",
+      description: "SRE runbook",
+      keywords: ["sre", "runbook"],
+      groups: ["sre"],
+      body: "Page the on-call.",
+    });
+    expect(created.status).toBe(200);
+    expect(created.json.groups).toEqual(["sre"]);
+    expect(JSON.parse(readFileSync(join(dir, "skills.json"), "utf-8")).skills["sre-only-skill"].groups).toEqual([
+      "sre",
+    ]);
+
+    // alice is eng — cannot see or install
+    expect(
+      (await ui("GET", "/ui/api/catalog/skills", alice)).json.skills.find((s: any) => s.name === "sre-only-skill")
+    ).toBeUndefined();
+    expect((await ui("POST", "/ui/api/profile/skills/sre-only-skill", alice, {})).status).toBe(404);
+
+    // Create a token in the sre group and install
+    const sreTok = (await ui("POST", "/ui/api/tokens", admin, { user: "sam", groups: ["sre"] })).json.token as string;
+    expect(
+      (await ui("GET", "/ui/api/catalog/skills", sreTok)).json.skills.find((s: any) => s.name === "sre-only-skill")
+    ).toMatchObject({ name: "sre-only-skill", groups: ["sre"] });
+    expect((await ui("POST", "/ui/api/profile/skills/sre-only-skill", sreTok, {})).status).toBe(200);
+
+    const client = await connect(sreTok);
+    const loaded = await call(client, "load_skill", { skill_name: "sre-only-skill" });
+    expect(loaded.isError).toBeFalsy();
+    expect(loaded.content[0].text).toContain("on-call");
+    expect(loaded.content[0].text).toMatch(/Bundled files|skill:\/\//);
+
+    // Clear groups → everyone can see again
+    expect((await ui("PUT", "/ui/api/skills/sre-only-skill", admin, { groups: [] })).status).toBe(200);
+    expect(
+      (await ui("GET", "/ui/api/catalog/skills", alice)).json.skills.find((s: any) => s.name === "sre-only-skill")
+    ).toBeTruthy();
+
+    await ui("DELETE", "/ui/api/skills/sre-only-skill", admin);
+  });
+});
+
+describe("skill resources and prompts", () => {
+  it("exposes installed skill files via resources and prompts", async () => {
+    const created = await ui("POST", "/ui/api/skills", admin, {
+      name: "pack",
+      description: "Packaged helpers",
+      keywords: ["pack"],
+      body: "Use the helper script.",
+    });
+    expect(created.status).toBe(200);
+    const skillDir = join(dir, "managed-skills", "pack");
+    mkdirSync(join(skillDir, "scripts"), { recursive: true });
+    writeFileSync(join(skillDir, "scripts", "helper.sh"), "#!/bin/sh\necho pack\n");
+
+    await ui("POST", "/ui/api/profile/skills/pack", alice, {});
+    const client = await connect(alice);
+
+    const { resources } = await client.listResources();
+    const uris = resources.map((r) => r.uri);
+    expect(uris).toEqual(expect.arrayContaining(["skill://pack/scripts/helper.sh", "skill://pack/INSTRUCTIONS.md"]));
+
+    const read = await client.readResource({ uri: "skill://pack/scripts/helper.sh" });
+    const text = (read.contents[0] as { text?: string }).text ?? "";
+    expect(text).toContain("echo pack");
+
+    const { prompts } = await client.listPrompts();
+    expect(prompts.map((p) => p.name)).toContain("pack");
+    const prompt = await client.getPrompt({ name: "pack" });
+    expect(prompt.messages[0]?.content).toMatchObject({ type: "text" });
+    expect((prompt.messages[0]!.content as { text: string }).text).toContain("helper script");
+
+    const viaTool = await call(client, "read_skill_file", {
+      skill_name: "pack",
+      path: "skill://pack/scripts/helper.sh",
+    });
+    expect(viaTool.content[0].text).toContain("echo pack");
+
+    await ui("DELETE", "/ui/api/skills/pack", admin);
   });
 });
 
@@ -592,21 +863,46 @@ describe("servers (admin)", () => {
 describe("UserVault", () => {
   it("round-trips, lower-cases fields, and binds values to their owner", () => {
     const d = mkdtempSync(join(tmpdir(), "lzg-vault-"));
+    const env = { LAZYGATE_VAULT_KEY: Buffer.alloc(32, 3).toString("base64") };
     try {
-      const v = new UserVault(d, {});
+      const v = new UserVault(d, env);
       v.set("alice", "jira", "Token", "s3cret-value");
       expect(v.get("alice").get("jira")).toEqual({ token: "s3cret-value" });
       expect(v.list("alice")).toEqual({ jira: ["token"] });
       expect(v.get("bob").size).toBe(0);
+      expect(v.getKeySource()).toBe("env");
+      expect(readdirSync(d)).not.toContain("vault.key");
 
       // Moving alice's ciphertext under bob must not decrypt.
       const file = JSON.parse(readFileSync(join(d, "vault.json"), "utf-8"));
       file.bob = file.alice;
       writeFileSync(join(d, "vault.json"), JSON.stringify(file), { mode: 0o600 });
-      expect(new UserVault(d, {}).get("bob").size).toBe(0);
-      expect(new UserVault(d, {}).get("alice").get("jira")).toEqual({ token: "s3cret-value" });
+      expect(new UserVault(d, env).get("bob").size).toBe(0);
+      expect(new UserVault(d, env).get("alice").get("jira")).toEqual({ token: "s3cret-value" });
     } finally {
       rmSync(d, { recursive: true, force: true });
+    }
+  });
+
+  it("reads an existing vault.key but never creates a new one", () => {
+    const withFile = mkdtempSync(join(tmpdir(), "lzg-vault-file-"));
+    const ephemeral = mkdtempSync(join(tmpdir(), "lzg-vault-eph-"));
+    try {
+      writeFileSync(join(withFile, "vault.key"), Buffer.alloc(32, 9).toString("base64") + "\n", { mode: 0o600 });
+      const fromFile = new UserVault(withFile, {});
+      fromFile.set("alice", "jira", "token", "from-file-key");
+      expect(fromFile.getKeySource()).toBe("file");
+      expect(new UserVault(withFile, {}).get("alice").get("jira")).toEqual({ token: "from-file-key" });
+
+      const eph = new UserVault(ephemeral, {});
+      eph.set("alice", "jira", "token", "ephemeral-only");
+      expect(eph.getKeySource()).toBe("ephemeral");
+      expect(readdirSync(ephemeral)).not.toContain("vault.key");
+      // A new process-equivalent instance cannot decrypt without the in-memory key.
+      expect(new UserVault(ephemeral, {}).get("alice").size).toBe(0);
+    } finally {
+      rmSync(withFile, { recursive: true, force: true });
+      rmSync(ephemeral, { recursive: true, force: true });
     }
   });
 

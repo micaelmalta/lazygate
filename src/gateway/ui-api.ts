@@ -16,10 +16,11 @@ import {
   mkdirSync,
   rmSync,
 } from "fs";
-import { dirname, join, resolve } from "path";
+import { dirname, isAbsolute, join, relative, resolve } from "path";
 import { parseServersConfig, parseSkillsConfig } from "../config.js";
-import type { ServerConfig } from "../router.js";
+import { effectiveAuthScope, sharedScopeMultiGroup, type ServerConfig } from "../router.js";
 import type { Registry } from "../registry.js";
+import { isStdioCommandAllowed, parseStdioCommandAllowlist } from "../stdio-policy.js";
 import { CredentialResolver, SecretStore, canAccess, credHeaderName, secretEnvName } from "./credentials.js";
 import { TokenStore, bearerToken, parseDuration, type UserIdentity } from "./tokens.js";
 import { UserVault } from "./vault.js";
@@ -27,6 +28,33 @@ import { UserProfileStore } from "./profile.js";
 import { AuditLog } from "./audit.js";
 import { readBody, sendJson } from "./http-util.js";
 import { UI_HTML, UI_JS, UI_CSS } from "./ui-assets.js";
+import { warmSharedToolIndex } from "./tool-index-warm.js";
+
+/**
+ * Stdio commands the UI may set (`LAZYGATE_STDIO_ALLOWLIST` / `LAZYGATE_ALLOWED_COMMANDS`).
+ * When unset/empty, the UI cannot set or change `command`/`args` (edit servers.json on the host).
+ */
+export function allowedCommands(env: NodeJS.ProcessEnv = process.env): string[] | null {
+  return parseStdioCommandAllowlist(env) ?? null;
+}
+
+export function isCommandAllowed(command: string, env: NodeJS.ProcessEnv = process.env): boolean {
+  const list = parseStdioCommandAllowlist(env);
+  if (!list) return false; // UI: unset = CLI-only (activation policy differs — see stdio-policy.ts)
+  return isStdioCommandAllowed(command, list);
+}
+
+function assertUiCommand(command: string): void {
+  if (isCommandAllowed(command)) return;
+  const list = allowedCommands();
+  if (!list) {
+    throw new HttpError(
+      403,
+      "Setting stdio command via the UI is disabled. Set LAZYGATE_ALLOWED_COMMANDS (or LAZYGATE_STDIO_ALLOWLIST) or edit servers.json on the host."
+    );
+  }
+  throw new HttpError(403, `Command "${command}" is not on the gateway allowlist`);
+}
 
 export interface SessionInfo {
   id: string;
@@ -48,8 +76,10 @@ export interface UiContext {
   /** Start an OAuth authorization; returns the URL to send the user to. */
   beginOAuth(userId: string, name: string, cfg: ServerConfig): Promise<string>;
   oauthConnected(userId: string, name: string, cfg: ServerConfig): boolean;
-  clearOAuth(userId: string, name: string, cfg: ServerConfig): boolean;
+  clearOAuth(userId: string, name: string, cfg: ServerConfig, admin: boolean): boolean;
   sessions(): SessionInfo[];
+  /** Passed through to admin tool-index warm (stdio allowlist). */
+  stdioCommandAllowlist?: readonly string[];
 }
 
 const SECURITY_HEADERS = {
@@ -58,9 +88,8 @@ const SECURITY_HEADERS = {
   "Referrer-Policy": "no-referrer",
   "X-Frame-Options": "DENY",
   "Content-Security-Policy":
-    "default-src 'none'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; " +
-    "font-src 'self' https://fonts.gstatic.com; connect-src 'self'; img-src 'self' data:; " +
-    "base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+    "default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; " +
+    "connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
 };
 
 const MAX_UI_BODY = 256 * 1024;
@@ -223,6 +252,25 @@ async function route(
     };
   }
 
+  // Pre-warm shared ToolIndex for shared-scope servers only (never user-cred tool lists).
+  if (area === "tool-index" && a === "rebuild" && method === "POST" && seg.length === 2) {
+    const warm = await warmSharedToolIndex({
+      registry,
+      secrets: ctx.secrets,
+      stdioCommandAllowlist: ctx.stdioCommandAllowlist,
+    });
+    ctx.audit.recordAdmin({
+      user: user.id,
+      action: "tool-index.rebuild",
+      after: {
+        indexed: warm.indexed.length,
+        skipped: warm.skipped.length,
+        failed: warm.failed.length,
+      },
+    });
+    return warm;
+  }
+
   if (area === "tokens") {
     if (method === "GET" && seg.length === 1) return { tokens: ctx.tokens.list() };
     if (method === "POST" && seg.length === 1) {
@@ -239,11 +287,26 @@ async function route(
         }
       }
       const label = typeof o.label === "string" && o.label.trim() ? o.label.trim().slice(0, 100) : undefined;
-      return ctx.tokens.create({ user: name, groups, expiresInMs, label, admin: o.admin === true });
+      const admin = o.admin === true;
+      const created = ctx.tokens.create({ user: name, groups, expiresInMs, label, admin });
+      ctx.audit.recordAdmin({
+        user: user.id,
+        action: "token.create",
+        target: created.id,
+        after: { user: name, groups, admin, label: label ?? null, expires: Boolean(expiresInMs) },
+      });
+      return created;
     }
     if (method === "DELETE" && a) {
       if (a === user.tokenId) throw new HttpError(409, "You can't revoke the token you're signed in with");
+      const prior = ctx.tokens.list().find((t) => t.id === a);
       if (!ctx.tokens.revoke(a)) throw new HttpError(404, "No such token");
+      ctx.audit.recordAdmin({
+        user: user.id,
+        action: "token.revoke",
+        target: a,
+        before: prior ? { user: prior.user, groups: prior.groups, admin: prior.admin, label: prior.label ?? null } : { id: a },
+      });
       return undefined;
     }
   }
@@ -272,12 +335,27 @@ async function route(
       const o = asObject(body);
       const name = asString(o.path, "path", 200);
       if (!/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(name)) throw new HttpError(400, "Invalid secret path");
+      const existed = ctx.secrets.list().includes(name);
       ctx.secrets.set(name, asString(o.value, "value"));
+      ctx.audit.recordAdmin({
+        user: user.id,
+        action: "secret.set",
+        target: name,
+        before: { stored: existed },
+        after: { stored: true },
+      });
       return { stored: name, env: secretEnvName(name) };
     }
     if (method === "DELETE" && seg.length === 1) {
       const name = asString(query.get("path") ?? "", "path", 200);
       if (!ctx.secrets.delete(name)) throw new HttpError(404, "No such secret");
+      ctx.audit.recordAdmin({
+        user: user.id,
+        action: "secret.delete",
+        target: name,
+        before: { stored: true },
+        after: { stored: false },
+      });
       return undefined;
     }
   }
@@ -286,24 +364,27 @@ async function route(
     if (method === "GET" && seg.length === 1) {
       registry.router.reloadServersFromDisk();
       const storedSet = new Set(ctx.secrets.list());
+      const allow = allowedCommands();
       return {
         editable: true,
+        /** null when UI cannot set stdio command/args; otherwise the allowlist. */
+        commandAllowlist: allow,
         servers: registry.router.listAll().map((name) =>
           describeServer(name, registry.router.getConfig(name) as ServerConfig, storedSet)
         ),
       };
     }
-    if (method === "POST" && seg.length === 1) return createServer(ctx, asObject(body));
-    if (method === "PATCH" && a && seg.length === 2) return patchServer(ctx, a, asObject(body));
-    if (method === "DELETE" && a && seg.length === 2) return deleteServer(ctx, a);
+    if (method === "POST" && seg.length === 1) return createServer(ctx, user, asObject(body));
+    if (method === "PATCH" && a && seg.length === 2) return patchServer(ctx, user, a, asObject(body));
+    if (method === "DELETE" && a && seg.length === 2) return deleteServer(ctx, user, a);
   }
 
   if (area === "skills") {
     if (method === "GET" && seg.length === 1) return listSkillsAdmin(ctx);
     if (method === "GET" && a && seg.length === 2) return getSkillAdmin(ctx, a);
-    if (method === "POST" && seg.length === 1) return createSkill(ctx, asObject(body));
-    if (method === "PUT" && a && seg.length === 2) return updateSkill(ctx, a, asObject(body));
-    if (method === "DELETE" && a && seg.length === 2) return deleteSkill(ctx, a);
+    if (method === "POST" && seg.length === 1) return createSkill(ctx, user, asObject(body));
+    if (method === "PUT" && a && seg.length === 2) return updateSkill(ctx, user, a, asObject(body));
+    if (method === "DELETE" && a && seg.length === 2) return deleteSkill(ctx, user, a);
   }
 
   throw new HttpError(404, "not found");
@@ -315,7 +396,7 @@ const TEMPLATE_CRED_ANY = /\$\{cred:([^}]+)\}/g;
 /** Secret store paths a server’s auth templates need (values never included). */
 function secretRefsFor(name: string, c: ServerConfig, stored: Set<string>): Array<{ path: string; stored: boolean }> {
   const paths = new Set<string>();
-  const scope = c.auth?.scope ?? "server";
+  const scope = effectiveAuthScope(c);
   for (const group of [c.auth?.env, c.auth?.headers]) {
     for (const v of Object.values(group ?? {})) {
       for (const m of v.matchAll(TEMPLATE_SECRET)) paths.add(m[1]);
@@ -330,6 +411,7 @@ function secretRefsFor(name: string, c: ServerConfig, stored: Set<string>): Arra
 
 function describeServer(name: string, c: ServerConfig, secretPaths?: Set<string>) {
   const stored = secretPaths ?? new Set<string>();
+  const scope = effectiveAuthScope(c);
   return {
     name,
     description: c.description,
@@ -339,11 +421,13 @@ function describeServer(name: string, c: ServerConfig, secretPaths?: Set<string>
     oauth: Boolean(c.oauth),
     autoActivate: Boolean(c.autoActivate),
     disabled: Boolean(c.disabled),
+    local: Boolean(c.local),
     groups: c.groups ?? [],
+    sharedScopeMultiGroup: sharedScopeMultiGroup(c),
     secretRefs: secretRefsFor(name, c, stored),
     auth: c.auth
       ? {
-          scope: c.auth.scope ?? "server",
+          scope: c.auth.scope ?? scope,
           fallback: c.auth.fallback === "server",
           // Templates only (`${cred:…}` / `${secret:…}`) — they hold no values.
           env: c.auth.env ?? {},
@@ -363,8 +447,10 @@ function catalogServers(ctx: UiContext, user: UserIdentity): unknown {
   for (const name of registry.router.listAll()) {
     const cfg = registry.router.getConfig(name) as ServerConfig;
     if (!canAccess(cfg, user)) continue;
+    // local: true needs the user's machine — hide from remote users (admins see it labelled).
+    if (cfg.local && !user.admin) continue;
     if (cfg.disabled && !user.admin) continue;
-    const scope = cfg.auth?.scope ?? "server";
+    const scope = effectiveAuthScope(cfg);
     const fields = scope === "user" ? userFields(cfg) : [];
     const oauth = isOauthServer(cfg) && (scope === "user" || user.admin);
     const fieldStored = (stored[name] ?? []).length;
@@ -378,10 +464,15 @@ function catalogServers(ctx: UiContext, user: UserIdentity): unknown {
       description: cfg.description,
       keywords: cfg.keywords ?? [],
       transport: cfg.url ? "http" : "stdio",
-      target: cfg.url ?? [cfg.command, ...(cfg.args ?? [])].join(" "),
+      // command/args/URL can embed keys — admins only
+      ...(user.admin
+        ? { target: cfg.url ?? [cfg.command, ...(cfg.args ?? [])].join(" ") }
+        : {}),
       autoActivate: Boolean(cfg.autoActivate),
       disabled: Boolean(cfg.disabled),
+      local: Boolean(cfg.local),
       oauth,
+      sharedScopeMultiGroup: sharedScopeMultiGroup(cfg),
       needsCredentials: needsCreds,
       connected: needsCreds ? connected : true,
       installed: profiles.isServerInstalled(user.id, name),
@@ -405,6 +496,7 @@ function catalogSkills(ctx: UiContext, user: UserIdentity): unknown {
     configured,
     skills: skills.listAll().flatMap((name) => {
       const c = skills.getConfig(name)!;
+      if (!canAccess(c, user)) return [];
       if (c.disabled && !user.admin) return [];
       const instructionsPath = c.path.replace(/SKILL\.md$/, "INSTRUCTIONS.md");
       const available = existsSync(instructionsPath) || existsSync(c.path);
@@ -413,11 +505,12 @@ function catalogSkills(ctx: UiContext, user: UserIdentity): unknown {
           name,
           description: c.description,
           keywords: c.keywords ?? [],
-          path: c.path,
+          ...(user.admin ? { path: c.path } : {}),
           plugin: c.plugin ?? null,
           migratedFrom: c.migratedFrom ?? null,
           available,
           disabled: Boolean(c.disabled),
+          groups: c.groups ?? [],
           installed: ctx.profiles.isSkillInstalled(user.id, name),
           managed: isManagedSkillPath(ctx, c.path),
         },
@@ -430,6 +523,9 @@ function installServer(ctx: UiContext, user: UserIdentity, name: string): unknow
   ctx.registry.router.reloadServersFromDisk();
   const cfg = ctx.registry.router.getConfig(name);
   if (!cfg || cfg.disabled || !canAccess(cfg, user)) throw new HttpError(404, "No such server");
+  if (cfg.local) {
+    throw new HttpError(400, `Server "${name}" is local-only and cannot be used through the gateway`);
+  }
   ctx.profiles.installServer(user.id, name);
   return { installed: true, name };
 }
@@ -442,7 +538,7 @@ function uninstallServer(ctx: UiContext, user: UserIdentity, name: string): unkn
 function installSkill(ctx: UiContext, user: UserIdentity, name: string): unknown {
   ctx.registry.skillRouter.reloadFromDisk();
   const cfg = ctx.registry.skillRouter.getConfig(name);
-  if (!cfg || cfg.disabled) throw new HttpError(404, "No such skill");
+  if (!cfg || cfg.disabled || !canAccess(cfg, user)) throw new HttpError(404, "No such skill");
   ctx.profiles.installSkill(user.id, name);
   return { installed: true, name };
 }
@@ -497,8 +593,24 @@ function managedSkillsRoot(ctx: UiContext): string {
 }
 
 function isManagedSkillPath(ctx: UiContext, skillPath: string): boolean {
-  const root = managedSkillsRoot(ctx) + "/";
-  return resolve(skillPath).startsWith(root) || resolve(dirname(skillPath)).startsWith(managedSkillsRoot(ctx));
+  // Trailing slash so `managed-skills-evil/...` cannot match `managed-skills`.
+  const root = managedSkillsRoot(ctx).replace(/\/?$/, "/");
+  const resolved = resolve(skillPath);
+  return resolved.startsWith(root);
+}
+
+/**
+ * Directory owned by one managed skill (`managed-skills/<name>/`).
+ * Never returns the managed root itself or a parent that could hold other skills.
+ */
+function managedSkillOwnDir(ctx: UiContext, skillPath: string): string | undefined {
+  const root = resolve(managedSkillsRoot(ctx));
+  const resolved = resolve(skillPath);
+  const rel = relative(root, resolved);
+  if (!rel || rel.startsWith("..") || isAbsolute(rel)) return undefined;
+  const name = rel.split(/[/\\]/)[0];
+  if (!name || name === "." || name === "..") return undefined;
+  return join(root, name);
 }
 
 function writeManagedSkillFiles(skillDir: string, name: string, description: string, body: string): string {
@@ -527,7 +639,7 @@ function stringList(v: unknown): string[] {
   return v.map((x) => String(x).trim()).filter(Boolean);
 }
 
-function createServer(ctx: UiContext, body: Record<string, unknown>): unknown {
+function createServer(ctx: UiContext, user: UserIdentity, body: Record<string, unknown>): unknown {
   const name = asString(body.name, "name", 64);
   if (!NAME.test(name)) throw new HttpError(400, "name may contain letters, digits, '.', '_' and '-'");
   const path = ctx.registry.configPath;
@@ -545,7 +657,9 @@ function createServer(ctx: UiContext, body: Record<string, unknown>): unknown {
     if (body.headers && typeof body.headers === "object") entry.headers = stringMap(body.headers, "headers") ?? {};
     if (body.oauth !== undefined) entry.oauth = body.oauth;
   } else {
-    entry.command = asString(body.command, "command", 4096);
+    const command = asString(body.command, "command", 4096);
+    assertUiCommand(command);
+    entry.command = command;
     if (Array.isArray(body.args)) entry.args = body.args.map((x) => String(x));
     if (body.env && typeof body.env === "object") entry.env = stringMap(body.env, "env") ?? {};
   }
@@ -572,15 +686,17 @@ function createServer(ctx: UiContext, body: Record<string, unknown>): unknown {
   file.servers[name] = entry;
   writeServersFile(path, file);
   ctx.registry.router.reloadServersFromDisk();
+  ctx.audit.recordAdmin({ user: user.id, action: "server.create", target: name, after: sanitizeServerEntry(entry) });
   return describeServer(name, ctx.registry.router.getConfig(name) as ServerConfig, new Set(ctx.secrets.list()));
 }
 
 /** Write the editable fields of one server back to servers.json (validated, atomic, backed up). */
-function patchServer(ctx: UiContext, name: string, patch: Record<string, unknown>): unknown {
+function patchServer(ctx: UiContext, user: UserIdentity, name: string, patch: Record<string, unknown>): unknown {
   const path = ctx.registry.configPath;
   const file = readServersFile(path);
   const entry = file.servers[name];
   if (!entry) throw new HttpError(404, "No such server");
+  const before = sanitizeServerEntry(entry);
 
   if ("description" in patch && typeof patch.description === "string") entry.description = patch.description;
   if ("keywords" in patch) entry.keywords = stringList(patch.keywords);
@@ -594,13 +710,27 @@ function patchServer(ctx: UiContext, name: string, patch: Record<string, unknown
     if (patch.disabled === true) entry.disabled = true;
     else delete entry.disabled;
   }
+  if ("local" in patch) {
+    if (patch.local === true) entry.local = true;
+    else delete entry.local;
+  }
   if ("command" in patch && typeof patch.command === "string") {
+    // Unchanged command is allowed (UI resubmits it on every save); new/changed needs the allowlist.
+    if (patch.command !== entry.command) assertUiCommand(patch.command);
     entry.command = patch.command;
     delete entry.url;
     delete entry.type;
   }
   if ("args" in patch) {
-    if (Array.isArray(patch.args)) entry.args = patch.args.map((x) => String(x));
+    const nextArgs = Array.isArray(patch.args) ? patch.args.map((x) => String(x)) : undefined;
+    const prevArgs = Array.isArray(entry.args) ? (entry.args as unknown[]).map((x) => String(x)) : undefined;
+    const argsChanged = JSON.stringify(nextArgs ?? null) !== JSON.stringify(prevArgs ?? null);
+    if (argsChanged) {
+      const cmd = typeof entry.command === "string" ? entry.command : "";
+      if (!cmd) throw new HttpError(400, "Cannot set args without a stdio command");
+      assertUiCommand(cmd);
+    }
+    if (nextArgs) entry.args = nextArgs;
     else delete entry.args;
   }
   if ("env" in patch) {
@@ -653,18 +783,36 @@ function patchServer(ctx: UiContext, name: string, patch: Record<string, unknown
 
   writeServersFile(path, file);
   ctx.registry.router.reloadServersFromDisk();
+  ctx.audit.recordAdmin({
+    user: user.id,
+    action: "server.patch",
+    target: name,
+    before,
+    after: sanitizeServerEntry(entry),
+  });
   return describeServer(name, ctx.registry.router.getConfig(name) as ServerConfig, new Set(ctx.secrets.list()));
 }
 
-function deleteServer(ctx: UiContext, name: string): unknown {
+function deleteServer(ctx: UiContext, user: UserIdentity, name: string): unknown {
   const path = ctx.registry.configPath;
   const file = readServersFile(path);
-  if (!file.servers[name]) throw new HttpError(404, "No such server");
+  const prior = file.servers[name];
+  if (!prior) throw new HttpError(404, "No such server");
   delete file.servers[name];
   writeServersFile(path, file);
   ctx.registry.router.reloadServersFromDisk();
   ctx.profiles.removeServerEverywhere(name);
+  ctx.audit.recordAdmin({ user: user.id, action: "server.delete", target: name, before: sanitizeServerEntry(prior) });
   return undefined;
+}
+
+/** Snapshot safe for audit hashes (no secret values — templates and structure only). */
+function sanitizeServerEntry(entry: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...entry };
+  if (out.env && typeof out.env === "object") {
+    out.env = Object.fromEntries(Object.keys(out.env as object).map((k) => [k, "[redacted]"]));
+  }
+  return out;
 }
 
 function listSkillsAdmin(ctx: UiContext): unknown {
@@ -681,6 +829,7 @@ function listSkillsAdmin(ctx: UiContext): unknown {
         migratedFrom: c.migratedFrom ?? null,
         managed: isManagedSkillPath(ctx, c.path),
         disabled: Boolean(c.disabled),
+        groups: c.groups ?? [],
       };
     }),
   };
@@ -699,16 +848,18 @@ function getSkillAdmin(ctx: UiContext, name: string): unknown {
     migratedFrom: c.migratedFrom ?? null,
     managed: isManagedSkillPath(ctx, c.path),
     disabled: Boolean(c.disabled),
+    groups: c.groups ?? [],
     body: readSkillBody(c.path),
   };
 }
 
-function createSkill(ctx: UiContext, body: Record<string, unknown>): unknown {
+function createSkill(ctx: UiContext, user: UserIdentity, body: Record<string, unknown>): unknown {
   const name = asString(body.name, "name", 64);
   if (!NAME.test(name)) throw new HttpError(400, "name may contain letters, digits, '.', '_' and '-'");
   const description = typeof body.description === "string" ? body.description : "";
   const keywords = stringList(body.keywords);
   const skillBody = asString(body.body, "body", MAX_SKILL_BODY);
+  const groups = Array.isArray(body.groups) ? stringList(body.groups) : [];
 
   const skillsPath = ctx.registry.skillsConfigPath;
   const file = readSkillsFile(skillsPath);
@@ -716,21 +867,35 @@ function createSkill(ctx: UiContext, body: Record<string, unknown>): unknown {
 
   const skillDir = join(managedSkillsRoot(ctx), name);
   const skillPath = writeManagedSkillFiles(skillDir, name, description, skillBody);
-  const entry = { description, keywords, path: skillPath };
+  const entry: Record<string, unknown> = { description, keywords, path: skillPath };
+  if (groups.length) entry.groups = groups;
   const checked = parseSkillsConfig({ skills: { [name]: entry } }, skillsPath);
   if (checked.errors.length) throw new HttpError(400, checked.errors.join("; "));
 
   file.skills[name] = entry;
   writeSkillsFile(skillsPath, file);
   ctx.registry.skillRouter.reloadFromDisk();
+  ctx.audit.recordAdmin({
+    user: user.id,
+    action: "skill.create",
+    target: name,
+    after: { description, keywords, path: skillPath, groups },
+  });
   return getSkillAdmin(ctx, name);
 }
 
-function updateSkill(ctx: UiContext, name: string, body: Record<string, unknown>): unknown {
+function updateSkill(ctx: UiContext, user: UserIdentity, name: string, body: Record<string, unknown>): unknown {
   const skillsPath = ctx.registry.skillsConfigPath;
   const file = readSkillsFile(skillsPath);
   const entry = file.skills[name];
   if (!entry) throw new HttpError(404, "No such skill");
+  const before = {
+    description: entry.description ?? "",
+    keywords: stringList(entry.keywords),
+    path: entry.path,
+    disabled: Boolean(entry.disabled),
+    groups: stringList(entry.groups),
+  };
 
   const contentEdit = "description" in body || "keywords" in body || "body" in body;
   if (contentEdit) {
@@ -755,15 +920,33 @@ function updateSkill(ctx: UiContext, name: string, body: Record<string, unknown>
     if (body.disabled === true) entry.disabled = true;
     else delete entry.disabled;
   }
+  if ("groups" in body) {
+    const g = stringList(body.groups);
+    if (g.length) entry.groups = g;
+    else delete entry.groups;
+  }
   const checked = parseSkillsConfig({ skills: { [name]: entry } }, skillsPath);
   if (checked.errors.length) throw new HttpError(400, checked.errors.join("; "));
 
   writeSkillsFile(skillsPath, file);
   ctx.registry.skillRouter.reloadFromDisk();
+  ctx.audit.recordAdmin({
+    user: user.id,
+    action: "skill.update",
+    target: name,
+    before,
+    after: {
+      description: entry.description ?? "",
+      keywords: stringList(entry.keywords),
+      path: entry.path,
+      disabled: Boolean(entry.disabled),
+      groups: stringList(entry.groups),
+    },
+  });
   return getSkillAdmin(ctx, name);
 }
 
-function deleteSkill(ctx: UiContext, name: string): unknown {
+function deleteSkill(ctx: UiContext, user: UserIdentity, name: string): unknown {
   const skillsPath = ctx.registry.skillsConfigPath;
   const file = readSkillsFile(skillsPath);
   const entry = file.skills[name];
@@ -773,14 +956,20 @@ function deleteSkill(ctx: UiContext, name: string): unknown {
   writeSkillsFile(skillsPath, file);
   ctx.registry.skillRouter.reloadFromDisk();
   ctx.profiles.removeSkillEverywhere(name);
-  if (isManagedSkillPath(ctx, skillPath)) {
-    const dir = skillPath.endsWith("SKILL.md") ? dirname(skillPath) : dirname(skillPath);
+  const ownDir = managedSkillOwnDir(ctx, skillPath);
+  if (ownDir) {
     try {
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(ownDir, { recursive: true, force: true });
     } catch {
       /* best effort */
     }
   }
+  ctx.audit.recordAdmin({
+    user: user.id,
+    action: "skill.delete",
+    target: name,
+    before: { description: entry.description ?? "", path: skillPath },
+  });
   return undefined;
 }
 
@@ -812,7 +1001,7 @@ async function connections(
       const cfg = registry.router.getConfig(name) as ServerConfig;
       if (!canAccess(cfg, user)) continue;
       if (cfg.disabled && !user.admin) continue;
-      const scope = cfg.auth?.scope ?? "server";
+      const scope = effectiveAuthScope(cfg);
       const fields = scope === "user" ? userFields(cfg) : [];
       const oauth = isOauthServer(cfg) && (scope === "user" || user.admin);
       if (!fields.length && !oauth) continue;
@@ -829,6 +1018,7 @@ async function connections(
         oauth,
         oauthConnected: oauth ? ctx.oauthConnected(user.id, name, cfg) : false,
         oauthShared: oauth && scope !== "user",
+        sharedScopeMultiGroup: sharedScopeMultiGroup(cfg),
       });
     }
     return { connections: out };
@@ -836,10 +1026,10 @@ async function connections(
 
   const [, server, action] = seg;
   const cfg = server ? registry.router.getConfig(server) : undefined;
-  if (!cfg || !canAccess(cfg, user)) throw new HttpError(404, "No such server");
+  if (!cfg || cfg.disabled || !canAccess(cfg, user)) throw new HttpError(404, "No such server");
 
   if (method === "POST" && action === "oauth" && seg.length === 3) {
-    const scope = cfg.auth?.scope ?? "server";
+    const scope = effectiveAuthScope(cfg);
     if (!isOauthServer(cfg)) throw new HttpError(400, "This server does not use OAuth");
     if (scope !== "user" && !user.admin) throw new HttpError(403, "Only an admin can connect a shared OAuth server");
     const authorizationUrl = await ctx.beginOAuth(user.id, server, cfg);
@@ -847,14 +1037,14 @@ async function connections(
   }
 
   if (method === "DELETE" && action === "oauth" && seg.length === 3) {
-    const scope = cfg.auth?.scope ?? "server";
+    const scope = effectiveAuthScope(cfg);
     if (scope !== "user" && !user.admin) throw new HttpError(403, "Only an admin can disconnect a shared OAuth server");
-    if (!ctx.clearOAuth(user.id, server, cfg)) throw new HttpError(404, "No OAuth token stored");
+    if (!ctx.clearOAuth(user.id, server, cfg, user.admin)) throw new HttpError(404, "No OAuth token stored");
     return undefined;
   }
 
   const field = action;
-  if ((cfg.auth?.scope ?? "server") !== "user") throw new HttpError(404, "No such server");
+  if (effectiveAuthScope(cfg) !== "user") throw new HttpError(404, "No such server");
   if (!vault) throw new HttpError(501, "Credential storage is not enabled on this gateway");
   const f = (field ?? "").toLowerCase();
   if (!userFields(cfg).includes(f)) throw new HttpError(404, "That server doesn't take this credential");

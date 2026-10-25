@@ -8,10 +8,21 @@ import type { AddressInfo } from "net";
 import { randomUUID } from "crypto";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { CallToolRequestSchema, ListToolsRequestSchema, isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
+import {
+  CallToolRequestSchema,
+  ListToolsRequestSchema,
+  ListResourcesRequestSchema,
+  ReadResourceRequestSchema,
+  ListPromptsRequestSchema,
+  GetPromptRequestSchema,
+  McpError,
+  ErrorCode,
+  isInitializeRequest,
+} from "@modelcontextprotocol/sdk/types.js";
 import { ProcessManager } from "../process-manager.js";
 import { createBroker, type BrokerAccess, type ToolResult } from "../broker.js";
 import { META_TOOL_NAMES } from "../meta-tools.js";
+import { formatSkillUri, parseSkillUri } from "../skill-router.js";
 import type { Registry } from "../registry.js";
 import { APP_NAME } from "../paths.js";
 import { VERSION, LOG_PREFIX } from "../version.js";
@@ -24,14 +35,18 @@ import { UserProfileStore } from "./profile.js";
 import { readBody, sendJson } from "./http-util.js";
 import { handleUi, isUiPath } from "./ui-api.js";
 import {
+  OAUTH_BIND_COOKIE,
   clearStoredToken,
   finishRemoteAuthorization,
   hasStoredToken,
   oauthCallbackPage,
+  oauthStartPage,
+  peekPendingAuth,
   startRemoteAuthorization,
   type OAuthConfig,
 } from "../oauth.js";
-import type { ServerConfig } from "../router.js";
+import { effectiveAuthScope, sharedScopeMultiGroup, type ServerConfig } from "../router.js";
+import { isSharedIndexable } from "./tool-index-warm.js";
 
 export interface GatewayOptions {
   registry: Registry;
@@ -57,6 +72,22 @@ export interface GatewayOptions {
    * redirect URIs. Defaults to http://127.0.0.1:<port> (or the listen host when not loopback).
    */
   publicUrl?: string;
+  /**
+   * When non-empty, stdio `command` must match exactly. Defaults from
+   * `LAZYGATE_STDIO_ALLOWLIST` when the CLI starts serve.
+   */
+  stdioCommandAllowlist?: readonly string[];
+  /** Per-server idle TTL passed to each session's ProcessManager (0 disables). */
+  serverIdleTtlMs?: number;
+  /** Max active MCP servers per session (0 = unlimited). */
+  maxActiveServers?: number;
+  /** Max total tools across active servers per session (0 = unlimited). */
+  maxActiveTools?: number;
+  /**
+   * When true, every server exposes tools as `server__tool` unless it sets
+   * `namespaceTools: false`. Default false.
+   */
+  namespaceTools?: boolean;
 }
 
 export interface Gateway {
@@ -110,6 +141,27 @@ const firstText = (r: ToolResult): string => {
   return typeof c?.text === "string" ? c.text : "";
 };
 
+function parseCookies(header: string | string[] | undefined): Record<string, string> {
+  const raw = Array.isArray(header) ? header.join(";") : header ?? "";
+  const out: Record<string, string> = {};
+  for (const part of raw.split(";")) {
+    const i = part.indexOf("=");
+    if (i < 0) continue;
+    const k = part.slice(0, i).trim();
+    const v = part.slice(i + 1).trim();
+    if (k) out[k] = decodeURIComponent(v);
+  }
+  return out;
+}
+
+function oauthBindSetCookie(token: string): string {
+  return `${OAUTH_BIND_COOKIE}=${encodeURIComponent(token)}; Path=/oauth; HttpOnly; SameSite=Lax; Max-Age=600`;
+}
+
+function oauthBindClearCookie(): string {
+  return `${OAUTH_BIND_COOKIE}=; Path=/oauth; HttpOnly; SameSite=Lax; Max-Age=0`;
+}
+
 export async function startGateway(opts: GatewayOptions): Promise<Gateway> {
   const { registry, tokens, secrets, audit, profiles } = opts;
   const host = opts.host ?? "127.0.0.1";
@@ -124,19 +176,21 @@ export async function startGateway(opts: GatewayOptions): Promise<Gateway> {
 
   async function beginOAuth(userId: string, name: string, cfg: ServerConfig): Promise<string> {
     if (!cfg.url || !wantsOAuth(cfg)) throw new Error(`Server "${name}" does not use OAuth`);
+    if (cfg.disabled) throw new Error(`Server "${name}" is disabled`);
     const redirectUri = `${publicUrl}/oauth/callback`;
-    const { authorizationUrl } = await startRemoteAuthorization({
+    const { state } = await startRemoteAuthorization({
       serverName: name,
       serverUrl: cfg.url,
       config: normalizeOAuth(cfg.oauth),
-      owner: (cfg.auth?.scope ?? "server") === "user" ? userId : undefined,
+      owner: effectiveAuthScope(cfg) === "user" ? userId : undefined,
       redirectUri,
     });
-    return authorizationUrl;
+    // Gateway start page sets the bind cookie and shows "connecting as X" before the IdP.
+    return `${publicUrl}/oauth/start?state=${encodeURIComponent(state)}`;
   }
 
   function oauthOwner(userId: string, cfg: ServerConfig): string | undefined {
-    return (cfg.auth?.scope ?? "server") === "user" ? userId : undefined;
+    return effectiveAuthScope(cfg) === "user" ? userId : undefined;
   }
 
   function connectionGaps(userId: string, name: string, cfg: ServerConfig, creds: UserCredentials): string[] {
@@ -151,26 +205,46 @@ export async function startGateway(opts: GatewayOptions): Promise<Gateway> {
     if (s.closed) return;
     s.closed = true;
     if (s.id) sessions.delete(s.id);
-    for (const name of s.manager.listActive()) s.manager.deactivate(name);
+    s.manager.dispose();
     void s.server.close().catch(() => undefined);
   }
 
   function createSession(user: UserIdentity, creds: UserCredentials): Session {
     const redactor = new Redactor();
-    const server = new Server({ name: APP_NAME, version: VERSION }, { capabilities: { tools: { listChanged: true } } });
+    const server = new Server(
+      { name: APP_NAME, version: VERSION },
+      {
+        capabilities: {
+          tools: { listChanged: true },
+          // Skill files as resources; installed skills as prompts (slash-command style).
+          resources: {},
+          prompts: {},
+        },
+      }
+    );
 
     const session = { user, server, creds, redactor, createdAt: Date.now(), lastSeen: Date.now(), closed: false, id: "" } as Session;
 
     session.manager = new ProcessManager({
       owner: user.id,
       oauthInteractive: false,
+      // Gateway: never inherit the full process env by default; LAZYGATE_* is always stripped.
+      defaultInheritEnv: false,
+      stdioCommandAllowlist: opts.stdioCommandAllowlist,
+      idleTtlMs: opts.serverIdleTtlMs,
+      maxActiveServers: opts.maxActiveServers,
+      maxActiveTools: opts.maxActiveTools,
+      namespaceTools: opts.namespaceTools,
       reservedToolNames: META_TOOL_NAMES,
+      onSecrets: (values) => redactor.add(values),
+      redactLog: (line) => redactor.text(line),
       onToolsChanged: () => {
         if (!session.closed) server.sendToolListChanged().catch(() => undefined);
       },
+      // Shared ToolIndex must not learn tool lists fetched with a user's credentials.
       onServerTools: (name, tools) => {
         const cfg = registry.router.getConfig(name);
-        if (cfg) registry.toolIndex.record(name, cfg, tools);
+        if (cfg && isSharedIndexable(cfg)) registry.toolIndex.record(name, cfg, tools);
       },
     });
 
@@ -185,10 +259,18 @@ export async function startGateway(opts: GatewayOptions): Promise<Gateway> {
 
     const access: BrokerAccess = {
       canUse: (name, cfg) =>
-        !cfg.disabled && canAccess(cfg, user) && profiles.isServerInstalled(user.id, name),
+        !cfg.disabled &&
+        !cfg.local &&
+        canAccess(cfg, user) &&
+        profiles.isServerInstalled(user.id, name),
       canUseSkill: (name) => {
         const cfg = registry.skillRouter.getConfig(name);
-        return Boolean(cfg) && !cfg!.disabled && profiles.isSkillInstalled(user.id, name);
+        return (
+          Boolean(cfg) &&
+          !cfg!.disabled &&
+          canAccess(cfg!, user) &&
+          profiles.isSkillInstalled(user.id, name)
+        );
       },
       prepare: (name, cfg) => {
         const r = resolver.resolve(name, cfg, session.creds);
@@ -197,7 +279,7 @@ export async function startGateway(opts: GatewayOptions): Promise<Gateway> {
       },
       missing: (name, cfg) => connectionGaps(user.id, name, cfg, session.creds),
       connect: async (name, cfg) => {
-        if (!canAccess(cfg, user)) throw new Error(`Unknown server: "${name}"`);
+        if (cfg.disabled || !canAccess(cfg, user)) throw new Error(`Unknown server: "${name}"`);
         const gaps = connectionGaps(user.id, name, cfg, session.creds);
         const needsOauth = wantsOAuth(cfg) && !hasStoredToken(name, oauthOwner(user.id, cfg));
         const needsKey = gaps.some((g) => g.startsWith("X-Lazygate-Cred-") || g.startsWith("secret "));
@@ -205,7 +287,7 @@ export async function startGateway(opts: GatewayOptions): Promise<Gateway> {
           return `Already connected to "${name}". Call activate_server to use it.`;
         }
         if (needsOauth) {
-          if ((cfg.auth?.scope ?? "server") !== "user" && !user.admin) {
+          if (effectiveAuthScope(cfg) !== "user" && !user.admin) {
             throw new Error(
               `Server "${name}" uses a shared OAuth connection — ask an admin to Connect it in the UI.`
             );
@@ -223,16 +305,19 @@ export async function startGateway(opts: GatewayOptions): Promise<Gateway> {
         );
       },
       disconnect: async (name, cfg) => {
-        if (!canAccess(cfg, user)) throw new Error(`Unknown server: "${name}"`);
+        if (cfg.disabled || !canAccess(cfg, user)) throw new Error(`Unknown server: "${name}"`);
         const parts: string[] = [];
         if (opts.vault) {
           for (const f of Object.keys(opts.vault.list(user.id)[name] ?? {})) {
             if (opts.vault.delete(user.id, name, f)) parts.push(`api key "${f}"`);
           }
         }
-        if (clearStoredToken(name, oauthOwner(user.id, cfg))) parts.push("OAuth token");
-        if ((cfg.auth?.scope ?? "server") !== "user" && user.admin && clearStoredToken(name)) {
-          parts.push("shared OAuth token");
+        // User-scope: clear only this user's token. Shared (owner-less) tokens: admins only.
+        const owner = oauthOwner(user.id, cfg);
+        if (owner !== undefined) {
+          if (clearStoredToken(name, owner)) parts.push("OAuth token");
+        } else if (user.admin) {
+          if (clearStoredToken(name)) parts.push("shared OAuth token");
         }
         return parts.length
           ? `Disconnected "${name}" (${parts.join(", ")}).`
@@ -273,6 +358,119 @@ export async function startGateway(opts: GatewayOptions): Promise<Gateway> {
         error: result.isError ? firstText(result).slice(0, 200) : undefined,
       });
       return result;
+    });
+
+    const skillAllowed = (name: string): boolean => {
+      const cfg = registry.skillRouter.getConfig(name);
+      return Boolean(cfg) && !cfg!.disabled && canAccess(cfg!, user) && profiles.isSkillInstalled(user.id, name);
+    };
+
+    server.setRequestHandler(ListResourcesRequestSchema, async () => {
+      registry.skillRouter.reloadFromDisk();
+      const resources: Array<{ uri: string; name: string; description?: string; mimeType?: string }> = [];
+      for (const name of registry.skillRouter.listAll()) {
+        if (!skillAllowed(name)) continue;
+        let files: string[] = [];
+        try {
+          files = registry.skillRouter.listFiles(name);
+        } catch {
+          continue;
+        }
+        for (const f of files) {
+          resources.push({
+            uri: formatSkillUri(name, f),
+            name: `${name}/${f}`,
+            description: `Bundled file from skill "${name}"`,
+            mimeType: f.toLowerCase().endsWith(".md") ? "text/markdown" : undefined,
+          });
+        }
+      }
+      return { resources };
+    });
+
+    server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
+      const uri = request.params.uri;
+      const parsed = parseSkillUri(uri);
+      if (!parsed) {
+        throw new McpError(ErrorCode.InvalidParams, `Unsupported resource URI: ${uri}`);
+      }
+      registry.skillRouter.reloadFromDisk();
+      if (!skillAllowed(parsed.name)) {
+        throw new McpError(ErrorCode.InvalidParams, `Unknown or inaccessible skill resource: ${uri}`);
+      }
+      if (!parsed.relPath) {
+        throw new McpError(ErrorCode.InvalidParams, `Resource URI must include a file path: ${uri}`);
+      }
+      try {
+        const file = registry.skillRouter.readFile(parsed.name, parsed.relPath);
+        if (file.text !== undefined) {
+          return {
+            contents: [{ uri, mimeType: file.mimeType, text: file.text }],
+          };
+        }
+        return {
+          contents: [
+            {
+              uri,
+              mimeType: file.mimeType,
+              blob: file.blob!.toString("base64"),
+            },
+          ],
+        };
+      } catch (err) {
+        throw new McpError(ErrorCode.InvalidParams, (err as Error).message);
+      }
+    });
+
+    server.setRequestHandler(ListPromptsRequestSchema, async () => {
+      registry.skillRouter.reloadFromDisk();
+      const prompts = [];
+      for (const name of registry.skillRouter.listAll()) {
+        if (!skillAllowed(name)) continue;
+        const cfg = registry.skillRouter.getConfig(name)!;
+        prompts.push({
+          name,
+          description: cfg.description || `Skill: ${name}`,
+        });
+      }
+      return { prompts };
+    });
+
+    server.setRequestHandler(GetPromptRequestSchema, async (request) => {
+      const name = request.params.name;
+      registry.skillRouter.reloadFromDisk();
+      if (!skillAllowed(name)) {
+        throw new McpError(ErrorCode.InvalidParams, `Unknown or inaccessible skill prompt: ${name}`);
+      }
+      try {
+        const body = registry.skillRouter.load(name, { maxBytes: 0 });
+        let files: string[] = [];
+        try {
+          files = registry.skillRouter.listFiles(name);
+        } catch {
+          files = [];
+        }
+        const fileNote =
+          files.length === 0
+            ? ""
+            : `\n\nBundled files:\n` +
+              files.map((f) => `- ${formatSkillUri(name, f)}`).join("\n") +
+              `\n(Use resources/read or read_skill_file to fetch.)`;
+        return {
+          description: registry.skillRouter.getConfig(name)?.description,
+          messages: [
+            {
+              role: "user" as const,
+              content: {
+                type: "text" as const,
+                text: `# Skill: ${name}\n\n${body}${fileNote}`,
+              },
+            },
+          ],
+        };
+      } catch (err) {
+        throw new McpError(ErrorCode.InvalidParams, (err as Error).message);
+      }
     });
 
     // Auto-activate servers once the client finished initializing; skip anything that still needs credentials.
@@ -332,26 +530,68 @@ export async function startGateway(opts: GatewayOptions): Promise<Gateway> {
 
     if (!hostAllowed(req)) return sendJson(res, 403, { error: "host not allowed" });
 
-    // OAuth redirect target — no bearer auth; the one-time `state` binds the flow to a user.
+    // Confirm Connect in this browser (sets bind cookie), then redirect to the IdP.
+    if (path === "/oauth/start" && (req.method === "GET" || req.method === "HEAD")) {
+      const q = new URLSearchParams(rawQuery);
+      const state = q.get("state") ?? "";
+      const pending = peekPendingAuth(state);
+      if (!pending) {
+        const html = oauthCallbackPage(false, "OAuth state is invalid or expired — start Connect again from the UI", `${publicUrl}/ui`);
+        res.writeHead(400, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+        res.end(req.method === "HEAD" ? undefined : html);
+        return;
+      }
+      if (q.get("confirm") === "1") {
+        res.writeHead(302, {
+          Location: pending.authorizationUrl,
+          "Set-Cookie": oauthBindSetCookie(pending.bindToken),
+          "Cache-Control": "no-store",
+        });
+        res.end();
+        return;
+      }
+      const confirmUrl = `${publicUrl}/oauth/start?state=${encodeURIComponent(state)}&confirm=1`;
+      const html = oauthStartPage({
+        serverName: pending.serverName,
+        owner: pending.owner,
+        confirmUrl,
+        uiUrl: `${publicUrl}/ui`,
+      });
+      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+      res.end(req.method === "HEAD" ? undefined : html);
+      return;
+    }
+
+    // OAuth redirect target — state + bind cookie must match (browser that confirmed Connect).
     if (path === "/oauth/callback" && (req.method === "GET" || req.method === "HEAD")) {
       const q = new URLSearchParams(rawQuery);
       const state = q.get("state") ?? "";
       const code = q.get("code");
       const err = q.get("error");
+      const bindToken = parseCookies(req.headers.cookie)[OAUTH_BIND_COOKIE];
       let html: string;
       let ok = false;
       if (!code || err) {
         html = oauthCallbackPage(false, err ? `Provider error: ${err}` : "Missing authorization code", `${publicUrl}/ui`);
       } else {
         try {
-          const { serverName } = await finishRemoteAuthorization(state, code);
-          html = oauthCallbackPage(true, `"${serverName}" is connected. You can close this tab and activate the server.`, `${publicUrl}/ui`);
+          const { serverName, owner } = await finishRemoteAuthorization(state, code, bindToken);
+          const asWho = owner ? ` as ${owner}` : " (shared)";
+          html = oauthCallbackPage(
+            true,
+            `"${serverName}" is connected${asWho}. You can close this tab and activate the server.`,
+            `${publicUrl}/ui`
+          );
           ok = true;
         } catch (e) {
           html = oauthCallbackPage(false, (e as Error).message, `${publicUrl}/ui`);
         }
       }
-      res.writeHead(ok ? 200 : 400, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+      res.writeHead(ok ? 200 : 400, {
+        "Content-Type": "text/html; charset=utf-8",
+        "Cache-Control": "no-store",
+        "Set-Cookie": oauthBindClearCookie(),
+      });
       res.end(req.method === "HEAD" ? undefined : html);
       return;
     }
@@ -371,11 +611,12 @@ export async function startGateway(opts: GatewayOptions): Promise<Gateway> {
           publicUrl,
           beginOAuth: (userId, name, cfg) => beginOAuth(userId, name, cfg),
           oauthConnected: (userId, name, cfg) => hasStoredToken(name, oauthOwner(userId, cfg)),
-          clearOAuth: (userId, name, cfg) => {
-            let n = 0;
-            if (clearStoredToken(name, oauthOwner(userId, cfg))) n++;
-            if ((cfg.auth?.scope ?? "server") !== "user" && clearStoredToken(name)) n++;
-            return n > 0;
+          clearOAuth: (userId, name, cfg, admin) => {
+            const owner = oauthOwner(userId, cfg);
+            if (owner !== undefined) return clearStoredToken(name, owner);
+            // Shared (owner-less) token — only admins may delete it.
+            if (!admin) return false;
+            return clearStoredToken(name);
           },
           sessions: () =>
             [...sessions.values()].map((s) => ({
@@ -385,6 +626,7 @@ export async function startGateway(opts: GatewayOptions): Promise<Gateway> {
               lastSeen: s.lastSeen,
               servers: s.manager.listActive(),
             })),
+          stdioCommandAllowlist: opts.stdioCommandAllowlist,
         },
         req,
         res,
@@ -471,6 +713,14 @@ export async function startGateway(opts: GatewayOptions): Promise<Gateway> {
   if (!publicUrl) {
     const loopback = host === "127.0.0.1" || host === "localhost" || host === "::1";
     publicUrl = `http://${loopback ? "127.0.0.1" : shownHost}:${port}`;
+  }
+  for (const name of registry.router.listAll()) {
+    const cfg = registry.router.getConfig(name);
+    if (cfg && sharedScopeMultiGroup(cfg)) {
+      console.error(
+        `${LOG_PREFIX} warning: server "${name}" uses shared credentials (auth.scope=server) and is visible to more than one group — every caller acts as the same identity`
+      );
+    }
   }
   return {
     url: `http://${shownHost}:${port}/mcp`,

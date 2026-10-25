@@ -4,13 +4,18 @@
 import type { z } from "zod";
 import type { ToolRouter, ServerConfig } from "./router.js";
 import type { SkillRouter } from "./skill-router.js";
-import type { ProcessManager, RuntimeCredentials } from "./process-manager.js";
+import type { ProcessManager, RuntimeCredentials, MCPTool } from "./process-manager.js";
 import {
-  META_TOOLS,
+  listedMetaTools,
   QuerySchema,
   ServerNameSchema,
   SkillNameSchema,
+  ReadSkillFileSchema,
+  DescribeToolSchema,
+  CallToolSchema,
 } from "./meta-tools.js";
+import { formatSkillUri, parseSkillUri } from "./skill-router.js";
+import { bareToolName, parseNamespacedTool } from "./tool-names.js";
 import { LOG_PREFIX } from "./version.js";
 
 export interface ToolResult {
@@ -23,7 +28,10 @@ export interface ToolResult {
 export interface BrokerAccess {
   /** Whether this caller may see and use the server. */
   canUse(name: string, cfg: ServerConfig): boolean;
-  /** Whether this caller may discover/load the skill (gateway install list). Absent = all skills. */
+  /**
+   * Whether this caller may discover/load the skill (gateway: group ACL + install list).
+   * Absent = all configured skills.
+   */
   canUseSkill?(name: string): boolean;
   /**
    * Resolve the caller's credentials for the server. Throws an Error with a user-facing message
@@ -67,17 +75,56 @@ function matchedLine(keywords: string[], descriptionWords: string[], toolWords: 
 const SUMMARY_MAX = 160;
 /** Above this many tools, activation lists names only (the schemas carry the details). */
 const DETAILED_LIST_MAX_TOOLS = 12;
+/** Cap discovery results so a large catalog cannot flood the context window. */
+export const DISCOVER_TOP_K = 5;
+/** Require at least one keyword match or two description-word matches. */
+export const DISCOVER_MIN_SCORE = 2;
 
-export function formatActivation(serverName: string, tools: Array<{ name: string; description?: string }>): string {
+/** Whether any of this server's tools are merged into tools/list. */
+export function exposesInList(cfg: ServerConfig | undefined): boolean {
+  const expose = cfg?.expose ?? "none";
+  if (expose === "none") return false;
+  if (expose === "all") return true;
+  return Array.isArray(expose) && expose.length > 0;
+}
+
+/** Filter active tools according to the server's `expose` setting (default `"none"`). */
+export function filterExposedTools(
+  tools: MCPTool[],
+  getConfig: (serverName: string) => ServerConfig | undefined
+): MCPTool[] {
+  return tools.filter((t) => {
+    const expose = getConfig(t.serverName)?.expose ?? "none";
+    if (expose === "none") return false;
+    if (expose === "all") return true;
+    // Allowlists use upstream (bare) names even when tools are exposed as server__tool.
+    const bare = bareToolName(t.serverName, t.name);
+    return Array.isArray(expose) && (expose.includes(bare) || expose.includes(t.name));
+  });
+}
+
+/** Match a describe/call tool arg against an exposed or bare tool name. */
+function toolNameMatches(server: string, exposedName: string, requested: string): boolean {
+  if (exposedName === requested) return true;
+  return bareToolName(server, exposedName) === requested;
+}
+
+export function formatActivation(
+  serverName: string,
+  tools: Array<{ name: string; description?: string }>,
+  opts: { exposed: boolean } = { exposed: false }
+): string {
+  const schemaHint = opts.exposed
+    ? "full descriptions are in the tool schemas"
+    : "use describe_tool for schemas and call_tool to invoke";
   if (tools.length > DETAILED_LIST_MAX_TOOLS) {
     return (
-      `✓ Activated "${serverName}" with ${tools.length} tools (names only; descriptions are in the tool schemas):\n` +
+      `✓ Activated "${serverName}" with ${tools.length} tools (names only; ${schemaHint}):\n` +
       tools.map((t) => t.name).join(", ")
     );
   }
   return (
-    `✓ Activated "${serverName}" with ${tools.length} tools (first sentence of each; ` +
-    `full descriptions are in the tool schemas):\n` +
+    `✓ Activated "${serverName}" with ${tools.length} tools (first sentence of each; ${schemaHint}):\n` +
     tools.map((t) => `  • ${t.name}: ${summarizeDescription(t.description)}`).join("\n")
   );
 }
@@ -85,7 +132,7 @@ export function formatActivation(serverName: string, tools: Array<{ name: string
 /**
  * First sentence of a tool description, capped in length. Activation output uses this so a
  * server with dozens of tools doesn't dump its full documentation into the context window —
- * the complete descriptions are still in each tool's schema (tools/list).
+ * the complete descriptions are available via describe_tool (or in tools/list when expose is set).
  */
 export function summarizeDescription(description: string | undefined, max = SUMMARY_MAX): string {
   const flat = (description ?? "").trim().split(/\n\s*\n/)[0].replace(/\s+/g, " ");
@@ -116,12 +163,15 @@ export function createBroker({ router, manager, skillRouter, access }: BrokerDep
   const visibleSkillNames = (): string[] => (skillRouter ? skillRouter.listAll().filter(skillVisible) : []);
 
   function listTools() {
-    const activeTools = manager.getAllActiveTools().map((t) => ({
+    // Gateway-only connect/disconnect stay off the list in stdio (no access.connect).
+    const meta = listedMetaTools(Boolean(access?.connect));
+    // Default expose is "none": tools/list stays stable; use describe_tool / call_tool.
+    const activeTools = filterExposedTools(manager.getAllActiveTools(), (n) => router.getConfig(n)).map((t) => ({
       name: t.name,
       description: `[${t.serverName}] ${t.description}`,
       inputSchema: t.inputSchema,
     }));
-    return { tools: [...META_TOOLS, ...activeTools] };
+    return { tools: [...meta, ...activeTools] };
   }
 
   function parseArgs<S extends z.ZodTypeAny>(schema: S, args: unknown): z.infer<S> | ToolResult {
@@ -133,20 +183,33 @@ export function createBroker({ router, manager, skillRouter, access }: BrokerDep
   const isResult = (v: unknown): v is ToolResult =>
     typeof v === "object" && v !== null && "content" in v && Array.isArray((v as ToolResult).content);
 
+  async function ensureActive(serverName: string, cfg: ServerConfig): Promise<ToolResult | null> {
+    if (manager.listActive().includes(serverName)) return null;
+    try {
+      await manager.activate(serverName, cfg, access?.prepare(serverName, cfg));
+      return null;
+    } catch (err) {
+      return fail(`Failed to activate "${serverName}": ${(err as Error).message}`);
+    }
+  }
+
   async function callTool(name: string, rawArgs: Record<string, unknown> | undefined): Promise<ToolResult> {
     switch (name) {
       case "discover_tools": {
         const a = parseArgs(QuerySchema, rawArgs);
         if (isResult(a)) return a;
         router.reloadServersFromDisk();
-        const ranked = router.rank(a.query).filter((r) => visible(r.name));
+        const ranked = router
+          .rank(a.query)
+          .filter((r) => visible(r.name) && r.score >= DISCOVER_MIN_SCORE)
+          .slice(0, DISCOVER_TOP_K);
 
         if (ranked.length === 0) {
           const all = visibleNames();
           return text(
             `No matching servers found for: "${a.query}"\n\nAvailable servers:\n` +
               (all.length
-                ? all.map((n) => `• ${n}: ${router.getConfig(n)!.description}`).join("\n")
+                ? all.map((n) => `• ${n}`).join("\n")
                 : "(none configured — add entries to ~/.config/lazygate/servers.json)")
           );
         }
@@ -177,7 +240,7 @@ export function createBroker({ router, manager, skillRouter, access }: BrokerDep
         }
         try {
           const tools = await manager.activate(a.server_name, cfg, access?.prepare(a.server_name, cfg));
-          return text(formatActivation(a.server_name, tools));
+          return text(formatActivation(a.server_name, tools, { exposed: exposesInList(cfg) }));
         } catch (err) {
           return fail(`Failed to activate "${a.server_name}": ${(err as Error).message}`);
         }
@@ -212,19 +275,84 @@ export function createBroker({ router, manager, skillRouter, access }: BrokerDep
         );
       }
 
+      case "describe_tool": {
+        const a = parseArgs(DescribeToolSchema, rawArgs);
+        if (isResult(a)) return a;
+        router.reloadServersFromDisk();
+        const cfg = router.getConfig(a.server);
+        if (!cfg || !visible(a.server)) {
+          return fail(`Unknown server: "${a.server}". Available: ${visibleNames().join(", ") || "(none)"}`);
+        }
+        const actErr = await ensureActive(a.server, cfg);
+        if (actErr) return actErr;
+        const tool = manager
+          .getAllActiveTools()
+          .find((t) => t.serverName === a.server && toolNameMatches(a.server, t.name, a.tool));
+        if (!tool) {
+          const names = manager
+            .getAllActiveTools()
+            .filter((t) => t.serverName === a.server)
+            .map((t) => t.name);
+          return fail(
+            `Tool "${a.tool}" not found on server "${a.server}". ` +
+              `Available: ${names.join(", ") || "(none)"}`
+          );
+        }
+        return text(
+          JSON.stringify(
+            { name: tool.name, description: tool.description, inputSchema: tool.inputSchema },
+            null,
+            2
+          )
+        );
+      }
+
+      case "call_tool": {
+        const a = parseArgs(CallToolSchema, rawArgs);
+        if (isResult(a)) return a;
+        router.reloadServersFromDisk();
+        const cfg = router.getConfig(a.server);
+        if (!cfg || !visible(a.server)) {
+          return fail(`Unknown server: "${a.server}". Available: ${visibleNames().join(", ") || "(none)"}`);
+        }
+        const actErr = await ensureActive(a.server, cfg);
+        if (actErr) return actErr;
+        const known = manager
+          .getAllActiveTools()
+          .some((t) => t.serverName === a.server && toolNameMatches(a.server, t.name, a.tool));
+        if (!known) {
+          const names = manager
+            .getAllActiveTools()
+            .filter((t) => t.serverName === a.server)
+            .map((t) => t.name);
+          return fail(
+            `Tool "${a.tool}" not found on server "${a.server}". ` +
+              `Available: ${names.join(", ") || "(none)"}`
+          );
+        }
+        try {
+          return (await manager.callTool(a.server, a.tool, a.args ?? {})) as ToolResult;
+        } catch (err) {
+          return fail(`Error calling ${a.tool}: ${(err as Error).message}`);
+        }
+      }
+
       case "discover_skill": {
         if (!skillRouter) return fail("No skills registry configured.");
         const a = parseArgs(QuerySchema, rawArgs);
         if (isResult(a)) return a;
         skillRouter.reloadFromDisk();
-        const ranked = skillRouter.rank(a.query).filter((r) => skillVisible(r.name));
+        const ranked = skillRouter
+          .rank(a.query)
+          .filter((r) => skillVisible(r.name) && r.score >= DISCOVER_MIN_SCORE)
+          .slice(0, DISCOVER_TOP_K);
 
         if (ranked.length === 0) {
           const all = visibleSkillNames();
           return text(
             `No matching skills found for: "${a.query}"\n\nAvailable skills:\n` +
               (all.length
-                ? all.map((n) => `• ${n}: ${skillRouter.getConfig(n)!.description}`).join("\n")
+                ? all.map((n) => `• ${n}`).join("\n")
                 : "(none installed — open the gateway UI catalog and Install a skill)")
           );
         }
@@ -250,7 +378,62 @@ export function createBroker({ router, manager, skillRouter, access }: BrokerDep
           );
         }
         try {
-          return text(`# Skill: ${a.skill_name}\n\n${skillRouter.load(a.skill_name)}`);
+          const body = skillRouter.load(a.skill_name);
+          let files: string[] = [];
+          try {
+            files = skillRouter.listFiles(a.skill_name);
+          } catch {
+            files = [];
+          }
+          const fileSection =
+            files.length === 0
+              ? ""
+              : `\n\n## Bundled files\n` +
+                files.map((f) => `- ${formatSkillUri(a.skill_name, f)}`).join("\n") +
+                `\n\nFetch with read_skill_file or resources/read.`;
+          return text(`# Skill: ${a.skill_name}\n\n${body}${fileSection}`);
+        } catch (err) {
+          return fail((err as Error).message);
+        }
+      }
+
+      case "read_skill_file": {
+        if (!skillRouter) return fail("No skills registry configured.");
+        const a = parseArgs(ReadSkillFileSchema, rawArgs);
+        if (isResult(a)) return a;
+        let skillName = a.skill_name;
+        let relPath = a.path;
+        const asUri = parseSkillUri(a.path);
+        if (asUri) {
+          if (asUri.name !== skillName) {
+            return fail(
+              `path URI skill "${asUri.name}" does not match skill_name "${skillName}"`
+            );
+          }
+          relPath = asUri.relPath;
+        } else if (a.path.startsWith("skill://")) {
+          return fail(`Invalid skill URI: "${a.path}"`);
+        }
+        if (!skillRouter.getConfig(skillName)) skillRouter.reloadFromDisk();
+        if (!skillRouter.getConfig(skillName) || !skillVisible(skillName)) {
+          return fail(
+            `Unknown skill: "${skillName}". Available: ${visibleSkillNames().join(", ") || "(none)"}`
+          );
+        }
+        if (!relPath) {
+          return fail("`path` must name a file under the skill (e.g. INSTRUCTIONS.md or scripts/run.sh)");
+        }
+        try {
+          const file = skillRouter.readFile(skillName, relPath);
+          if (file.text !== undefined) {
+            return text(
+              `# ${formatSkillUri(skillName, file.path)} (${file.mimeType}, ${file.size} bytes)\n\n${file.text}`
+            );
+          }
+          return text(
+            `# ${formatSkillUri(skillName, file.path)} (${file.mimeType}, ${file.size} bytes)\n\n` +
+              `(binary; base64)\n${file.blob!.toString("base64")}`
+          );
         } catch (err) {
           return fail((err as Error).message);
         }
@@ -302,22 +485,57 @@ export function createBroker({ router, manager, skillRouter, access }: BrokerDep
 
     // ── Proxy to an active server ─────────────────────────────────────────
     let serverName = manager.findServerForTool(name);
+    const ns = parseNamespacedTool(name);
+    // Prefer the server named in `server__tool` when that prefix is present.
+    if (!serverName && ns && visible(ns.server)) {
+      router.reloadServersFromDisk();
+      const cfg = router.getConfig(ns.server);
+      if (cfg) {
+        const wasActive = manager.listActive().includes(ns.server);
+        try {
+          await manager.activate(ns.server, cfg, access?.prepare(ns.server, cfg));
+          serverName = manager.findServerForTool(name);
+          if (!serverName && !wasActive) manager.deactivate(ns.server);
+        } catch (err) {
+          console.error(
+            `${LOG_PREFIX} auto-activation of "${ns.server}" failed: ${(err as Error).message}`
+          );
+          if (!wasActive) manager.deactivate(ns.server);
+        }
+      }
+    }
 
     if (!serverName) {
-      // Best-effort auto-activation based on the tool name.
+      // Best-effort auto-activation: exact ToolIndex hits first, then lexical rank.
+      // If a candidate activates but does not expose the tool, deactivate and try the next.
       router.reloadServersFromDisk();
-      const candidate = router.select(name, 10).find(visible);
-      const cfg = candidate ? router.getConfig(candidate) : undefined;
-      if (candidate && cfg) {
+      const lookupName = ns?.tool ?? name;
+      const indexed = router.serversWithTool(lookupName).filter(visible);
+      const scored = router.select(lookupName, 10).filter(visible);
+      const preferred = ns && visible(ns.server) ? [ns.server] : [];
+      const candidates = [...new Set([...preferred, ...indexed, ...scored])];
+      let lastErr: Error | undefined;
+
+      for (const candidate of candidates) {
+        const cfg = router.getConfig(candidate);
+        if (!cfg) continue;
+        const wasActive = manager.listActive().includes(candidate);
         try {
           await manager.activate(candidate, cfg, access?.prepare(candidate, cfg));
           serverName = manager.findServerForTool(name);
+          if (serverName) break;
+          if (!wasActive) manager.deactivate(candidate);
         } catch (err) {
-          console.error(`${LOG_PREFIX} auto-activation of "${candidate}" failed: ${(err as Error).message}`);
-          return fail(
-            `Tool "${name}" not found, and auto-activating "${candidate}" failed: ${(err as Error).message}`
-          );
+          lastErr = err as Error;
+          console.error(`${LOG_PREFIX} auto-activation of "${candidate}" failed: ${lastErr.message}`);
+          if (!wasActive) manager.deactivate(candidate);
         }
+      }
+
+      if (!serverName && lastErr && candidates.length > 0) {
+        return fail(
+          `Tool "${name}" not found, and auto-activating candidates failed: ${lastErr.message}`
+        );
       }
     }
 

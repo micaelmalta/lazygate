@@ -1,19 +1,33 @@
 // src/gateway/audit.ts
-// Append-only JSON-lines audit log. Records who called what — never arguments or results.
+// Append-only JSON-lines audit log. Records who called what — never arguments, results, or secret values.
 
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "fs";
+import { createHash } from "crypto";
 import { dirname } from "path";
 
 export interface AuditEvent {
   user: string;
-  session: string;
+  session?: string;
   /** Tool name as called by the client (meta-tool or proxied tool). */
-  tool: string;
+  tool?: string;
   server?: string;
-  ok: boolean;
-  ms: number;
+  ok?: boolean;
+  ms?: number;
   /** Short reason for failures (never contains credential values). */
   error?: string;
+  /** Admin UI/API mutation (e.g. token.create, secret.set, server.patch). */
+  action?: string;
+  /** Resource id (token id, secret path, server/skill name). */
+  target?: string;
+  /** SHA-256 prefix of a sanitized before snapshot (no secret values). */
+  beforeHash?: string;
+  /** SHA-256 prefix of a sanitized after snapshot (no secret values). */
+  afterHash?: string;
+}
+
+/** Short content hash for before/after snapshots — never pass raw secrets into this. */
+export function auditHash(value: unknown): string {
+  return createHash("sha256").update(JSON.stringify(value ?? null)).digest("hex").slice(0, 16);
 }
 
 export class AuditLog {
@@ -45,5 +59,29 @@ export class AuditLog {
     } catch (err) {
       console.error(`[lazygate] audit write failed: ${(err as Error).message}`);
     }
+  }
+
+  /**
+   * Record a successful admin mutation from the web UI/API.
+   * Pass sanitized snapshots only (names, flags, templates) — never secret or token values.
+   */
+  recordAdmin(opts: {
+    user: string;
+    action: string;
+    target?: string;
+    before?: unknown;
+    after?: unknown;
+  }): void {
+    this.record({
+      user: opts.user,
+      session: "ui",
+      tool: opts.action,
+      action: opts.action,
+      target: opts.target,
+      beforeHash: opts.before !== undefined ? auditHash(opts.before) : undefined,
+      afterHash: opts.after !== undefined ? auditHash(opts.after) : undefined,
+      ok: true,
+      ms: 0,
+    });
   }
 }

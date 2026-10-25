@@ -21,7 +21,7 @@ Tests that touch OAuth mock `os.homedir()` — never let a test write to the rea
 
 ## Architecture
 
-lazygate (formerly context-broker) is an MCP server that itself acts as a proxy. It exposes **8 meta-tools** to Claude Code instead of loading all real MCP server schemas upfront. Real servers and skills are loaded on demand.
+lazygate (formerly context-broker) is an MCP server that itself acts as a proxy. It exposes **11 meta-tools** (`META_TOOLS`; 9 listed in stdio, plus gateway-only `connect_server` / `disconnect_server`) instead of loading all real MCP server schemas upfront. Real servers and skills are loaded on demand (`describe_tool` / `call_tool` by default; `expose` in `servers.json` can merge schemas into `tools/list`). Clients that ignore `notifications/tools/list_changed` should use `call_tool` / `describe_tool`.
 
 ### Source files (`src/`)
 
@@ -29,11 +29,13 @@ lazygate (formerly context-broker) is an MCP server that itself acts as a proxy.
 |---|---|
 | `index.ts` | Entry point. Subcommand dispatch (`migrate`/`revert`/`benchmark`), config loading, wires the MCP SDK server, connects stdio, *then* auto-activates `autoActivate` servers in the background |
 | `broker.ts` | `createBroker({router, manager, skillRouter})` → `listTools()` / `callTool()`. All meta-tool handling and proxying; transport-independent so it is unit-tested |
-| `meta-tools.ts` | The 6 meta-tool definitions (`META_TOOLS`) and zod argument schemas |
+| `meta-tools.ts` | 11 meta-tool definitions (`META_TOOLS`) and zod argument schemas; gateway-only tools filtered in stdio |
 | `router.ts` | `ToolRouter` + `ServerConfig` type; ranks servers against a query; `reloadServersFromDisk()` |
 | `skill-router.ts` | `SkillRouter` — same for file-based skills; `reloadFromDisk()`, `load()` |
 | `scoring.ts` | Shared word-based scorer (keywords +2, description words +1, learned tool words up to +2, light stemming) |
 | `tool-index.ts` | `ToolIndex` — persists each server's tool names/descriptions (`tool-index.json`) so `discover_tools` can route by them |
+| `tool-names.ts` | Optional `server__tool` namespacing helpers (`namespaceTools` per server or `--namespace-tools`) |
+| `gateway/tool-index-warm.ts` | Admin pre-warm of the shared ToolIndex (shared-scope servers only) |
 | `child-env.ts` | `buildChildEnv` — scopes the environment passed to stdio children (`inheritEnv`) |
 | `config.ts` | zod validation for `servers.json` / `skills.json`; invalid entries are skipped and named |
 | `process-manager.ts` | `ProcessManager` — stdio children and HTTP servers: handshake, tool-call proxying, per-server timeouts, activation dedup, collision detection, `onToolsChanged` callback |
@@ -51,16 +53,16 @@ lazygate (formerly context-broker) is an MCP server that itself acts as a proxy.
 
 ### Request flow
 
-1. Claude calls a meta-tool (`discover_tools`, `activate_server`, `deactivate_server`, `list_active_servers`, `discover_skill`, `load_skill`)
+1. Claude calls a meta-tool (`discover_tools`, `activate_server`, `describe_tool`, `call_tool`, `deactivate_server`, `list_active_servers`, `discover_skill`, `load_skill`, `read_skill_file`; gateway also has `connect_server` / `disconnect_server`)
 2. `broker.ts` validates the arguments (zod) and handles it — scoring via `ToolRouter`/`SkillRouter`, or delegating to `ProcessManager`
 3. `ProcessManager` spawns the child (or opens the HTTP session) if not already active, does the MCP initialize handshake, caches the tool list, rejects tool-name collisions, and calls `onToolsChanged` → `index.ts` sends `notifications/tools/list_changed`
-4. Subsequent `CallTool` requests for a non-meta tool are proxied through `ProcessManager.callTool()`
-5. Auto-activation: if Claude calls an unknown tool, the best-scoring server is activated and the call retried; failures come back as `isError` results
+4. Prefer `call_tool(server, tool, args)` so activated schemas need not appear in `tools/list` (default `expose: "none"`). Direct `CallTool` for a non-meta name is still proxied when the tool was exposed or auto-activated
+5. Auto-activation: if Claude calls an unknown tool by name, the best-scoring server is activated and the call retried; failures come back as `isError` results
 6. All failures are returned with `isError: true`
 
 ### Config files
 
-- `~/.config/lazygate/servers.json` — server registry (`{ servers: { name: { description, keywords, command, args, env, inheritEnv, autoActivate, toolTimeoutMs, migratedFrom, disabledPlugins } } }`; HTTP servers use `type`, `url`, `headers`, `oauth`)
+- `~/.config/lazygate/servers.json` — server registry (`{ servers: { name: { description, keywords, command, args, env, inheritEnv, autoActivate, expose, namespaceTools, toolTimeoutMs, migratedFrom, disabledPlugins } } }`; HTTP servers use `type`, `url`, `headers`, `oauth`; `expose` is `"none"` (default) | `"all"` | tool-name allowlist; `namespaceTools: true` exposes tools as `server__tool`)
 - `~/.config/lazygate/skills.json` — skill registry (`{ skills: { name: { description, keywords, path, migratedFrom | plugin } } }`)
 - `config/*.json` in the repo — **examples only**, never loaded implicitly
 

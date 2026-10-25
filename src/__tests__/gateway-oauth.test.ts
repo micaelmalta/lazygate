@@ -32,7 +32,7 @@ const { SecretStore } = await import("../gateway/credentials.js");
 const { UserVault } = await import("../gateway/vault.js");
 const { UserProfileStore } = await import("../gateway/profile.js");
 const { AuditLog } = await import("../gateway/audit.js");
-const { hasStoredToken, tokenPath } = await import("../oauth.js");
+const { hasStoredToken, tokenPath, OAUTH_BIND_COOKIE } = await import("../oauth.js");
 
 const MCP_URL = "https://mcp.example.com/mcp";
 let as: Server;
@@ -42,6 +42,23 @@ let gw: Gateway;
 let alice: string;
 let admin: string;
 const clients: Client[] = [];
+
+/** Walk /oauth/start → confirm (bind cookie) → /oauth/callback with that cookie. */
+async function completeOAuthFromStartUrl(startUrl: string, code: string): Promise<Response> {
+  const state = new URL(startUrl).searchParams.get("state");
+  if (!state) throw new Error("start URL missing state");
+  const confirm = await fetch(`${gw.publicUrl}/oauth/start?state=${encodeURIComponent(state)}&confirm=1`, {
+    redirect: "manual",
+  });
+  expect(confirm.status).toBe(302);
+  const setCookie = confirm.headers.get("set-cookie") ?? "";
+  expect(setCookie).toMatch(new RegExp(`${OAUTH_BIND_COOKIE}=`));
+  const cookiePair = setCookie.split(";")[0]!;
+  expect(confirm.headers.get("location")).toMatch(/authorize|example\.com/);
+  return fetch(`${gw.publicUrl}/oauth/callback?code=${encodeURIComponent(code)}&state=${encodeURIComponent(state)}`, {
+    headers: { Cookie: cookiePair },
+  });
+}
 
 beforeAll(async () => {
   as = createServer((req, res) => {
@@ -169,9 +186,9 @@ describe("connect_server / activate without a token", () => {
     expect(linked.isError).toBeFalsy();
     const m = linked.content[0].text.match(/https?:\/\/\S+/);
     expect(m).toBeTruthy();
-    const authUrl = new URL(m![0]);
-    expect(authUrl.searchParams.get("redirect_uri")).toBe(`${gw.publicUrl}/oauth/callback`);
-    expect(authUrl.searchParams.get("state")).toBeTruthy();
+    const startUrl = new URL(m![0]);
+    expect(startUrl.pathname).toBe("/oauth/start");
+    expect(startUrl.searchParams.get("state")).toBeTruthy();
   });
 
   it("non-admins cannot connect a shared OAuth server", async () => {
@@ -191,13 +208,11 @@ describe("UI Connect and /oauth/callback", () => {
 
     const started = await ui("POST", "/ui/api/connections/github/oauth", alice, {});
     expect(started.status).toBe(200);
-    const authUrl = new URL(started.json.authorizationUrl);
-    const state = authUrl.searchParams.get("state")!;
-    expect(authUrl.searchParams.get("redirect_uri")).toBe(`${gw.publicUrl}/oauth/callback`);
+    const startUrl = new URL(started.json.authorizationUrl);
+    expect(startUrl.pathname).toBe("/oauth/start");
+    expect(startUrl.searchParams.get("state")).toBeTruthy();
 
-    const cb = await fetch(
-      `${gw.publicUrl}/oauth/callback?code=ui-code&state=${encodeURIComponent(state)}`
-    );
+    const cb = await completeOAuthFromStartUrl(started.json.authorizationUrl, "ui-code");
     expect(cb.status).toBe(200);
     expect(await cb.text()).toMatch(/Connected|connected/i);
     expect(hasStoredToken("github", "alice")).toBe(true);
@@ -217,11 +232,26 @@ describe("UI Connect and /oauth/callback", () => {
     expect(await cb.text()).toMatch(/invalid or expired/i);
   });
 
+  it("rejects callback without the bind cookie", async () => {
+    const started = await ui("POST", "/ui/api/connections/github/oauth", alice, {});
+    const state = new URL(started.json.authorizationUrl).searchParams.get("state")!;
+    const cb = await fetch(`${gw.publicUrl}/oauth/callback?code=x&state=${encodeURIComponent(state)}`);
+    expect(cb.status).toBe(400);
+    expect(await cb.text()).toMatch(/same browser/i);
+  });
+
+  it("shows connecting-as confirmation on /oauth/start", async () => {
+    const started = await ui("POST", "/ui/api/connections/github/oauth", alice, {});
+    const state = new URL(started.json.authorizationUrl).searchParams.get("state")!;
+    const page = await fetch(`${gw.publicUrl}/oauth/start?state=${encodeURIComponent(state)}`);
+    expect(page.status).toBe(200);
+    expect(await page.text()).toMatch(/connecting as[\s\S]*alice/i);
+  });
+
   it("lets an admin connect a shared OAuth server", async () => {
     const started = await ui("POST", "/ui/api/connections/sharedoauth/oauth", admin, {});
     expect(started.status).toBe(200);
-    const state = new URL(started.json.authorizationUrl).searchParams.get("state")!;
-    expect((await fetch(`${gw.publicUrl}/oauth/callback?code=s&state=${state}`)).status).toBe(200);
+    expect((await completeOAuthFromStartUrl(started.json.authorizationUrl, "s")).status).toBe(200);
     expect(hasStoredToken("sharedoauth")).toBe(true);
     expect(hasStoredToken("sharedoauth", "root")).toBe(false);
 
@@ -233,13 +263,35 @@ describe("disconnect_server", () => {
   it("clears the OAuth token", async () => {
     const client = await connect(alice);
     const linked = await call(client, "connect_server", { server_name: "github" });
-    const state = new URL(linked.content[0].text.match(/https?:\/\/\S+/)![0]).searchParams.get("state")!;
-    await fetch(`${gw.publicUrl}/oauth/callback?code=d&state=${state}`);
+    const startUrl = linked.content[0].text.match(/https?:\/\/\S+/)![0];
+    expect((await completeOAuthFromStartUrl(startUrl, "d")).status).toBe(200);
     expect(hasStoredToken("github", "alice")).toBe(true);
 
     const gone = await call(client, "disconnect_server", { server_name: "github" });
     expect(gone.isError).toBeFalsy();
     expect(gone.content[0].text).toMatch(/OAuth token/);
     expect(hasStoredToken("github", "alice")).toBe(false);
+  });
+
+  it("non-admin cannot clear a shared OAuth token; admin can", async () => {
+    // Ensure a shared token exists (admin Connect).
+    const started = await ui("POST", "/ui/api/connections/sharedoauth/oauth", admin, {});
+    expect(started.status).toBe(200);
+    expect((await completeOAuthFromStartUrl(started.json.authorizationUrl, "shared-d")).status).toBe(200);
+    expect(hasStoredToken("sharedoauth")).toBe(true);
+
+    const aliceClient = await connect(alice);
+    const refused = await call(aliceClient, "disconnect_server", { server_name: "sharedoauth" });
+    expect(refused.isError).toBeFalsy();
+    expect(hasStoredToken("sharedoauth")).toBe(true);
+
+    expect((await ui("DELETE", "/ui/api/connections/sharedoauth/oauth", alice)).status).toBe(403);
+    expect(hasStoredToken("sharedoauth")).toBe(true);
+
+    const adminClient = await connect(admin);
+    const cleared = await call(adminClient, "disconnect_server", { server_name: "sharedoauth" });
+    expect(cleared.isError).toBeFalsy();
+    expect(cleared.content[0].text).toMatch(/shared OAuth token/i);
+    expect(hasStoredToken("sharedoauth")).toBe(false);
   });
 });
