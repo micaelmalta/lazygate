@@ -21,8 +21,8 @@ const AuthSchema = z
   .object({
     scope: z.enum(["user", "server"]).optional(),
     fallback: z.literal("server").optional(),
-    env: z.record(z.string()).optional(),
-    headers: z.record(z.string()).optional(),
+    env: z.record(z.string(), z.string()).optional(),
+    headers: z.record(z.string(), z.string()).optional(),
   })
   .strict();
 
@@ -32,10 +32,10 @@ const ServerSchema = z
     keywords: z.array(z.string()).default([]),
     command: z.string().min(1).optional(),
     args: z.array(z.string()).optional(),
-    env: z.record(z.string()).optional(),
+    env: z.record(z.string(), z.string()).optional(),
     type: z.enum(["http", "stdio"]).optional(),
     url: z.string().url().optional(),
-    headers: z.record(z.string()).optional(),
+    headers: z.record(z.string(), z.string()).optional(),
     oauth: OAuthSchema.optional(),
     autoActivate: z.boolean().default(false),
     inheritEnv: z.union([z.boolean(), z.array(z.string())]).optional(),
