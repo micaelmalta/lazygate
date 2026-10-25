@@ -7,6 +7,7 @@ import { loadRegistry } from "../registry.js";
 import { LOG_PREFIX } from "../version.js";
 import { SecretStore, secretEnvName } from "./credentials.js";
 import { UserVault } from "./vault.js";
+import { UserProfileStore } from "./profile.js";
 import { TokenStore, parseDuration } from "./tokens.js";
 import { AuditLog } from "./audit.js";
 import { startGateway } from "./server.js";
@@ -62,15 +63,18 @@ async function serve(args: string[]): Promise<void> {
     tokens,
     secrets: new SecretStore(dir),
     vault: new UserVault(dir),
+    profiles: new UserProfileStore(dir),
     audit: new AuditLog(resolve(dir, "audit.log")),
     host,
     port,
     idleMs: idleMin * 60_000,
     maxSessions: Number(flag(args, "--max-sessions") ?? 100),
     allowedHosts,
+    publicUrl: flag(args, "--public-url"),
   });
 
   console.error(`${LOG_PREFIX} HTTP gateway listening on ${gateway.url}`);
+  console.error(`${LOG_PREFIX} Web UI: ${gateway.publicUrl}/ui`);
   if (!LOOPBACK.has(host)) console.error(`${LOG_PREFIX} warning: listening on ${host} without TLS`);
 
   const stop = () => {

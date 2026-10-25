@@ -56,11 +56,11 @@ describe("createBroker", () => {
     });
   });
 
-  it("lists the six meta-tools plus active server tools (prefixed)", async () => {
-    expect(broker.listTools().tools).toHaveLength(6);
+  it("lists the meta-tools plus active server tools (prefixed)", async () => {
+    expect(broker.listTools().tools).toHaveLength(8);
     await broker.callTool("activate_server", { server_name: "github" });
     const tools = broker.listTools().tools;
-    expect(tools).toHaveLength(7);
+    expect(tools).toHaveLength(9);
     expect(tools.at(-1)!.description).toMatch(/^\[github\]/);
   });
 
@@ -232,6 +232,31 @@ describe("createBroker", () => {
       expect(text(l)).toBe("# Skill: pdf\n\nDo the thing");
       const bad = await broker.callTool("load_skill", { skill_name: "nope" });
       expect(bad.isError).toBe(true);
+    });
+
+    it("hides skills the caller has not installed when canUseSkill is set", async () => {
+      const { mkdtempSync, writeFileSync } = await import("fs");
+      const { tmpdir } = await import("os");
+      const { join } = await import("path");
+      const dir = mkdtempSync(join(tmpdir(), "cb-skill-acl-"));
+      writeFileSync(join(dir, "SKILL.md"), "---\n---\n");
+      writeFileSync(join(dir, "INSTRUCTIONS.md"), "secret skill");
+      const skills = new SkillRouter({
+        pdf: { description: "Work with PDF files", keywords: ["pdf"], path: join(dir, "SKILL.md") },
+      });
+      broker = createBroker({
+        router,
+        manager: mk.manager as unknown as ProcessManager,
+        skillRouter: skills,
+        access: {
+          canUse: () => true,
+          canUseSkill: () => false,
+          prepare: () => undefined,
+        },
+      });
+      const d = await broker.callTool("discover_skill", { query: "pdf" });
+      expect(text(d)).toMatch(/none installed/i);
+      expect((await broker.callTool("load_skill", { skill_name: "pdf" })).isError).toBe(true);
     });
   });
 });

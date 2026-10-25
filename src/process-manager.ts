@@ -193,6 +193,11 @@ export interface ProcessManagerOptions {
    * `auth.scope: "user"` are stored per owner instead of per server.
    */
   owner?: string;
+  /**
+   * When false, OAuth never opens a browser (gateway: users connect via the UI /
+   * connect_server). Default true so local stdio mode is unchanged.
+   */
+  oauthInteractive?: boolean;
 }
 
 /**
@@ -234,9 +239,11 @@ export class ProcessManager {
   private readonly onServerTools?: (serverName: string, tools: MCPTool[]) => void;
   private readonly reserved: Set<string>;
   private readonly owner?: string;
+  private readonly oauthInteractive: boolean;
 
   constructor(opts: ProcessManagerOptions = {}) {
     this.owner = opts.owner;
+    this.oauthInteractive = opts.oauthInteractive !== false;
     this.onToolsChanged = opts.onToolsChanged;
     this.onServerTools = opts.onServerTools;
     this.reserved = new Set(opts.reservedToolNames ?? []);
@@ -512,7 +519,13 @@ export class ProcessManager {
   ): Promise<OAuthConfig> {
     const resolved = oauth ?? {};
     const owner = config.auth?.scope === "user" ? this.owner : undefined;
-    const token = await getAccessToken(name, url, resolved, { force, owner });
+    // Gateway sessions have an owner: never open a browser on the gateway host — the user
+    // connects through the UI / connect_server instead.
+    const token = await getAccessToken(name, url, resolved, {
+      force,
+      owner,
+      interactive: this.oauthInteractive,
+    });
     headers["Authorization"] = `Bearer ${token}`;
     return resolved;
   }

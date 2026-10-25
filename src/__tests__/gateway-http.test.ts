@@ -13,6 +13,7 @@ import { loadRegistry } from "../registry.js";
 import { startGateway, type Gateway } from "../gateway/server.js";
 import { TokenStore } from "../gateway/tokens.js";
 import { SecretStore } from "../gateway/credentials.js";
+import { UserProfileStore } from "../gateway/profile.js";
 import { AuditLog } from "../gateway/audit.js";
 
 const FIXTURE = fileURLToPath(new URL("./fixtures/cred-server.mjs", import.meta.url));
@@ -22,7 +23,12 @@ const SHARED_SECRET = "shared-secret-value";
 
 let dir: string;
 let gw: Gateway;
-let deps: { registry: ReturnType<typeof loadRegistry>; tokens: TokenStore; secrets: SecretStore };
+let deps: {
+  registry: ReturnType<typeof loadRegistry>;
+  tokens: TokenStore;
+  secrets: SecretStore;
+  profiles: UserProfileStore;
+};
 let aliceToken: string;
 let bobToken: string;
 const clients: Client[] = [];
@@ -91,7 +97,13 @@ beforeAll(async () => {
   secrets.set("shared/token", SHARED_SECRET);
   secrets.set("fallbacky/token", "fallback-secret-789");
 
-  deps = { registry: loadRegistry(["--config", join(dir, "servers.json")], dir), tokens, secrets };
+  const registry = loadRegistry(["--config", join(dir, "servers.json")], dir);
+  const profiles = new UserProfileStore(dir);
+  for (const name of registry.router.listAll()) {
+    profiles.installServer("alice", name);
+    profiles.installServer("bob", name);
+  }
+  deps = { registry, tokens, secrets, profiles };
   gw = await startGateway({
     ...deps,
     audit: new AuditLog(join(dir, "audit.log")),

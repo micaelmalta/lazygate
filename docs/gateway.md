@@ -61,15 +61,24 @@ step, no extra dependencies, strict CSP, nothing stored in cookies — the token
 
 | Tab | Who | What |
 |---|---|---|
-| My credentials | everyone | Save, replace or remove your own API keys for servers with `auth.scope: "user"`. Stored encrypted; values are never shown again. A key sent in an `X-Lazygate-Cred-…` header still wins. |
+| Servers | everyone | Catalog of shared MCP servers (group-filtered; disabled entries hidden). **Install** / **Remove** into your profile; only installed servers appear in `discover_tools` / `activate_server`. **Connect** jumps to Credentials when needed. |
+| Skills | everyone | Catalog of skills (disabled entries hidden). **Install** / **Remove** into your profile; only installed skills appear in `discover_skill` / `load_skill`. |
+| Credentials | everyone | Save API keys (`auth.scope: "user"`) and **Connect** OAuth servers. Keys are encrypted; OAuth uses `/oauth/callback` on this gateway. A key sent in an `X-Lazygate-Cred-…` header still wins. |
 | Activity | everyone (admins see all users) | Recent tool calls from the audit log |
+| Manage servers | admin | Same catalog with **Enable** / **Disable** (soft-hide; config kept), **Delete**, **Add**, and **Configure** (basics, access, `${secret:…}` values). Disabled entries stay visible here and cannot be activated. |
+| Manage skills | admin | Same catalog with **Enable** / **Disable**, **Delete**, **Add**, and **Configure** (inline body under `managed-skills/`). Disabled skills stay visible here and cannot be loaded. |
 | Sessions | admin | Live sessions and the servers each has active |
 | Tokens | admin | Create (optionally `admin`, groups, expiry, label) and revoke tokens. The new token is shown once. |
-| Secrets | admin | Set or delete server-level secrets (names only are listed) |
-| Servers | admin | Edit a server's credential scope and templates, groups and auto-activate. Writes `servers.json` (previous file kept as `servers.json.bak-ui`) and applies immediately. |
+| All secrets | admin | Advanced: set or delete any shared secret path. Lists paths referenced by auth templates and highlights missing ones; values are never shown. Prefer the per-server Configure sheet for day-to-day secret setup. |
+
+Primary nav is Servers / Skills / Credentials / Activity. Admins also get an **Admin** menu (Manage servers, Manage skills, Sessions, Tokens, All secrets). User tabs stay install-only; catalog CRUD lives only under Manage.
 
 Create the first admin from the CLI: `lazygate token create --user you --admin`. The page can't revoke
 the token you're signed in with.
+
+Profiles (install lists) live in `gateway/profiles.json` (0600). New users start with nothing
+installed — open the catalog and Install what you need. Group ACL still gates which catalog
+entries you can see or install.
 
 Stored user credentials live in `gateway/vault.json`, encrypted with AES-256-GCM and bound to the
 user, server and field. The key is `LAZYGATE_VAULT_KEY` (base64, 32 bytes) or an auto-generated
@@ -158,10 +167,23 @@ lazygate serve [--host 127.0.0.1] [--port 8787] [--config servers.json] [--skill
   duration). Arguments and results are not logged.
 - `autoActivate` servers start when a session finishes initializing, if their credentials resolve.
 
+## OAuth Connect
+
+For HTTP servers with `oauth` (and usually `auth.scope: "user"`):
+
+1. Call `connect_server` from the client, or click **Connect** in the UI.
+2. Open the returned URL, authorize, and land on `/oauth/callback`.
+3. Call `activate_server` — the gateway uses the stored per-user token (no browser on the host).
+
+Shared OAuth (`auth.scope: "server"`, the default) is connected once by an admin. Pass
+`--public-url https://gw.example.com` so the redirect URI matches what you registered with the provider
+(and with dynamic client registration).
+
+`disconnect_server` removes your API keys and OAuth token for that server.
+
 ## What the POC does not do
 
-- No OIDC / corporate SSO, no TLS termination, no public OAuth callback. The UI can't run an OAuth
-  authorization for you yet (that still happens on the gateway host); the vault is a local encrypted file,
-  not a database.
+- No OIDC / corporate SSO, no TLS termination. OAuth Connect uses the gateway's own `/oauth/callback`
+  (set `--public-url` when behind a proxy). The vault is a local encrypted file, not a database.
 - Upstream processes are per session, not pooled across a user's sessions.
 - Per-user skills, containers for stdio servers, rate limits and metrics.

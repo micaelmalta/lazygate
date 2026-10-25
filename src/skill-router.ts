@@ -12,6 +12,8 @@ export interface SkillConfig {
   path: string;
   migratedFrom?: string;
   plugin?: string;
+  /** Soft-disable: hidden from non-admins; load_skill refuses for everyone. */
+  disabled?: boolean;
 }
 
 export interface SkillRouterResult {

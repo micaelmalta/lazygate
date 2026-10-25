@@ -23,6 +23,8 @@ export interface ToolResult {
 export interface BrokerAccess {
   /** Whether this caller may see and use the server. */
   canUse(name: string, cfg: ServerConfig): boolean;
+  /** Whether this caller may discover/load the skill (gateway install list). Absent = all skills. */
+  canUseSkill?(name: string): boolean;
   /**
    * Resolve the caller's credentials for the server. Throws an Error with a user-facing message
    * (e.g. which header to send) when something required is missing.
@@ -30,12 +32,19 @@ export interface BrokerAccess {
   prepare(name: string, cfg: ServerConfig): RuntimeCredentials | undefined;
   /** What the caller still has to provide before the server can be activated (shown by discover_tools). */
   missing?(name: string, cfg: ServerConfig): string[];
+  /**
+   * Start connecting the caller's account (gateway). Returns a message that may include an
+   * authorization URL. Absent outside gateway mode.
+   */
+  connect?(name: string, cfg: ServerConfig): Promise<string>;
+  /** Drop the caller's stored credentials for the server (gateway). */
+  disconnect?(name: string, cfg: ServerConfig): Promise<string>;
 }
 
 export interface BrokerDeps {
   router: ToolRouter;
   manager: ProcessManager;
-  skillRouter: SkillRouter | null;
+  skillRouter: SkillRouter | null; // null only in unit tests / stdio without a skills path
   access?: BrokerAccess;
 }
 
@@ -95,9 +104,16 @@ export function createBroker({ router, manager, skillRouter, access }: BrokerDep
   /** Servers this caller may see. Hidden servers behave exactly like unknown ones. */
   const visible = (name: string): boolean => {
     const cfg = router.getConfig(name);
-    return Boolean(cfg) && (!access || access.canUse(name, cfg!));
+    if (!cfg || cfg.disabled) return false;
+    return !access || access.canUse(name, cfg);
   };
   const visibleNames = (): string[] => router.listAll().filter(visible);
+  const skillVisible = (name: string): boolean => {
+    const cfg = skillRouter?.getConfig(name);
+    if (!cfg || cfg.disabled) return false;
+    return !access?.canUseSkill || access.canUseSkill(name);
+  };
+  const visibleSkillNames = (): string[] => (skillRouter ? skillRouter.listAll().filter(skillVisible) : []);
 
   function listTools() {
     const activeTools = manager.getAllActiveTools().map((t) => ({
@@ -201,15 +217,15 @@ export function createBroker({ router, manager, skillRouter, access }: BrokerDep
         const a = parseArgs(QuerySchema, rawArgs);
         if (isResult(a)) return a;
         skillRouter.reloadFromDisk();
-        const ranked = skillRouter.rank(a.query);
+        const ranked = skillRouter.rank(a.query).filter((r) => skillVisible(r.name));
 
         if (ranked.length === 0) {
+          const all = visibleSkillNames();
           return text(
             `No matching skills found for: "${a.query}"\n\nAvailable skills:\n` +
-              skillRouter
-                .listAll()
-                .map((n) => `• ${n}: ${skillRouter.getConfig(n)!.description}`)
-                .join("\n")
+              (all.length
+                ? all.map((n) => `• ${n}: ${skillRouter.getConfig(n)!.description}`).join("\n")
+                : "(none installed — open the gateway UI catalog and Install a skill)")
           );
         }
 
@@ -228,8 +244,56 @@ export function createBroker({ router, manager, skillRouter, access }: BrokerDep
         const a = parseArgs(SkillNameSchema, rawArgs);
         if (isResult(a)) return a;
         if (!skillRouter.getConfig(a.skill_name)) skillRouter.reloadFromDisk();
+        if (!skillRouter.getConfig(a.skill_name) || !skillVisible(a.skill_name)) {
+          return fail(
+            `Unknown skill: "${a.skill_name}". Available: ${visibleSkillNames().join(", ") || "(none)"}`
+          );
+        }
         try {
           return text(`# Skill: ${a.skill_name}\n\n${skillRouter.load(a.skill_name)}`);
+        } catch (err) {
+          return fail((err as Error).message);
+        }
+      }
+
+      case "connect_server": {
+        const a = parseArgs(ServerNameSchema, rawArgs);
+        if (isResult(a)) return a;
+        if (!access?.connect) {
+          return fail(
+            "connect_server is only available in gateway mode. For local stdio, activate the server — a browser window opens when OAuth is needed."
+          );
+        }
+        router.reloadServersFromDisk();
+        const cfg = router.getConfig(a.server_name);
+        if (!cfg || !visible(a.server_name)) {
+          return fail(
+            `Unknown server: "${a.server_name}". Available: ${visibleNames().join(", ") || "(none)"}`
+          );
+        }
+        try {
+          return text(await access.connect(a.server_name, cfg));
+        } catch (err) {
+          return fail((err as Error).message);
+        }
+      }
+
+      case "disconnect_server": {
+        const a = parseArgs(ServerNameSchema, rawArgs);
+        if (isResult(a)) return a;
+        if (!access?.disconnect) {
+          return fail("disconnect_server is only available in gateway mode.");
+        }
+        router.reloadServersFromDisk();
+        const cfg = router.getConfig(a.server_name);
+        if (!cfg || !visible(a.server_name)) {
+          return fail(
+            `Unknown server: "${a.server_name}". Available: ${visibleNames().join(", ") || "(none)"}`
+          );
+        }
+        try {
+          manager.deactivate(a.server_name);
+          return text(await access.disconnect(a.server_name, cfg));
         } catch (err) {
           return fail((err as Error).message);
         }

@@ -12,25 +12,28 @@ import { LOG_PREFIX } from "./version.js";
 
 export interface Registry {
   router: ToolRouter;
-  skillRouter: SkillRouter | null;
+  skillRouter: SkillRouter;
   toolIndex: ToolIndex;
   serverConfigs: Record<string, ServerConfig>;
-  configPath: string | null;
+  /** Absolute path used for servers.json reads/writes (may not exist yet). */
+  configPath: string;
+  /** Absolute path used for skills.json reads/writes (may not exist yet). */
+  skillsConfigPath: string;
+  /** Config directory (e.g. ~/.config/lazygate) — managed-skills live under here. */
+  configDir: string;
 }
 
 /**
- * Resolution: --<flag> <path> → ~/.config/lazygate/<file>.
+ * Resolution: --<flag> <path> → <dir>/<file>.
+ * Returns the path even when the file is missing so the UI can create it.
  * The bundled config/ directory only holds *examples* and is never loaded implicitly.
  */
-function resolveConfigPath(argv: string[], flag: string, file: string, dir: string): string | null {
+function resolveWritableConfigPath(argv: string[], flag: string, file: string, dir: string): string {
   const flagIdx = argv.indexOf(flag);
   if (flagIdx !== -1 && argv[flagIdx + 1]) {
-    const p = resolve(argv[flagIdx + 1]);
-    if (!existsSync(p)) throw new Error(`Config file not found: ${p}`);
-    return p;
+    return resolve(argv[flagIdx + 1]);
   }
-  const xdg = resolve(dir, file);
-  return existsSync(xdg) ? xdg : null;
+  return resolve(dir, file);
 }
 
 function loadJson(path: string): unknown {
@@ -42,38 +45,39 @@ function loadJson(path: string): unknown {
 }
 
 export function loadRegistry(argv: string[], dir: string = configDir()): Registry {
-  const configPath = resolveConfigPath(argv, "--config", "servers.json", dir);
+  const configPath = resolveWritableConfigPath(argv, "--config", "servers.json", dir);
   let serverConfigs: Record<string, ServerConfig> = {};
-  if (configPath) {
+  if (existsSync(configPath)) {
     const { entries, errors } = parseServersConfig(loadJson(configPath), configPath);
     serverConfigs = entries;
     reportConfigErrors(errors);
     console.error(`${LOG_PREFIX} Config: ${configPath} (${Object.keys(entries).length} servers)`);
   } else {
     console.error(
-      `${LOG_PREFIX} No servers.json found. Create ~/.config/lazygate/servers.json ` +
-        `(see config/servers.json in the repo for an example) or pass --config <path>. ` +
+      `${LOG_PREFIX} No servers.json found at ${configPath}. ` +
+        `Create it (see config/servers.json in the repo for an example) or pass --config <path>. ` +
         `Starting with an empty registry.`
     );
   }
 
   const toolIndex = new ToolIndex(resolve(dir, "tool-index.json"));
-  const router = new ToolRouter(serverConfigs, configPath ?? undefined, toolIndex);
+  const router = new ToolRouter(serverConfigs, configPath, toolIndex);
 
-  const skillsConfigPath = resolveConfigPath(argv, "--skills", "skills.json", dir);
-  let skillRouter: SkillRouter | null = null;
-  if (skillsConfigPath) {
+  const skillsConfigPath = resolveWritableConfigPath(argv, "--skills", "skills.json", dir);
+  let skillEntries: Record<string, import("./skill-router.js").SkillConfig> = {};
+  if (existsSync(skillsConfigPath)) {
     try {
       const { entries, errors } = parseSkillsConfig(loadJson(skillsConfigPath), skillsConfigPath);
       reportConfigErrors(errors);
-      skillRouter = new SkillRouter(entries, skillsConfigPath);
+      skillEntries = entries;
       console.error(`${LOG_PREFIX} Skills config: ${skillsConfigPath} (${Object.keys(entries).length} skills)`);
     } catch (err) {
       // A half-written skills.json must not stop startup; it is re-read lazily.
       console.error(`${LOG_PREFIX} ${(err as Error).message} — will retry on first use`);
-      skillRouter = new SkillRouter({}, skillsConfigPath);
     }
   }
 
-  return { router, skillRouter, toolIndex, serverConfigs, configPath };
+  const skillRouter = new SkillRouter(skillEntries, skillsConfigPath);
+
+  return { router, skillRouter, toolIndex, serverConfigs, configPath, skillsConfigPath, configDir: dir };
 }
