@@ -66,6 +66,8 @@ export interface ServerConfig {
   migratedFrom?: string;
   /** Plugin keys that `migrate` disabled for this server (re-enabled by `revert`). */
   disabledPlugins?: string[];
+  /** Soft-disable: hidden from non-admins; activate/discover refuse for everyone. */
+  disabled?: boolean;
 }
 
 export interface RouterResult {

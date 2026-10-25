@@ -18,6 +18,7 @@ import {
   renameSync,
   chmodSync,
   statSync,
+  unlinkSync,
 } from "fs";
 import { resolve, dirname } from "path";
 import { homedir } from "os";
@@ -42,6 +43,33 @@ export interface GetAccessTokenOptions {
   force?: boolean;
   /** Store/read the token for this user instead of the shared per-server token (gateway mode). */
   owner?: string;
+  /**
+   * When false, never open a browser or start a loopback callback — only use a cached/refreshable
+   * token. Gateway mode sets this so a remote user's missing token becomes a connect link instead
+   * of an authorization on the gateway host. Default true.
+   */
+  interactive?: boolean;
+}
+
+/** Thrown when a token is needed but `interactive: false` and nothing is cached/refreshable. */
+export class NeedsAuthorizationError extends Error {
+  constructor(readonly serverName: string) {
+    super(
+      `Server "${serverName}" needs OAuth. Open the gateway UI (Credentials → Connect) or call connect_server.`
+    );
+    this.name = "NeedsAuthorizationError";
+  }
+}
+
+interface PendingAuth {
+  serverName: string;
+  owner?: string;
+  clientId: string;
+  verifier: string;
+  redirectUri: string;
+  resource: string;
+  tokenEndpoint: string;
+  expiresAt: number;
 }
 
 interface TokenSet {
@@ -123,6 +151,34 @@ function loadToken(serverName: string, owner?: string): TokenSet | null {
 
 function saveToken(serverName: string, token: TokenSet, owner?: string): void {
   writePrivateJson(tokenPath(serverName, owner), token);
+}
+
+/** Whether a non-expired (or refreshable) token is on disk for this server/owner. */
+export function hasStoredToken(serverName: string, owner?: string): boolean {
+  const t = loadToken(serverName, owner);
+  if (!t?.access_token) return false;
+  if (!isExpired(t)) return true;
+  return Boolean(t.refresh_token);
+}
+
+/** Remove a stored OAuth token (disconnect). Returns true when something was deleted. */
+export function clearStoredToken(serverName: string, owner?: string): boolean {
+  const path = tokenPath(serverName, owner);
+  if (!existsSync(path)) return false;
+  try {
+    unlinkSync(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const pendingAuth = new Map<string, PendingAuth>();
+const PENDING_TTL_MS = 10 * 60_000;
+
+function purgeExpiredPending(): void {
+  const now = Date.now();
+  for (const [k, v] of pendingAuth) if (v.expiresAt <= now) pendingAuth.delete(k);
 }
 
 function loadClient(serverName: string): StoredClient | null {
@@ -598,6 +654,10 @@ async function obtainAccessToken(
     }
   }
 
+  if (opts.interactive === false) {
+    throw new NeedsAuthorizationError(serverName);
+  }
+
   console.error(`[oauth] Authorizing ${serverName} — a browser window will open`);
 
   const state = base64url(randomBytes(16));
@@ -653,4 +713,114 @@ async function obtainAccessToken(
   } finally {
     listener.close();
   }
+}
+
+/**
+ * Start an authorization-code + PKCE flow that will return to `redirectUri` (the gateway's
+ * `/oauth/callback`). Does not open a browser — the caller sends the user to `authorizationUrl`.
+ * The pending state is single-use and expires in 10 minutes.
+ */
+export async function startRemoteAuthorization(opts: {
+  serverName: string;
+  serverUrl: string;
+  config?: OAuthConfig;
+  /** When set, the token is stored per user; omit for a shared server-level token. */
+  owner?: string;
+  redirectUri: string;
+}): Promise<{ authorizationUrl: string; state: string }> {
+  const { serverName, serverUrl, owner, redirectUri } = opts;
+  const config = opts.config ?? {};
+  const resource = canonicalResource(serverUrl);
+  const discovery = await discover(serverUrl);
+  const { meta, info } = discovery;
+  const scopes = config.scopes ?? info.resourceMetadata?.scopes_supported ?? [];
+
+  let port = 0;
+  try {
+    port = new URL(redirectUri).port ? Number(new URL(redirectUri).port) : 0;
+  } catch {
+    throw new Error(`Invalid redirect URI: ${redirectUri}`);
+  }
+
+  const clientId = await resolveClientId(serverName, resource, discovery, redirectUri, port, config, scopes);
+  const { verifier, challenge } = generatePKCE();
+  const state = base64url(randomBytes(16));
+
+  purgeExpiredPending();
+  // One in-flight connect per (owner, server) — a new Connect replaces the previous pending state.
+  for (const [k, v] of pendingAuth) {
+    if (v.serverName === serverName && v.owner === owner) pendingAuth.delete(k);
+  }
+  pendingAuth.set(state, {
+    serverName,
+    owner,
+    clientId,
+    verifier,
+    redirectUri,
+    resource,
+    tokenEndpoint: meta.token_endpoint,
+    expiresAt: Date.now() + PENDING_TTL_MS,
+  });
+
+  const authUrl = new URL(meta.authorization_endpoint);
+  authUrl.searchParams.set("client_id", clientId);
+  authUrl.searchParams.set("response_type", "code");
+  authUrl.searchParams.set("redirect_uri", redirectUri);
+  if (scopes.length) authUrl.searchParams.set("scope", scopes.join(" "));
+  authUrl.searchParams.set("state", state);
+  authUrl.searchParams.set("code_challenge", challenge);
+  authUrl.searchParams.set("code_challenge_method", "S256");
+  authUrl.searchParams.set("resource", resource);
+
+  return { authorizationUrl: authUrl.toString(), state };
+}
+
+/**
+ * Finish a remote authorization: exchange the code, store the token for the pending owner.
+ * Returns the server name on success. Throws on a bad/expired state or exchange failure.
+ */
+export async function finishRemoteAuthorization(
+  state: string,
+  code: string
+): Promise<{ serverName: string; owner?: string }> {
+  purgeExpiredPending();
+  const pending = pendingAuth.get(state);
+  if (!pending || pending.expiresAt <= Date.now()) {
+    pendingAuth.delete(state);
+    throw new Error("OAuth state is invalid or expired — start Connect again from the UI");
+  }
+  pendingAuth.delete(state); // single use
+
+  const fresh = await exchangeCode(
+    pending.tokenEndpoint,
+    pending.clientId,
+    code,
+    pending.verifier,
+    pending.redirectUri,
+    pending.resource
+  );
+  saveToken(pending.serverName, fresh, pending.owner);
+  console.error(
+    `[oauth] ${pending.serverName} authorized` + (pending.owner ? ` for ${pending.owner}` : " (shared)")
+  );
+  return { serverName: pending.serverName, owner: pending.owner };
+}
+
+/** HTML response body for the browser tab that lands on `/oauth/callback`. */
+export function oauthCallbackPage(ok: boolean, message: string, uiUrl?: string): string {
+  const title = ok ? "Connected" : "Connection failed";
+  const link = uiUrl
+    ? `<p><a href="${escapeHtml(uiUrl)}">Back to lazygate</a></p>`
+    : `<p>You can close this tab.</p>`;
+  return (
+    `<!doctype html><html><head><meta charset="utf-8"><title>${title}</title></head>` +
+    `<body style="font:14px system-ui;max-width:420px;margin:60px auto">` +
+    `<h2>${escapeHtml(title)}</h2><p>${escapeHtml(message)}</p>${link}</body></html>`
+  );
+}
+
+/** Test helper — how many remote authorizations are waiting. */
+export function pendingAuthCount(): number {
+  purgeExpiredPending();
+  return pendingAuth.size;
 }
