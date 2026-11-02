@@ -1,15 +1,12 @@
-<div align="center">
-
 # lazygate
 
 **Your agent doesn't need every tool schema and every skill playbook to say hello.**
 
-lazygate loads MCP servers **and** agent skills *only when the task needs them*.<br>
+lazygate loads MCP servers **and** agent skills *only when the task needs them*.  
+
 Works with Claude Code, Cursor, and OpenCode.
 
 [Quick start](#quick-start) · [How it works](#how-it-works) · [Team gateway](#team-gateway) · [Docs](#docs)
-
-</div>
 
 ---
 
@@ -121,8 +118,7 @@ The agent sees these instead of every server's tools and every skill's body:
 | `read_skill_file` | Read a file bundled with a skill (templates, scripts, references) |
 | `connect_server` / `disconnect_server` | Gateway only: attach or remove credentials |
 
-<details>
-<summary>Why activated tools don't show up in <code>tools/list</code></summary>
+Why activated tools don't show up in `tools/list`
 
 By default (`expose: "none"`), activated servers stay out of `tools/list`, and the agent reaches them through `describe_tool` / `call_tool`. Two reasons:
 
@@ -130,8 +126,6 @@ By default (`expose: "none"`), activated servers stay out of `tools/list`, and t
 - Changing `tools/list` mid-session invalidates the prompt cache for everything after the tools block.
 
 You can opt in per server with `expose: "all"` or an allowlist of tool names in `servers.json`. See [Routing](docs/reference.md#routing).
-
-</details>
 
 ## What you get
 

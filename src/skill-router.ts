@@ -28,6 +28,38 @@ export const MAX_SKILL_FILES = 200;
 /** Skip these directory names when walking a skill tree. */
 const SKIP_DIRS = new Set([".git", "node_modules", "__pycache__", ".venv", "venv"]);
 
+/** Argument advertised on MCP prompts/list and accepted by prompts/get / load_skill. */
+export interface SkillPromptArgument {
+  name: string;
+  description?: string;
+  required?: boolean;
+  /** Used when the client omits the argument (not part of the MCP PromptArgument schema). */
+  default?: string;
+}
+
+/**
+ * Admin-configured HTTP fetch run while composing a prompt.
+ * URL / headers / body may use `{{arg}}` and `${secret:path}` templates.
+ * Result is available as `{{context.<name>}}` in the skill body.
+ */
+export interface SkillPromptContext {
+  name: string;
+  url: string;
+  method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
+  headers?: Record<string, string>;
+  body?: string;
+  /** When true (default), pretty-print JSON responses. */
+  json?: boolean;
+  timeoutMs?: number;
+  /** If the fetch fails, inject an error note instead of failing the prompt. */
+  optional?: boolean;
+}
+
+export interface SkillPromptConfig {
+  arguments?: SkillPromptArgument[];
+  context?: SkillPromptContext[];
+}
+
 export interface SkillConfig {
   description: string;
   keywords: string[];
@@ -38,6 +70,11 @@ export interface SkillConfig {
   disabled?: boolean;
   /** Gateway mode: only users in one of these groups can see or install (omit = everyone). */
   groups?: string[];
+  /**
+   * Dynamic MCP prompt: arguments + optional context fetches.
+   * Body templates use `{{arg}}` and `{{context.name}}`.
+   */
+  prompt?: SkillPromptConfig;
 }
 
 export interface SkillRouterResult {

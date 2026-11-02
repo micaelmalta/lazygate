@@ -105,8 +105,16 @@ export async function assertSafeUrl(urlString: string): Promise<URL> {
   return url;
 }
 
-/** Require token_endpoint to share origin with the authorization server / issuer. */
-export function assertTokenEndpointMatchesIssuer(tokenEndpoint: string, issuerOrAsUrl: string): void {
+/**
+ * Require token_endpoint to share origin with the authorization server / issuer,
+ * or with the authorization_endpoint when the AS hosts authorize+token on a
+ * different site than the issuer (Slack: issuer mcp.slack.com, token slack.com).
+ */
+export function assertTokenEndpointMatchesIssuer(
+  tokenEndpoint: string,
+  issuerOrAsUrl: string,
+  authorizationEndpoint?: string
+): void {
   let token: URL;
   let issuer: URL;
   try {
@@ -115,11 +123,19 @@ export function assertTokenEndpointMatchesIssuer(tokenEndpoint: string, issuerOr
   } catch {
     throw new UnsafeUrlError("Invalid token_endpoint or issuer URL");
   }
-  if (token.origin !== issuer.origin) {
-    throw new UnsafeUrlError(
-      `token_endpoint origin (${token.origin}) must match authorization server (${issuer.origin})`
-    );
+  if (token.origin === issuer.origin) return;
+  if (authorizationEndpoint) {
+    try {
+      const auth = new URL(authorizationEndpoint);
+      if (token.origin === auth.origin) return;
+    } catch {
+      throw new UnsafeUrlError("Invalid authorization_endpoint URL");
+    }
   }
+  throw new UnsafeUrlError(
+    `token_endpoint origin (${token.origin}) must match authorization server (${issuer.origin})` +
+      (authorizationEndpoint ? ` or authorization_endpoint` : "")
+  );
 }
 
 /**

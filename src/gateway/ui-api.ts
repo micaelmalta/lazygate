@@ -29,6 +29,7 @@ import { AuditLog } from "./audit.js";
 import { readBody, sendJson } from "./http-util.js";
 import { UI_HTML, UI_JS, UI_CSS } from "./ui-assets.js";
 import { warmSharedToolIndex } from "./tool-index-warm.js";
+import { renameStoredServer } from "../oauth.js";
 
 /**
  * Stdio commands the UI may set (`LAZYGATE_STDIO_ALLOWLIST` / `LAZYGATE_ALLOWED_COMMANDS`).
@@ -78,6 +79,8 @@ export interface UiContext {
   oauthConnected(userId: string, name: string, cfg: ServerConfig): boolean;
   clearOAuth(userId: string, name: string, cfg: ServerConfig, admin: boolean): boolean;
   sessions(): SessionInfo[];
+  /** Notify MCP clients that skill prompts/resources changed (installs or catalog edits). */
+  notifyPromptCatalogChanged?: () => void;
   /** Passed through to admin tool-index warm (stdio allowlist). */
   stdioCommandAllowlist?: readonly string[];
 }
@@ -540,11 +543,13 @@ function installSkill(ctx: UiContext, user: UserIdentity, name: string): unknown
   const cfg = ctx.registry.skillRouter.getConfig(name);
   if (!cfg || cfg.disabled || !canAccess(cfg, user)) throw new HttpError(404, "No such skill");
   ctx.profiles.installSkill(user.id, name);
+  ctx.notifyPromptCatalogChanged?.();
   return { installed: true, name };
 }
 
 function uninstallSkill(ctx: UiContext, user: UserIdentity, name: string): unknown {
   ctx.profiles.uninstallSkill(user.id, name);
+  ctx.notifyPromptCatalogChanged?.();
   return undefined;
 }
 
@@ -692,9 +697,23 @@ function createServer(ctx: UiContext, user: UserIdentity, body: Record<string, u
 
 /** Write the editable fields of one server back to servers.json (validated, atomic, backed up). */
 function patchServer(ctx: UiContext, user: UserIdentity, name: string, patch: Record<string, unknown>): unknown {
+  let current = name;
+  if ("name" in patch) {
+    const renamed = renameServerKey(ctx, name, patch.name);
+    if (renamed !== name) {
+      ctx.audit.recordAdmin({
+        user: user.id,
+        action: "server.rename",
+        target: renamed,
+        before: { name },
+        after: { name: renamed },
+      });
+      current = renamed;
+    }
+  }
   const path = ctx.registry.configPath;
   const file = readServersFile(path);
-  const entry = file.servers[name];
+  const entry = file.servers[current];
   if (!entry) throw new HttpError(404, "No such server");
   const before = sanitizeServerEntry(entry);
 
@@ -778,7 +797,7 @@ function patchServer(ctx: UiContext, user: UserIdentity, name: string, patch: Re
     }
   }
 
-  const checked = parseServersConfig({ servers: { [name]: entry } }, path);
+  const checked = parseServersConfig({ servers: { [current]: entry } }, path);
   if (checked.errors.length) throw new HttpError(400, checked.errors.join("; "));
 
   writeServersFile(path, file);
@@ -786,11 +805,11 @@ function patchServer(ctx: UiContext, user: UserIdentity, name: string, patch: Re
   ctx.audit.recordAdmin({
     user: user.id,
     action: "server.patch",
-    target: name,
+    target: current,
     before,
     after: sanitizeServerEntry(entry),
   });
-  return describeServer(name, ctx.registry.router.getConfig(name) as ServerConfig, new Set(ctx.secrets.list()));
+  return describeServer(current, ctx.registry.router.getConfig(current) as ServerConfig, new Set(ctx.secrets.list()));
 }
 
 function deleteServer(ctx: UiContext, user: UserIdentity, name: string): unknown {
@@ -804,6 +823,77 @@ function deleteServer(ctx: UiContext, user: UserIdentity, name: string): unknown
   ctx.profiles.removeServerEverywhere(name);
   ctx.audit.recordAdmin({ user: user.id, action: "server.delete", target: name, before: sanitizeServerEntry(prior) });
   return undefined;
+}
+
+/** Rewrite `${secret:old…}` / bare `old/…` paths inside auth/header/env templates after a rename. */
+function rewriteServerNameInTemplates(entry: Record<string, unknown>, from: string, to: string): void {
+  const rewrite = (s: string): string =>
+    s
+      .replaceAll(`\${secret:${from}/`, `\${secret:${to}/`)
+      .replaceAll(`\${secret:${from}}`, `\${secret:${to}}`);
+  for (const key of ["env", "headers"] as const) {
+    const group = entry[key];
+    if (group && typeof group === "object") {
+      entry[key] = Object.fromEntries(
+        Object.entries(group as Record<string, unknown>).map(([k, v]) => [
+          k,
+          typeof v === "string" ? rewrite(v) : v,
+        ])
+      );
+    }
+  }
+  const auth = entry.auth;
+  if (auth && typeof auth === "object") {
+    const a = auth as Record<string, unknown>;
+    for (const key of ["env", "headers"] as const) {
+      const group = a[key];
+      if (group && typeof group === "object") {
+        a[key] = Object.fromEntries(
+          Object.entries(group as Record<string, unknown>).map(([k, v]) => [
+            k,
+            typeof v === "string" ? rewrite(v) : v,
+          ])
+        );
+      }
+    }
+  }
+}
+
+/**
+ * Rename a catalog server key and migrate profiles, vault, secrets, OAuth files, and tool index.
+ * Returns the new name (unchanged when `next` is empty or equal).
+ */
+function renameServerKey(ctx: UiContext, from: string, nextRaw: unknown): string {
+  if (typeof nextRaw !== "string") return from;
+  const to = nextRaw.trim();
+  if (!to || to === from) return from;
+  if (!NAME.test(to)) throw new HttpError(400, "name may contain letters, digits, '.', '_' and '-'");
+  const path = ctx.registry.configPath;
+  const file = readServersFile(path);
+  if (!file.servers[from]) throw new HttpError(404, "No such server");
+  if (file.servers[to]) throw new HttpError(409, `Server "${to}" already exists`);
+
+  const entry = file.servers[from]!;
+  rewriteServerNameInTemplates(entry, from, to);
+  delete file.servers[from];
+  file.servers[to] = entry;
+  writeServersFile(path, file);
+  ctx.registry.router.reloadServersFromDisk();
+
+  ctx.profiles.renameServerEverywhere(from, to);
+  try {
+    ctx.vault?.renameServer(from, to);
+  } catch (e) {
+    throw new HttpError(409, (e as Error).message);
+  }
+  try {
+    ctx.secrets.renamePrefix(from, to);
+  } catch (e) {
+    throw new HttpError(409, (e as Error).message);
+  }
+  renameStoredServer(from, to);
+  ctx.registry.toolIndex.rename(from, to);
+  return to;
 }
 
 /** Snapshot safe for audit hashes (no secret values — templates and structure only). */
@@ -850,7 +940,18 @@ function getSkillAdmin(ctx: UiContext, name: string): unknown {
     disabled: Boolean(c.disabled),
     groups: c.groups ?? [],
     body: readSkillBody(c.path),
+    prompt: c.prompt ?? null,
   };
+}
+
+/** Parse optional `prompt` JSON from the admin UI (object or omit/null to clear). */
+function parseSkillPromptField(body: Record<string, unknown>): Record<string, unknown> | undefined | null {
+  if (!("prompt" in body)) return undefined;
+  if (body.prompt === null || body.prompt === "") return null;
+  if (typeof body.prompt !== "object" || Array.isArray(body.prompt)) {
+    throw new HttpError(400, "prompt must be an object with arguments and/or context");
+  }
+  return body.prompt as Record<string, unknown>;
 }
 
 function createSkill(ctx: UiContext, user: UserIdentity, body: Record<string, unknown>): unknown {
@@ -869,25 +970,85 @@ function createSkill(ctx: UiContext, user: UserIdentity, body: Record<string, un
   const skillPath = writeManagedSkillFiles(skillDir, name, description, skillBody);
   const entry: Record<string, unknown> = { description, keywords, path: skillPath };
   if (groups.length) entry.groups = groups;
+  const prompt = parseSkillPromptField(body);
+  if (prompt) entry.prompt = prompt;
   const checked = parseSkillsConfig({ skills: { [name]: entry } }, skillsPath);
   if (checked.errors.length) throw new HttpError(400, checked.errors.join("; "));
 
   file.skills[name] = entry;
   writeSkillsFile(skillsPath, file);
   ctx.registry.skillRouter.reloadFromDisk();
+  // Creating admin can use it immediately in slash menus without a separate Install.
+  ctx.profiles.installSkill(user.id, name);
+  ctx.notifyPromptCatalogChanged?.();
   ctx.audit.recordAdmin({
     user: user.id,
     action: "skill.create",
     target: name,
-    after: { description, keywords, path: skillPath, groups },
+    after: { description, keywords, path: skillPath, groups, prompt: entry.prompt ?? null },
   });
   return getSkillAdmin(ctx, name);
 }
 
-function updateSkill(ctx: UiContext, user: UserIdentity, name: string, body: Record<string, unknown>): unknown {
+/**
+ * Rename a skill catalog key. Managed skills under managed-skills/<name>/ are moved;
+ * external paths keep their on-disk location and only the registry key changes.
+ */
+function renameSkillKey(ctx: UiContext, from: string, nextRaw: unknown): string {
+  if (typeof nextRaw !== "string") return from;
+  const to = nextRaw.trim();
+  if (!to || to === from) return from;
+  if (!NAME.test(to)) throw new HttpError(400, "name may contain letters, digits, '.', '_' and '-'");
   const skillsPath = ctx.registry.skillsConfigPath;
   const file = readSkillsFile(skillsPath);
-  const entry = file.skills[name];
+  const entry = file.skills[from];
+  if (!entry) throw new HttpError(404, "No such skill");
+  if (file.skills[to]) throw new HttpError(409, `Skill "${to}" already exists`);
+
+  let skillPath = String(entry.path);
+  const ownDir = managedSkillOwnDir(ctx, skillPath);
+  if (ownDir) {
+    const dest = join(managedSkillsRoot(ctx), to);
+    if (existsSync(dest)) throw new HttpError(409, `Managed skill directory already exists: ${to}`);
+    try {
+      renameSync(ownDir, dest);
+    } catch (e) {
+      throw new HttpError(500, `Could not move skill directory: ${(e as Error).message}`);
+    }
+    skillPath = join(dest, "SKILL.md");
+    // Refresh stub frontmatter name; keep body from INSTRUCTIONS.md.
+    writeManagedSkillFiles(dest, to, String(entry.description ?? ""), readSkillBody(skillPath));
+    entry.path = skillPath;
+  }
+
+  delete file.skills[from];
+  file.skills[to] = entry;
+  writeSkillsFile(skillsPath, file);
+  ctx.registry.skillRouter.reloadFromDisk();
+  ctx.profiles.renameSkillEverywhere(from, to);
+  ctx.notifyPromptCatalogChanged?.();
+  return to;
+}
+
+function updateSkill(ctx: UiContext, user: UserIdentity, name: string, body: Record<string, unknown>): unknown {
+  let current = name;
+  if ("name" in body) {
+    const renamed = renameSkillKey(ctx, name, body.name);
+    if (renamed !== name) {
+      ctx.audit.recordAdmin({
+        user: user.id,
+        action: "skill.rename",
+        target: renamed,
+        before: { name },
+        after: { name: renamed },
+      });
+      current = renamed;
+    }
+  }
+
+  const skillsPath = ctx.registry.skillsConfigPath;
+  const file = readSkillsFile(skillsPath);
+  const entry = file.skills[current];
   if (!entry) throw new HttpError(404, "No such skill");
   const before = {
     description: entry.description ?? "",
@@ -895,6 +1056,7 @@ function updateSkill(ctx: UiContext, user: UserIdentity, name: string, body: Rec
     path: entry.path,
     disabled: Boolean(entry.disabled),
     groups: stringList(entry.groups),
+    prompt: entry.prompt ?? null,
   };
 
   const contentEdit = "description" in body || "keywords" in body || "body" in body;
@@ -909,8 +1071,8 @@ function updateSkill(ctx: UiContext, user: UserIdentity, name: string, body: Rec
       ? skillPath.endsWith("SKILL.md")
         ? dirname(skillPath)
         : skillPath
-      : join(managedSkillsRoot(ctx), name);
-    skillPath = writeManagedSkillFiles(dir, name, description, skillBody);
+      : join(managedSkillsRoot(ctx), current);
+    skillPath = writeManagedSkillFiles(dir, current, description, skillBody);
 
     entry.description = description;
     entry.keywords = keywords;
@@ -925,15 +1087,21 @@ function updateSkill(ctx: UiContext, user: UserIdentity, name: string, body: Rec
     if (g.length) entry.groups = g;
     else delete entry.groups;
   }
-  const checked = parseSkillsConfig({ skills: { [name]: entry } }, skillsPath);
+  if ("prompt" in body) {
+    const prompt = parseSkillPromptField(body);
+    if (prompt === null) delete entry.prompt;
+    else if (prompt) entry.prompt = prompt;
+  }
+  const checked = parseSkillsConfig({ skills: { [current]: entry } }, skillsPath);
   if (checked.errors.length) throw new HttpError(400, checked.errors.join("; "));
 
   writeSkillsFile(skillsPath, file);
   ctx.registry.skillRouter.reloadFromDisk();
+  ctx.notifyPromptCatalogChanged?.();
   ctx.audit.recordAdmin({
     user: user.id,
     action: "skill.update",
-    target: name,
+    target: current,
     before,
     after: {
       description: entry.description ?? "",
@@ -941,9 +1109,10 @@ function updateSkill(ctx: UiContext, user: UserIdentity, name: string, body: Rec
       path: entry.path,
       disabled: Boolean(entry.disabled),
       groups: stringList(entry.groups),
+      prompt: entry.prompt ?? null,
     },
   });
-  return getSkillAdmin(ctx, name);
+  return getSkillAdmin(ctx, current);
 }
 
 function deleteSkill(ctx: UiContext, user: UserIdentity, name: string): unknown {
@@ -964,6 +1133,7 @@ function deleteSkill(ctx: UiContext, user: UserIdentity, name: string): unknown 
       /* best effort */
     }
   }
+  ctx.notifyPromptCatalogChanged?.();
   ctx.audit.recordAdmin({
     user: user.id,
     action: "skill.delete",

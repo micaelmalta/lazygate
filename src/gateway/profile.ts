@@ -145,4 +145,34 @@ export class UserProfileStore {
     }
     if (changed) this.save();
   }
+
+  /** Rename a server in every install list (keeps install state across a catalog rename). */
+  renameServerEverywhere(from: string, to: string): void {
+    if (from === to) return;
+    const data = this.load();
+    let changed = false;
+    for (const p of Object.values(data)) {
+      if (!p.servers.includes(from)) continue;
+      const next = new Set(p.servers.filter((s) => s !== from));
+      next.add(to);
+      p.servers = [...next].sort();
+      changed = true;
+    }
+    if (changed) this.save();
+  }
+
+  /** Rename a skill in every install list. */
+  renameSkillEverywhere(from: string, to: string): void {
+    if (from === to) return;
+    const data = this.load();
+    let changed = false;
+    for (const p of Object.values(data)) {
+      if (!p.skills.includes(from)) continue;
+      const next = new Set(p.skills.filter((s) => s !== from));
+      next.add(to);
+      p.skills = [...next].sort();
+      changed = true;
+    }
+    if (changed) this.save();
+  }
 }

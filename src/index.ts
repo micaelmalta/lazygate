@@ -5,6 +5,7 @@
 //   lazygate                      stdio MCP server (default)
 //   lazygate serve [--port N]     HTTP gateway (see docs/design/http-gateway.md)
 //   lazygate token|secret ...     gateway administration
+//   lazygate oauth login <server> stdio-style loopback OAuth (localhost:port/callback)
 //   lazygate migrate|revert|benchmark
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -44,6 +45,12 @@ async function main(): Promise<void> {
   if (subcommand === "serve" || subcommand === "token" || subcommand === "secret") {
     const cli = await import("./gateway/cli.js");
     await cli.run(subcommand, rest);
+    return;
+  }
+
+  if (subcommand === "oauth") {
+    const { runOauth } = await import("./oauth-cli.js");
+    await runOauth(rest);
     return;
   }
 

@@ -10,11 +10,13 @@ import {
   QuerySchema,
   ServerNameSchema,
   SkillNameSchema,
+  LoadSkillSchema,
   ReadSkillFileSchema,
   DescribeToolSchema,
   CallToolSchema,
 } from "./meta-tools.js";
 import { formatSkillUri, parseSkillUri } from "./skill-router.js";
+import { composePrompt, type SecretLookup } from "./prompt-compose.js";
 import { bareToolName, parseNamespacedTool } from "./tool-names.js";
 import { LOG_PREFIX } from "./version.js";
 
@@ -54,6 +56,10 @@ export interface BrokerDeps {
   manager: ProcessManager;
   skillRouter: SkillRouter | null; // null only in unit tests / stdio without a skills path
   access?: BrokerAccess;
+  /** Gateway secret store for skill prompt context `${secret:…}` expansion. */
+  secrets?: SecretLookup;
+  /** Allow private/link-local URLs in skill prompt.context (gateway admin-configured). */
+  allowPrivatePromptUrls?: boolean;
 }
 
 function text(t: string): ToolResult {
@@ -147,7 +153,14 @@ export function summarizeDescription(description: string | undefined, max = SUMM
   return sentence.length > max ? sentence.slice(0, max - 1).trimEnd() + "…" : sentence;
 }
 
-export function createBroker({ router, manager, skillRouter, access }: BrokerDeps) {
+export function createBroker({
+  router,
+  manager,
+  skillRouter,
+  access,
+  secrets,
+  allowPrivatePromptUrls,
+}: BrokerDeps) {
   /** Servers this caller may see. Hidden servers behave exactly like unknown ones. */
   const visible = (name: string): boolean => {
     const cfg = router.getConfig(name);
@@ -369,16 +382,27 @@ export function createBroker({ router, manager, skillRouter, access }: BrokerDep
 
       case "load_skill": {
         if (!skillRouter) return fail("No skills registry configured.");
-        const a = parseArgs(SkillNameSchema, rawArgs);
+        const a = parseArgs(LoadSkillSchema, rawArgs);
         if (isResult(a)) return a;
         if (!skillRouter.getConfig(a.skill_name)) skillRouter.reloadFromDisk();
-        if (!skillRouter.getConfig(a.skill_name) || !skillVisible(a.skill_name)) {
+        const cfg = skillRouter.getConfig(a.skill_name);
+        if (!cfg || !skillVisible(a.skill_name)) {
           return fail(
             `Unknown skill: "${a.skill_name}". Available: ${visibleSkillNames().join(", ") || "(none)"}`
           );
         }
         try {
           const body = skillRouter.load(a.skill_name);
+          const needsCompose = Boolean(cfg.prompt?.arguments?.length || cfg.prompt?.context?.length || a.args);
+          const composed = needsCompose
+            ? await composePrompt({
+                body,
+                config: cfg,
+                args: a.args,
+                secrets,
+                allowPrivateUrls: allowPrivatePromptUrls,
+              })
+            : { text: body };
           let files: string[] = [];
           try {
             files = skillRouter.listFiles(a.skill_name);
@@ -391,7 +415,13 @@ export function createBroker({ router, manager, skillRouter, access }: BrokerDep
               : `\n\n## Bundled files\n` +
                 files.map((f) => `- ${formatSkillUri(a.skill_name, f)}`).join("\n") +
                 `\n\nFetch with read_skill_file or resources/read.`;
-          return text(`# Skill: ${a.skill_name}\n\n${body}${fileSection}`);
+          const argHint =
+            cfg.prompt?.arguments?.length && !a.args
+              ? `\n\n(This skill accepts prompt args: ${cfg.prompt.arguments
+                  .map((x) => x.name + (x.required ? "*" : ""))
+                  .join(", ")}. Re-call load_skill with args: {…}.)`
+              : "";
+          return text(`# Skill: ${a.skill_name}\n\n${composed.text}${fileSection}${argHint}`);
         } catch (err) {
           return fail((err as Error).message);
         }

@@ -139,6 +139,36 @@ export class UserVault {
     this.mtime = -1;
     return true;
   }
+
+  /**
+   * Move every user's sealed credentials from `from` → `to` (re-seal with new AAD).
+   * No-op when names match. Throws if `to` already has fields for any user.
+   */
+  renameServer(from: string, to: string): void {
+    if (from === to) return;
+    const all = structuredClone(this.load());
+    let changed = false;
+    for (const [user, servers] of Object.entries(all)) {
+      const sealed = servers[from];
+      if (!sealed) continue;
+      if (servers[to] && Object.keys(servers[to]).length) {
+        throw new Error(`Vault already has credentials for "${to}" (user ${user})`);
+      }
+      const moved: Record<string, string> = {};
+      for (const [field, blob] of Object.entries(sealed)) {
+        const plain = this.open(blob, UserVault.aad(user, from, field));
+        if (plain === undefined) continue;
+        moved[field] = this.seal(plain, UserVault.aad(user, to, field));
+      }
+      delete servers[from];
+      if (Object.keys(moved).length) servers[to] = moved;
+      if (!Object.keys(servers).length) delete all[user];
+      changed = true;
+    }
+    if (!changed) return;
+    writePrivateJson(this.path, all);
+    this.mtime = -1;
+  }
 }
 
 /** Header-sent credentials win over stored ones, field by field. */
