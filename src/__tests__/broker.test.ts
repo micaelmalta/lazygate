@@ -500,6 +500,37 @@ describe("createBroker", () => {
       expect(text(none)).not.toContain("Work with PDF");
     });
 
+    it("composes parameterized skills via load_skill args", async () => {
+      const { mkdtempSync, writeFileSync } = await import("fs");
+      const { tmpdir } = await import("os");
+      const { join } = await import("path");
+      const dir = mkdtempSync(join(tmpdir(), "cb-skill-args-"));
+      writeFileSync(join(dir, "SKILL.md"), "---\n---\n");
+      writeFileSync(join(dir, "INSTRUCTIONS.md"), "Deploy {{service_name}} to {{environment}}.");
+      const skills = new SkillRouter({
+        deploy: {
+          description: "Deploy checks",
+          keywords: ["deploy"],
+          path: join(dir, "SKILL.md"),
+          prompt: {
+            arguments: [
+              { name: "service_name", required: true },
+              { name: "environment", default: "staging" },
+            ],
+          },
+        },
+      });
+      broker = createBroker({ router, manager: mk.manager as unknown as ProcessManager, skillRouter: skills });
+      const missing = await broker.callTool("load_skill", { skill_name: "deploy" });
+      expect(missing.isError).toBe(true);
+      expect(text(missing)).toMatch(/Missing required/);
+      const hint = await broker.callTool("load_skill", {
+        skill_name: "deploy",
+        args: { service_name: "billing" },
+      });
+      expect(text(hint)).toContain("Deploy billing to staging.");
+    });
+
     it("truncates oversized skill bodies with a read-more pointer", async () => {
       const { mkdtempSync, writeFileSync } = await import("fs");
       const { tmpdir } = await import("os");

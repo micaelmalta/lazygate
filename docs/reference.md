@@ -157,6 +157,51 @@ Each migrated `SKILL.md` is split into:
 
 `revert` merges them back, reproducing the original file.
 
+### Dynamic prompts (arguments + context)
+
+Skills can declare a `prompt` block so the gateway exposes them as parameterized MCP prompts
+(`prompts/list` / `prompts/get`) and so `load_skill` can substitute arguments:
+
+```json
+{
+  "skills": {
+    "deploy-check": {
+      "description": "Evaluate deployment readiness for a service",
+      "keywords": ["deploy", "release"],
+      "path": "/path/to/deploy-check/SKILL.md",
+      "prompt": {
+        "arguments": [
+          { "name": "service_name", "description": "Service id", "required": true },
+          { "name": "environment", "description": "Target env", "default": "staging" }
+        ],
+        "context": [
+          {
+            "name": "status",
+            "url": "https://api.example.com/services/{{service_name}}/status",
+            "headers": { "Authorization": "Bearer ${secret:status-api}" },
+            "optional": true
+          }
+        ]
+      }
+    }
+  }
+}
+```
+
+In the skill body (and in context `url` / `headers` / `body`):
+
+- `{{service_name}}` — prompt argument (after defaults)
+- `{{context.status}}` — JSON (or text) from the named context fetch
+- `${secret:path}` — gateway secret (headers/body/url only)
+
+Context fetches use the same SSRF rules as other outbound HTTP; in gateway mode,
+admin-configured private/link-local URLs are allowed (redirects are never followed).
+Each response is capped (~64 KB). Set `optional: true` to inject an error note instead of
+failing the prompt when a fetch fails.
+
+Clients that support MCP prompts can invoke these as slash commands with parameters.
+Agents without prompt UI should call `load_skill` with `args: { "service_name": "…" }`.
+
 ---
 
 ## Routing

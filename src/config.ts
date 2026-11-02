@@ -61,6 +61,38 @@ const ServerSchema = z
     message: "must define either `command` (stdio) or `url` (http)",
   });
 
+const SkillPromptArgumentSchema = z
+  .object({
+    name: z.string().min(1),
+    description: z.string().optional(),
+    required: z.boolean().optional(),
+    default: z.string().optional(),
+  })
+  .strict();
+
+const SkillPromptContextSchema = z
+  .object({
+    name: z
+      .string()
+      .min(1)
+      .regex(/^[a-zA-Z_][\w]*$/, "context name must be a simple identifier"),
+    url: z.string().min(1),
+    method: z.enum(["GET", "POST", "PUT", "PATCH", "DELETE"]).optional(),
+    headers: z.record(z.string(), z.string()).optional(),
+    body: z.string().optional(),
+    json: z.boolean().optional(),
+    timeoutMs: z.number().int().positive().max(120_000).optional(),
+    optional: z.boolean().optional(),
+  })
+  .strict();
+
+const SkillPromptSchema = z
+  .object({
+    arguments: z.array(SkillPromptArgumentSchema).optional(),
+    context: z.array(SkillPromptContextSchema).optional(),
+  })
+  .strict();
+
 const SkillSchema = z
   .object({
     description: z.string().default(""),
@@ -72,6 +104,8 @@ const SkillSchema = z
     disabled: z.boolean().optional(),
     /** Gateway: only users in one of these groups can see/install (omit = everyone). */
     groups: z.array(z.string()).optional(),
+    /** Parameterized / runtime-composed MCP prompt (args + optional context fetches). */
+    prompt: SkillPromptSchema.optional(),
   })
   .passthrough();
 

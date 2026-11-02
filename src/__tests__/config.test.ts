@@ -136,6 +136,34 @@ describe("parseSkillsConfig", () => {
     expect(Object.keys(entries)).toEqual(["ok"]);
     expect(errors[0]).toMatch(/skills\.bad — path/);
   });
+
+  it("accepts prompt arguments and context", () => {
+    const { entries, errors } = parseSkillsConfig({
+      skills: {
+        deploy: {
+          path: "/x/SKILL.md",
+          prompt: {
+            arguments: [{ name: "service_name", required: true, default: "api" }],
+            context: [
+              {
+                name: "status",
+                url: "https://api.example.com/{{service_name}}",
+                headers: { Authorization: "Bearer ${secret:tok}" },
+                optional: true,
+              },
+            ],
+          },
+        },
+        badCtx: {
+          path: "/y/SKILL.md",
+          prompt: { context: [{ name: "bad-name", url: "https://x.example/" }] },
+        },
+      },
+    });
+    expect(errors.join("\n")).toMatch(/skills\.badCtx/);
+    expect(entries.deploy.prompt?.arguments?.[0]?.name).toBe("service_name");
+    expect(entries.deploy.prompt?.context?.[0]?.name).toBe("status");
+  });
 });
 
 describe("scoring", () => {

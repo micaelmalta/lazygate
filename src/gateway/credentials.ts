@@ -13,6 +13,9 @@ import { fileMtimeMs, readPrivateJson, writePrivateJson, ensurePrivateMode } fro
 
 export const CRED_HEADER_PREFIX = "x-lazygate-cred-";
 
+/** Clients often leave `${VAR}` unexpanded (e.g. Cursor launched without that env). Treat as absent. */
+const UNEXPANDED_ENV_REF = /^\$\{[A-Za-z_][A-Za-z0-9_]*\}$/;
+
 /** Credentials a user sent, grouped by server then field (field names lower-cased). */
 export type UserCredentials = Map<string, Record<string, string>>;
 
@@ -54,7 +57,7 @@ export function extractUserCreds(
     const key = rawKey.toLowerCase();
     if (!key.startsWith(CRED_HEADER_PREFIX)) continue;
     const value = Array.isArray(rawVal) ? rawVal[0] : rawVal;
-    if (!value) continue;
+    if (!value || UNEXPANDED_ENV_REF.test(value)) continue;
     const rest = key.slice(CRED_HEADER_PREFIX.length);
     const server = byLength.find((n) => rest.startsWith(`${n.toLowerCase()}-`));
     if (!server) continue;
@@ -122,6 +125,30 @@ export class SecretStore {
   /** Names only — values are never listed. */
   list(): string[] {
     return Object.keys(this.load()).sort();
+  }
+
+  /**
+   * Rename secrets whose path is exactly `from` or starts with `from/`.
+   * Used when an admin renames a catalog server that stores `server/field` secrets.
+   */
+  renamePrefix(from: string, to: string): void {
+    if (from === to) return;
+    const all = { ...this.load() };
+    let changed = false;
+    for (const key of Object.keys(all)) {
+      if (key !== from && !key.startsWith(`${from}/`)) continue;
+      const next = key === from ? to : `${to}${key.slice(from.length)}`;
+      if (next in all && next !== key) {
+        throw new Error(`Secret "${next}" already exists — cannot rename "${key}"`);
+      }
+      all[next] = all[key]!;
+      delete all[key];
+      changed = true;
+    }
+    if (!changed) return;
+    writePrivateJson(this.path, all);
+    ensurePrivateMode(this.path);
+    this.mtime = -1;
   }
 }
 

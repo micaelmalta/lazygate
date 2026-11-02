@@ -62,6 +62,19 @@ describe("extractUserCreds", () => {
     expect(creds.size).toBe(0);
   });
 
+  it("ignores unexpanded ${VAR} placeholders so vault/fallback can apply", () => {
+    const creds = extractUserCreds(
+      {
+        "x-lazygate-cred-jira-token": "${JIRA_API_TOKEN}",
+        "x-lazygate-cred-jira-url": "https://jira.example",
+        "x-lazygate-cred-confluence-api-token": "${ATLASSIAN_API_TOKEN}",
+      },
+      ["jira", "confluence"]
+    );
+    expect(creds.get("jira")).toEqual({ url: "https://jira.example" });
+    expect(creds.has("confluence")).toBe(false);
+  });
+
   it("names headers the way users should send them", () => {
     expect(credHeaderName("jira", "token")).toBe("X-Lazygate-Cred-jira-token");
   });
