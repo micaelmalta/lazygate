@@ -1,0 +1,17 @@
+# lazygate HTTP gateway that restarts itself after a crash or reboot.
+#   docker compose up -d --build
+# Create a token first (same config dir the container uses):
+#   docker compose run --rm lazygate token create --user you --admin
+# Optional .env:  LAZYGATE_VAULT_KEY=$(openssl rand -base64 32)
+services:
+  lazygate:
+    build: .
+    restart: unless-stopped
+    ports:
+      # Published on loopback only: the gateway speaks plain HTTP.
+      - "127.0.0.1:8787:8787"
+    environment:
+      LAZYGATE_VAULT_KEY: ${LAZYGATE_VAULT_KEY:-}
+    volumes:
+      # Reuse your existing servers.json, skills.json, tokens, audit log.
+      - ${HOME}/.config/lazygate:/home/node/.config/lazygate

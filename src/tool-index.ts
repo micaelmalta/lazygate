@@ -93,6 +93,17 @@ export class ToolIndex {
     return hits;
   }
 
+  /** Move a cached entry when a catalog server is renamed. */
+  rename(from: string, to: string): void {
+    if (from === to) return;
+    this.ensureLoaded();
+    if (!(from in this.data)) return;
+    if (to in this.data) delete this.data[to];
+    this.data[to] = this.data[from]!;
+    delete this.data[from];
+    this.save();
+  }
+
   /** Remember a server's tools. Returns true when the stored index changed. */
   record(name: string, cfg: ServerConfig, tools: Array<{ name: string; description?: string }>): boolean {
     this.ensureLoaded();

@@ -189,6 +189,10 @@ describe("static assets", () => {
     expect(js).toContain("admin-menu");
     expect(js).toContain("TOKEN_TTL_MS");
     expect(js).toContain("lazygate.tokenAt");
+    // TTL expiry must only run when a token was already persisted — otherwise
+    // first sign-in (memory token, empty sessionStorage) falsely times out.
+    expect(js).toContain('sessionStorage.getItem(KEY) && !loadStoredToken()');
+    expect(js).toContain('replace(/^Bearer\\s+/i, "")');
     expect(js).toContain("commandAllowlist");
     expect(js).not.toContain("serversView");
     expect(js).not.toContain("Server settings");
@@ -629,6 +633,77 @@ describe("admin catalog CRUD", () => {
     }
   });
 
+  it("renames a server and preserves install + shared secret path", async () => {
+    const created = await ui("POST", "/ui/api/servers", admin, {
+      name: "old-srv",
+      description: "before",
+      url: "https://example.com/mcp",
+      auth: { scope: "server", headers: { Authorization: "Bearer ${secret:old-srv/token}" } },
+    });
+    expect(created.status).toBe(200);
+    await ui("PUT", "/ui/api/secrets", admin, { path: "old-srv/token", value: "sekrit" });
+    await ui("POST", "/ui/api/profile/servers/old-srv", alice, {});
+    expect((await ui("GET", "/ui/api/catalog/servers", alice)).json.servers.find((s: any) => s.name === "old-srv")?.installed).toBe(
+      true
+    );
+
+    const renamed = await ui("PATCH", "/ui/api/servers/old-srv", admin, {
+      name: "new-srv",
+      description: "after",
+    });
+    expect(renamed.status).toBe(200);
+    expect(renamed.json.name).toBe("new-srv");
+    expect(renamed.json.description).toBe("after");
+    expect(renamed.json.auth?.headers?.Authorization).toContain("${secret:new-srv/token}");
+
+    expect((await ui("GET", "/ui/api/servers/old-srv", admin)).status).toBe(404);
+    const secrets = await ui("GET", "/ui/api/secrets", admin);
+    const paths = (secrets.json.secrets || secrets.json.paths || []).map((s: any) => s.path || s);
+    // secrets list shape varies — check stored value via catalog secretRefs
+    const catalog = await ui("GET", "/ui/api/servers", admin);
+    const entry = catalog.json.servers.find((s: any) => s.name === "new-srv");
+    expect(entry).toBeTruthy();
+    expect(entry.secretRefs.some((r: any) => r.path === "new-srv/token" && r.stored)).toBe(true);
+
+    const aliceCat = await ui("GET", "/ui/api/catalog/servers", alice);
+    expect(aliceCat.json.servers.find((s: any) => s.name === "new-srv")?.installed).toBe(true);
+    expect(aliceCat.json.servers.find((s: any) => s.name === "old-srv")).toBeUndefined();
+
+    await ui("DELETE", "/ui/api/servers/new-srv", admin);
+  });
+
+  it("renames a managed skill and moves its directory", async () => {
+    const created = await ui("POST", "/ui/api/skills", admin, {
+      name: "old-skill",
+      description: "old",
+      keywords: ["old"],
+      body: "Do the old thing.",
+    });
+    expect(created.status).toBe(200);
+    const oldDir = join(dir, "managed-skills", "old-skill");
+    expect(existsSync(oldDir)).toBe(true);
+    await ui("POST", "/ui/api/profile/skills/old-skill", alice, {});
+
+    const renamed = await ui("PUT", "/ui/api/skills/old-skill", admin, {
+      name: "new-skill",
+      description: "new",
+      body: "Do the new thing.",
+    });
+    expect(renamed.status).toBe(200);
+    expect(renamed.json.name).toBe("new-skill");
+    expect(renamed.json.body).toContain("new thing");
+    expect(existsSync(oldDir)).toBe(false);
+    expect(existsSync(join(dir, "managed-skills", "new-skill"))).toBe(true);
+
+    const client = await connect(alice);
+    const loaded = await call(client, "load_skill", { skill_name: "new-skill" });
+    expect(loaded.isError).toBeFalsy();
+    expect(loaded.content[0].text).toContain("new thing");
+    expect((await call(client, "load_skill", { skill_name: "old-skill" })).isError).toBe(true);
+
+    await ui("DELETE", "/ui/api/skills/new-skill", admin);
+  });
+
   it("creates, edits and deletes a managed skill with inline body", async () => {
     const created = await ui("POST", "/ui/api/skills", admin, {
       name: "memo",
@@ -813,6 +888,80 @@ describe("skill resources and prompts", () => {
     expect(viaTool.content[0].text).toContain("echo pack");
 
     await ui("DELETE", "/ui/api/skills/pack", admin);
+  });
+
+  it("prefixes prompts that collide with an MCP server name", async () => {
+    const created = await ui("POST", "/ui/api/skills", admin, {
+      name: "jira",
+      description: "How to use the jira server via lazygate",
+      keywords: ["jira"],
+      body: "Activate jira then call_tool.",
+    });
+    expect(created.status).toBe(200);
+    await ui("POST", "/ui/api/profile/skills/jira", alice, {});
+    const client = await connect(alice);
+    const { prompts } = await client.listPrompts();
+    expect(prompts.map((p) => p.name)).toContain("skill:jira");
+    expect(prompts.map((p) => p.name)).not.toContain("jira");
+    const prompt = await client.getPrompt({ name: "skill:jira" });
+    expect((prompt.messages[0]!.content as { text: string }).text).toContain("Activate jira");
+    await ui("DELETE", "/ui/api/skills/jira", admin);
+  });
+
+  it("composes parameterized prompts with context fetches", async () => {
+    const { createServer } = await import("http");
+    const upstream = createServer((_req, res) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ health: "green" }));
+    });
+    await new Promise<void>((r) => upstream.listen(0, "127.0.0.1", r));
+    const port = (upstream.address() as { port: number }).port;
+
+    const created = await ui("POST", "/ui/api/skills", admin, {
+      name: "deploy-check",
+      description: "Deployment readiness",
+      keywords: ["deploy"],
+      body: "Evaluate `{{service_name}}` for `{{environment}}`.\n\nLive status:\n{{context.status}}",
+      prompt: {
+        arguments: [
+          { name: "service_name", required: true },
+          { name: "environment", default: "staging" },
+        ],
+        context: [
+          {
+            name: "status",
+            url: `http://127.0.0.1:${port}/services/{{service_name}}`,
+          },
+        ],
+      },
+    });
+    expect(created.status).toBe(200);
+    expect(created.json.prompt?.arguments?.[0]?.name).toBe("service_name");
+
+    await ui("POST", "/ui/api/profile/skills/deploy-check", alice, {});
+    const client = await connect(alice);
+
+    const { prompts } = await client.listPrompts();
+    const listed = prompts.find((p) => p.name === "deploy-check");
+    expect(listed?.arguments?.map((a) => a.name)).toEqual(["service_name", "environment"]);
+
+    const prompt = await client.getPrompt({
+      name: "deploy-check",
+      arguments: { service_name: "billing" },
+    });
+    const body = (prompt.messages[0]!.content as { text: string }).text;
+    expect(body).toContain("Evaluate `billing` for `staging`.");
+    expect(body).toContain('"health": "green"');
+
+    const viaTool = await call(client, "load_skill", {
+      skill_name: "deploy-check",
+      args: { service_name: "billing", environment: "prod" },
+    });
+    expect(viaTool.content[0].text).toContain("Evaluate `billing` for `prod`.");
+    expect(viaTool.content[0].text).toContain('"health": "green"');
+
+    await ui("DELETE", "/ui/api/skills/deploy-check", admin);
+    await new Promise<void>((r, j) => upstream.close((e) => (e ? j(e) : r())));
   });
 });
 

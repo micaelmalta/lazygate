@@ -23,6 +23,7 @@ import { ProcessManager } from "../process-manager.js";
 import { createBroker, type BrokerAccess, type ToolResult } from "../broker.js";
 import { META_TOOL_NAMES } from "../meta-tools.js";
 import { formatSkillUri, parseSkillUri } from "../skill-router.js";
+import { composePrompt, promptArgumentsForList } from "../prompt-compose.js";
 import type { Registry } from "../registry.js";
 import { APP_NAME } from "../paths.js";
 import { VERSION, LOG_PREFIX } from "../version.js";
@@ -209,6 +210,15 @@ export async function startGateway(opts: GatewayOptions): Promise<Gateway> {
     void s.server.close().catch(() => undefined);
   }
 
+  /** Tell every live MCP session to re-fetch prompts/resources (skills catalog / installs changed). */
+  function notifyPromptCatalogChanged(): void {
+    for (const s of sessions.values()) {
+      if (s.closed) continue;
+      s.server.sendPromptListChanged().catch(() => undefined);
+      s.server.sendResourceListChanged().catch(() => undefined);
+    }
+  }
+
   function createSession(user: UserIdentity, creds: UserCredentials): Session {
     const redactor = new Redactor();
     const server = new Server(
@@ -217,8 +227,8 @@ export async function startGateway(opts: GatewayOptions): Promise<Gateway> {
         capabilities: {
           tools: { listChanged: true },
           // Skill files as resources; installed skills as prompts (slash-command style).
-          resources: {},
-          prompts: {},
+          resources: { listChanged: true },
+          prompts: { listChanged: true },
         },
       }
     );
@@ -330,6 +340,8 @@ export async function startGateway(opts: GatewayOptions): Promise<Gateway> {
       manager: session.manager,
       skillRouter: registry.skillRouter,
       access,
+      secrets,
+      allowPrivatePromptUrls: true,
     });
 
     server.setRequestHandler(ListToolsRequestSchema, async () => broker.listTools());
@@ -348,11 +360,16 @@ export async function startGateway(opts: GatewayOptions): Promise<Gateway> {
         name === "activate_server" || name === "deactivate_server"
           ? String((args as { server_name?: unknown } | undefined)?.server_name ?? "")
           : session.manager.findServerForTool(name);
+      const a = (args ?? {}) as { server?: unknown; tool?: unknown };
+      const isProxyMeta = name === "call_tool" || name === "describe_tool";
+      const innerServer = isProxyMeta && typeof a.server === "string" ? a.server : undefined;
+      const innerTool = isProxyMeta && typeof a.tool === "string" ? a.tool.slice(0, 200) : undefined;
       audit.record({
         user: user.id,
         session: session.id,
         tool: name,
-        server: target || undefined,
+        server: innerServer || target || undefined,
+        target: innerTool,
         ok: !result.isError,
         ms: Date.now() - started,
         error: result.isError ? firstText(result).slice(0, 200) : undefined,
@@ -364,6 +381,18 @@ export async function startGateway(opts: GatewayOptions): Promise<Gateway> {
       const cfg = registry.skillRouter.getConfig(name);
       return Boolean(cfg) && !cfg!.disabled && canAccess(cfg!, user) && profiles.isSkillInstalled(user.id, name);
     };
+
+    /**
+     * MCP prompt name for a skill. When the skill shares a name with a catalog
+     * MCP server (e.g. skill `lonyx` + server `lonyx`), advertise `skill:<name>`
+     * so clients that key prompts globally (Cursor) do not drop the collision.
+     */
+    const promptNameForSkill = (skillName: string): string =>
+      registry.router.getConfig(skillName) ? `skill:${skillName}` : skillName;
+
+    /** Resolve prompts/get name back to a skill (accepts bare or `skill:` form). */
+    const skillNameFromPrompt = (promptName: string): string =>
+      promptName.startsWith("skill:") ? promptName.slice("skill:".length) : promptName;
 
     server.setRequestHandler(ListResourcesRequestSchema, async () => {
       registry.skillRouter.reloadFromDisk();
@@ -429,21 +458,33 @@ export async function startGateway(opts: GatewayOptions): Promise<Gateway> {
         if (!skillAllowed(name)) continue;
         const cfg = registry.skillRouter.getConfig(name)!;
         prompts.push({
-          name,
+          name: promptNameForSkill(name),
           description: cfg.description || `Skill: ${name}`,
+          arguments: promptArgumentsForList(cfg.prompt?.arguments),
         });
       }
+      prompts.sort((a, b) => a.name.localeCompare(b.name));
       return { prompts };
     });
 
     server.setRequestHandler(GetPromptRequestSchema, async (request) => {
-      const name = request.params.name;
+      const promptName = request.params.name;
+      const name = skillNameFromPrompt(promptName);
       registry.skillRouter.reloadFromDisk();
       if (!skillAllowed(name)) {
-        throw new McpError(ErrorCode.InvalidParams, `Unknown or inaccessible skill prompt: ${name}`);
+        throw new McpError(ErrorCode.InvalidParams, `Unknown or inaccessible skill prompt: ${promptName}`);
       }
       try {
+        const cfg = registry.skillRouter.getConfig(name)!;
         const body = registry.skillRouter.load(name, { maxBytes: 0 });
+        const composed = await composePrompt({
+          body,
+          config: cfg,
+          args: request.params.arguments,
+          secrets,
+          allowPrivateUrls: true,
+        });
+        redactor.add(composed.secretValues);
         let files: string[] = [];
         try {
           files = registry.skillRouter.listFiles(name);
@@ -457,13 +498,13 @@ export async function startGateway(opts: GatewayOptions): Promise<Gateway> {
               files.map((f) => `- ${formatSkillUri(name, f)}`).join("\n") +
               `\n(Use resources/read or read_skill_file to fetch.)`;
         return {
-          description: registry.skillRouter.getConfig(name)?.description,
+          description: cfg.description,
           messages: [
             {
               role: "user" as const,
               content: {
                 type: "text" as const,
-                text: `# Skill: ${name}\n\n${body}${fileNote}`,
+                text: `# Skill: ${name}\n\n${composed.text}${fileNote}`,
               },
             },
           ],
@@ -475,6 +516,14 @@ export async function startGateway(opts: GatewayOptions): Promise<Gateway> {
 
     // Auto-activate servers once the client finished initializing; skip anything that still needs credentials.
     server.oninitialized = () => {
+      // Clients that re-initialize a dropped session (Cursor) skip prompts/list and
+      // resources/list and keep their first snapshot; tell them to re-fetch. Delayed so the
+      // client's standalone GET stream exists — notifications sent before it are dropped.
+      setTimeout(() => {
+        if (session.closed) return;
+        server.sendPromptListChanged().catch(() => undefined);
+        server.sendResourceListChanged().catch(() => undefined);
+      }, 1500).unref();
       for (const name of registry.router.listAll()) {
         const cfg = registry.router.getConfig(name);
         if (!cfg || !cfg.autoActivate || !access.canUse(name, cfg)) continue;
@@ -626,6 +675,7 @@ export async function startGateway(opts: GatewayOptions): Promise<Gateway> {
               lastSeen: s.lastSeen,
               servers: s.manager.listActive(),
             })),
+          notifyPromptCatalogChanged,
           stdioCommandAllowlist: opts.stdioCommandAllowlist,
         },
         req,
@@ -648,6 +698,12 @@ export async function startGateway(opts: GatewayOptions): Promise<Gateway> {
         const e = rpcError(400, -32700, (err as Error).message);
         return sendJson(res, e.status, e.body);
       }
+    }
+
+    if (process.env.LAZYGATE_DEBUG_RPC) {
+      const msgs = Array.isArray(body) ? body : body ? [body] : [];
+      const methods = msgs.map((m) => (m as { method?: string }).method ?? "(response)");
+      console.error(`${LOG_PREFIX} rpc ${user.id} ${req.method} ${methods.join(",") || "-"}`);
     }
 
     // Stored credentials (web UI) first, then whatever this request sent on top.

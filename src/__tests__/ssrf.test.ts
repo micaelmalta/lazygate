@@ -42,12 +42,39 @@ describe("assertSafeUrl", () => {
 });
 
 describe("assertTokenEndpointMatchesIssuer", () => {
-  it("requires the same origin", () => {
+  it("allows token_endpoint on the issuer origin", () => {
     expect(() =>
       assertTokenEndpointMatchesIssuer("https://as.example.com/token", "https://as.example.com")
     ).not.toThrow();
+  });
+
+  it("allows token_endpoint on the authorization_endpoint origin (Slack/Datadog style)", () => {
+    expect(() =>
+      assertTokenEndpointMatchesIssuer(
+        "https://slack.com/api/oauth.v2.user.access",
+        "https://mcp.slack.com",
+        "https://slack.com/oauth/v2_user/authorize"
+      )
+    ).not.toThrow();
+    expect(() =>
+      assertTokenEndpointMatchesIssuer(
+        "https://app.datadoghq.com/oauth/token",
+        "https://mcp.datadoghq.com",
+        "https://app.datadoghq.com/oauth/authorize"
+      )
+    ).not.toThrow();
+  });
+
+  it("rejects a token_endpoint on an unrelated origin", () => {
     expect(() =>
       assertTokenEndpointMatchesIssuer("https://evil.example.com/token", "https://as.example.com")
+    ).toThrow(/must match/i);
+    expect(() =>
+      assertTokenEndpointMatchesIssuer(
+        "https://evil.example.com/token",
+        "https://mcp.slack.com",
+        "https://slack.com/oauth/v2_user/authorize"
+      )
     ).toThrow(/must match/i);
   });
 });

@@ -65,8 +65,8 @@ step, no extra dependencies, strict CSP, nothing stored in cookies — the token
 | Skills | everyone | Catalog of skills (disabled entries hidden). **Install** / **Remove** into your profile; only installed skills appear in `discover_skill` / `load_skill`. |
 | Credentials | everyone | Save API keys (`auth.scope: "user"`) and **Connect** OAuth servers. Keys are encrypted; OAuth uses `/oauth/callback` on this gateway. A key sent in an `X-Lazygate-Cred-…` header still wins. |
 | Activity | everyone (admins see all users) | Recent tool calls and admin mutations from the audit log |
-| Manage servers | admin | Same catalog with **Enable** / **Disable** (soft-hide; config kept), **Delete**, **Add**, and **Configure** (basics, access, `${secret:…}` values). Disabled entries stay visible here and cannot be activated. |
-| Manage skills | admin | Same catalog with **Enable** / **Disable**, **Delete**, **Add**, and **Configure** (inline body under `managed-skills/`). Disabled skills stay visible here and cannot be loaded. |
+| Manage servers | admin | Same catalog with **Enable** / **Disable** (soft-hide; config kept), **Delete**, **Add**, and **Configure** (basics, access, `${secret:…}` values). **Name** can be changed on save — installs, vault keys, OAuth token files, tool-index, and `server/*` secrets are migrated. Disabled entries stay visible here and cannot be activated. |
+| Manage skills | admin | Same catalog with **Enable** / **Disable**, **Delete**, **Add**, and **Configure** (inline body under `managed-skills/`). **Name** can be changed on save — installs are updated and `managed-skills/<name>/` is moved when applicable. Disabled skills stay visible here and cannot be loaded. |
 | Sessions | admin | Live sessions, plus **Index all tools** to pre-warm the shared discovery index (shared-scope servers only — never user-credential tool lists) |
 | Tokens | admin | Create (optionally `admin`, groups, expiry, label) and revoke tokens. The new token is shown once. |
 | All secrets | admin | Advanced: set or delete any shared secret path. Lists paths referenced by auth templates and highlights missing ones; values are never shown. Prefer the per-server Configure sheet for day-to-day secret setup. |
@@ -219,11 +219,41 @@ For HTTP servers with `oauth` (and usually `auth.scope: "user"`):
    on `/oauth/callback` (a short-lived HttpOnly cookie binds the flow to that browser).
 3. Call `activate_server` — the gateway uses the stored per-user token (no browser on the host).
 
-Shared OAuth (`auth.scope: "server"`, the default) is connected once by an admin. Pass
+Shared OAuth (`auth.scope: "server"`) is connected once by an admin. Pass
 `--public-url https://gw.example.com` so the redirect URI matches what you registered with the provider
 (and with dynamic client registration).
 
 `disconnect_server` removes your API keys and OAuth token for that server.
+
+### Stdio-style local OAuth (Claude / Cursor loopback)
+
+Providers like Slack register **`http://localhost:3118/callback`**, not the gateway’s
+`http://127.0.0.1:8787/oauth/callback`. For those apps, log in on the machine with the loopback
+listener instead of Connect:
+
+```bash
+# servers.json should include the pre-registered client + port, e.g. Slack/Claude:
+#   "oauth": { "clientId": "1601185624273.8899143856786", "callbackPort": 3118 }
+lazygate oauth login slack --user mmalta   # opens browser → localhost:3118/callback
+```
+
+That stores the token under `~/.config/lazygate/tokens/users/<user>/` (HTTP default is per-user).
+Then `activate_server` / the UI work without gateway Connect. Use `--force` to re-authorize.
+
+## Dynamic skill prompts
+
+Installed skills appear as MCP **prompts** (`prompts/list` / `prompts/get`) as well as via
+`discover_skill` / `load_skill`. Add a `prompt` block in `skills.json` (or Manage skills →
+Dynamic prompt) for parameterized templates and live context fetches — see
+[Dynamic prompts](reference.md#dynamic-prompts-arguments--context).
+
+**Cursor slash menu:** when Cursor re-initializes a dropped session (for example after the
+gateway restarts), it does not call `prompts/list` or `resources/list` again and keeps its first
+snapshot. lazygate sends `notifications/prompts/list_changed` and `resources/list_changed`
+shortly after each session initializes, so newly installed skills show up without restarting
+Cursor. Skills that share a name with a catalog MCP server are advertised as `skill:<name>`.
+
+Set `LAZYGATE_DEBUG_RPC=1` on `lazygate serve` to log the JSON-RPC methods each client sends.
 
 ## What the POC does not do
 
