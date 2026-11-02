@@ -19,6 +19,7 @@ import {
   chmodSync,
   statSync,
   unlinkSync,
+  readdirSync,
 } from "fs";
 import { resolve, dirname } from "path";
 import { homedir } from "os";
@@ -180,6 +181,45 @@ export function clearStoredToken(serverName: string, owner?: string): boolean {
   }
 }
 
+function movePrivateFile(from: string, to: string): void {
+  if (!existsSync(from)) return;
+  if (existsSync(to)) {
+    try {
+      unlinkSync(to);
+    } catch {
+      /* best effort */
+    }
+  }
+  mkdirSync(dirname(to), { recursive: true, mode: 0o700 });
+  renameSync(from, to);
+  try {
+    chmodSync(to, 0o600);
+  } catch {
+    /* best-effort */
+  }
+}
+
+/**
+ * Move on-disk OAuth client registration + tokens when a catalog server is renamed.
+ * Shared tokens and per-user tokens under tokens/users/<owner>/ are both updated.
+ */
+export function renameStoredServer(oldName: string, newName: string): void {
+  if (oldName === newName) return;
+  movePrivateFile(clientPath(oldName), clientPath(newName));
+  movePrivateFile(tokenPath(oldName), tokenPath(newName));
+  const usersRoot = resolve(TOKEN_DIR, "users");
+  if (!existsSync(usersRoot)) return;
+  let owners: string[] = [];
+  try {
+    owners = readdirSync(usersRoot);
+  } catch {
+    return;
+  }
+  for (const owner of owners) {
+    movePrivateFile(tokenPath(oldName, owner), tokenPath(newName, owner));
+  }
+}
+
 const pendingAuth = new Map<string, PendingAuth>();
 const PENDING_TTL_MS = 10 * 60_000;
 
@@ -289,7 +329,7 @@ async function validateDiscoveryEndpoints(info: OAuthServerInfo, meta: OAuthMeta
   await assertSafeUrl(meta.authorization_endpoint);
   await assertSafeUrl(meta.token_endpoint);
   if (meta.registration_endpoint) await assertSafeUrl(meta.registration_endpoint);
-  assertTokenEndpointMatchesIssuer(meta.token_endpoint, issuer);
+  assertTokenEndpointMatchesIssuer(meta.token_endpoint, issuer, meta.authorization_endpoint);
 }
 
 /** Discover AS metadata for an MCP resource URL (RFC 9728 → RFC 8414). */

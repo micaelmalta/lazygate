@@ -8,7 +8,7 @@ description: >-
 ---
 
 # Lazygate
-
+  
 lazygate is an MCP proxy. Cursor/Claude see **11 meta-tools** (9 in stdio; gateway also lists `connect_server` / `disconnect_server`). Real servers and skills load on demand. Activated tools stay off `tools/list` by default — use `describe_tool` / `call_tool`.
 
 Clients that ignore `notifications/tools/list_changed` will not see newly exposed schemas in `tools/list`; use `call_tool` / `describe_tool` instead. Changing `tools/list` also invalidates prompt cache for everything after the tools block — keep `expose: "none"` and prefer `call_tool`.
@@ -33,7 +33,7 @@ Namespace in Cursor is typically `user-lazygate`.
 ## Default workflow
 
 1. **Servers:** `discover_tools` → `activate_server` → `describe_tool` (if needed) → `call_tool`. Prefer `call_tool` over expecting upstream tools in `tools/list` (especially if the client ignores `tools/list_changed`).
-2. **Skills:** `discover_skill` → `load_skill` → obey the loaded body for the rest of the task.
+2. **Skills:** `discover_skill` → `load_skill` → obey the loaded body for the rest of the task. If the skill declares `prompt.arguments`, pass them as `args` on `load_skill` (same as MCP `prompts/get`).
 3. Prefer lazygate over configuring the same upstream MCP directly in Cursor when the gateway already catalogs it.
 
 ## Gateway profiles and credentials

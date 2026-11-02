@@ -99,12 +99,20 @@ export const META_TOOLS: Tool[] = [
     name: "load_skill",
     description:
       "Load a skill's full instructions into context. " +
+      "Pass args when the skill declares prompt.arguments ({{name}} placeholders). " +
       "Also lists bundled files (scripts, templates, references) as skill:// URIs — " +
       "use read_skill_file or resources/read to fetch them.",
     inputSchema: {
       type: "object",
       properties: {
         skill_name: { type: "string", description: "Name returned by discover_skill" },
+        args: {
+          type: "object",
+          description:
+            "Optional string arguments for parameterized skills (same as MCP prompts/get). " +
+            "Keys match prompt.arguments[].name; values are substituted for {{name}} and context URLs.",
+          additionalProperties: { type: "string" },
+        },
       },
       required: ["skill_name"],
     },
@@ -171,6 +179,10 @@ export const ServerNameSchema = z.object({
 });
 export const SkillNameSchema = z.object({
   skill_name: z.string().min(1, "`skill_name` must be a non-empty string"),
+});
+export const LoadSkillSchema = z.object({
+  skill_name: z.string().min(1, "`skill_name` must be a non-empty string"),
+  args: z.record(z.string(), z.string()).optional(),
 });
 export const ReadSkillFileSchema = z.object({
   skill_name: z.string().min(1, "`skill_name` must be a non-empty string"),
