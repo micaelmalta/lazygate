@@ -89,6 +89,12 @@ existing file, the process uses an ephemeral in-memory key (credentials encrypt 
 and will not decrypt after restart). Back `LAZYGATE_VAULT_KEY` (or a retained `vault.key`) up with
 `vault.json`; without the key stored credentials are unreadable.
 
+At startup lazygate loads a `.env` file from its package root (the checkout or install directory,
+next to `package.json`) if one exists, so settings such as `LAZYGATE_VAULT_KEY` or
+`LAZYGATE_GATEWAY_ALLOW_STDIO` can live there instead of the shell. Variables already set in the
+environment win over the file. The working directory's `.env` is never read, so starting lazygate
+inside a project cannot change gateway policy.
+
 ## Credentials
 
 Each server says where its credentials come from, in `servers.json`:

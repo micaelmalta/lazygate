@@ -19,9 +19,14 @@ import { createBroker } from "./broker.js";
 import { META_TOOL_NAMES } from "./meta-tools.js";
 import { loadRegistry } from "./registry.js";
 import { adoptLegacyConfigDir, APP_NAME } from "./paths.js";
+import { loadEnvFile } from "./env-file.js";
 import { VERSION, LOG_PREFIX } from "./version.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+
+// The package root, not the cwd: MCP clients may start lazygate inside an untrusted workspace,
+// whose .env must not be able to set gateway policy (LAZYGATE_GATEWAY_ALLOW_STDIO, …).
+const ENV_FILE = resolve(__dirname, "../.env");
 
 // ─── Subcommand dispatch ────────────────────────────────────────────────────
 
@@ -33,6 +38,9 @@ const SCRIPT_SUBCOMMANDS: Record<string, string> = {
 
 async function main(): Promise<void> {
   const [, , subcommand, ...rest] = process.argv;
+
+  const loaded = loadEnvFile(ENV_FILE);
+  if (loaded.length) console.error(`${LOG_PREFIX} Loaded ${loaded.join(", ")} from ${ENV_FILE}`);
 
   if (subcommand && SCRIPT_SUBCOMMANDS[subcommand]) {
     const result = spawnSync(process.execPath, [SCRIPT_SUBCOMMANDS[subcommand], ...rest], { stdio: "inherit" });
