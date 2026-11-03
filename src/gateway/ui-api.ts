@@ -25,7 +25,7 @@ import { CredentialResolver, SecretStore, canAccess, credHeaderName, secretEnvNa
 import { TokenStore, bearerToken, parseDuration, type UserIdentity } from "./tokens.js";
 import { UserVault } from "./vault.js";
 import { UserProfileStore } from "./profile.js";
-import { AuditLog } from "./audit.js";
+import { AuditLog, summarizeUsage } from "./audit.js";
 import { readBody, sendJson } from "./http-util.js";
 import { AuthFailureLimiter, clientKey } from "./rate-limit.js";
 import { UI_HTML, UI_JS, UI_CSS } from "./ui-assets.js";
@@ -262,6 +262,17 @@ async function route(
   if (area === "audit" && method === "GET") {
     const limit = Math.min(500, Math.max(1, Number(query.get("limit") ?? 100) || 100));
     return { events: ctx.audit.tail(limit, user.admin && query.get("all") === "1" ? undefined : user.id) };
+  }
+
+  if (area === "dashboard" && method === "GET" && seg.length === 1) {
+    const limit = Math.min(500, Math.max(1, Number(query.get("limit") ?? 500) || 500));
+    const scopeAll = Boolean(user.admin && query.get("all") === "1");
+    const events = ctx.audit.tail(limit, scopeAll ? undefined : user.id);
+    return {
+      scope: scopeAll ? "all" : "self",
+      liveSessions: scopeAll ? ctx.sessions().length : ctx.sessions().filter((s) => s.user === user.id).length,
+      usage: summarizeUsage(events),
+    };
   }
 
   // Marketplace catalog — every signed-in user can browse what they can use.
