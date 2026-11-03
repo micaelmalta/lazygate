@@ -85,6 +85,7 @@ const SkillPromptContextSchema = z
     json: z.boolean().optional(),
     timeoutMs: z.number().int().positive().max(120_000).optional(),
     optional: z.boolean().optional(),
+    allowPrivate: z.boolean().optional(),
   })
   .strict();
 

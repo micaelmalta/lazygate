@@ -14,6 +14,8 @@ jest.unstable_mockModule("fs", () => ({
   readFileSync: mockReadFileSync,
   statSync: mockStatSync,
   readdirSync: mockReaddirSync,
+  // Virtual paths: the real path is the path itself, so containment checks still run.
+  realpathSync: (p: string) => p,
 }));
 
 // Dynamic import after mock registration

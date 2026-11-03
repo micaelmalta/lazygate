@@ -195,8 +195,12 @@ In the skill body (and in context `url` / `headers` / `body`):
 - `{{context.status}}` — JSON (or text) from the named context fetch
 - `${secret:path}` — gateway secret (headers/body/url only)
 
-Context fetches use the same SSRF rules as other outbound HTTP; in gateway mode,
-admin-configured private/link-local URLs are allowed (redirects are never followed).
+Context fetches use the same SSRF rules as other outbound HTTP: https only (plain http only to
+loopback), and the address DNS returned is validated and then **pinned** for the connection, so a
+second lookup cannot rebind the host to an internal address. Redirects are never followed.
+Private and link-local targets (RFC 1918, ULA, CGNAT, `169.254.0.0/16` other than the cloud metadata
+address, which is always refused) are **off by default**; opt in per context entry with
+`"allowPrivate": true`. The gateway no longer allows them globally.
 Each response is capped (~64 KB). Set `optional: true` to inject an error note instead of
 failing the prompt when a fetch fails.
 
@@ -257,7 +261,9 @@ tool with side effects that you want Cursor or the client to approve one at a ti
 "jira": { "command": "...", "toolChain": ["search", "get_issue"] }
 ```
 
-`toolChain: true` allows every tool on the server. A server without `toolChain` has no binding in
+`toolChain: true` allows every tool on the server, except tools whose upstream annotations say
+`destructiveHint: true`: `run_chain` refuses those unless the server's `toolChain` is an array that
+names the tool. `describe_tool` shows each tool's `readOnlyHint` / `destructiveHint` annotations. A server without `toolChain` has no binding in
 scripts. Tools that are not allowlisted are not bound, so a script that calls them gets a
 "not a function" error and nothing reaches upstream.
 
@@ -368,16 +374,21 @@ lazygate benchmark --skills loi,writer,rlm
 lazygate benchmark --rounds 3                           # average over rounds
 lazygate benchmark --tasks                              # multi-step fixture: direct vs call_tool vs run_chain
 lazygate benchmark --tasks --rounds 3                   # same, averaged over 3 runs per strategy
+lazygate benchmark --tasks --include-catalog            # also load your real catalog (see warning below)
 ```
+
+`--tasks` runs Claude with permission checks off, so by default it only loads the tickets fixture
+server. `--include-catalog` adds every runnable server from your Lazygate catalog — any destructive
+tool in them then runs unprompted. Use it only with a catalog you would trust that way.
 
 `--tasks` runs the tickets fixture three ways and only prints token deltas when each side of a
 pair answered correctly. With `--rounds N`, each strategy runs N times; input tokens, turns and
 duration are the mean of the correct runs, and each row shows `correct k/N` and the min–max input
 range:
 
-- **direct** — Claude connects to every *runnable* server in your Lazygate `servers.json` plus the
-  tickets fixture (OAuth-only HTTP servers are skipped, same as the idle benchmark). Classic MCP:
-  all those tool schemas sit in context.
+- **direct** — Claude connects to the tickets fixture (with `--include-catalog`, also every
+  *runnable* server in your Lazygate `servers.json`; OAuth-only HTTP servers are skipped, same as
+  the idle benchmark). Classic MCP: all those tool schemas sit in context.
 - **call_tool** / **run_chain** — one Lazygate process wrapping that same catalog; only meta-tools
   are advertised, and the task uses the tickets fixture.
 

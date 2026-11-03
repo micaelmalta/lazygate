@@ -60,7 +60,7 @@ async function main(): Promise<void> {
 // ─── stdio mode ─────────────────────────────────────────────────────────────
 
 async function runStdio(): Promise<void> {
-  const { router, skillRouter, toolIndex, serverConfigs } = loadRegistry(process.argv);
+  const { router, skillRouter, toolIndex, skillHashes, serverConfigs } = loadRegistry(process.argv);
 
   const server = new Server(
     { name: APP_NAME, version: VERSION },
@@ -87,7 +87,7 @@ async function runStdio(): Promise<void> {
     },
   });
 
-  const broker = createBroker({ router, manager, skillRouter });
+  const broker = createBroker({ router, manager, skillRouter, skillHashes });
 
   server.setRequestHandler(ListToolsRequestSchema, async () => broker.listTools());
   server.setRequestHandler(CallToolRequestSchema, async (request) => {

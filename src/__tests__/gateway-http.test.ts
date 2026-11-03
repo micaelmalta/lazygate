@@ -16,6 +16,12 @@ import { SecretStore } from "../gateway/credentials.js";
 import { UserProfileStore } from "../gateway/profile.js";
 import { AuditLog } from "../gateway/audit.js";
 
+// These suites drive stdio fixture servers through the gateway. Stdio is refused in gateway mode
+// by default (R2); opt in for this file only, the same way an operator would.
+const PRIOR_ALLOW_STDIO = process.env.LAZYGATE_GATEWAY_ALLOW_STDIO;
+process.env.LAZYGATE_GATEWAY_ALLOW_STDIO = "1";
+
+
 const FIXTURE = fileURLToPath(new URL("./fixtures/cred-server.mjs", import.meta.url));
 const ALICE_KEY = "alice-jira-key-123";
 const BOB_KEY = "bob-jira-key-456";
@@ -115,6 +121,8 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  if (PRIOR_ALLOW_STDIO === undefined) delete process.env.LAZYGATE_GATEWAY_ALLOW_STDIO;
+  else process.env.LAZYGATE_GATEWAY_ALLOW_STDIO = PRIOR_ALLOW_STDIO;
   await Promise.all(clients.map((c) => c.close().catch(() => undefined)));
   await gw.close();
   rmSync(dir, { recursive: true, force: true });

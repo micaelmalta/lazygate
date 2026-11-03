@@ -3,3 +3,7 @@ dist
 .git
 .claude
 *.log
+.env
+.env.*
+*.bak-*
+security-report-*.md

@@ -16,6 +16,12 @@ import { UserVault, mergeCreds } from "../gateway/vault.js";
 import { UserProfileStore } from "../gateway/profile.js";
 import { AuditLog } from "../gateway/audit.js";
 
+// These suites drive stdio fixture servers through the gateway. Stdio is refused in gateway mode
+// by default (R2); opt in for this file only, the same way an operator would.
+const PRIOR_ALLOW_STDIO = process.env.LAZYGATE_GATEWAY_ALLOW_STDIO;
+process.env.LAZYGATE_GATEWAY_ALLOW_STDIO = "1";
+
+
 const FIXTURE = fileURLToPath(new URL("./fixtures/cred-server.mjs", import.meta.url));
 const rev = (s: string) => [...s].reverse().join("");
 
@@ -139,6 +145,8 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  if (PRIOR_ALLOW_STDIO === undefined) delete process.env.LAZYGATE_GATEWAY_ALLOW_STDIO;
+  else process.env.LAZYGATE_GATEWAY_ALLOW_STDIO = PRIOR_ALLOW_STDIO;
   await Promise.all(clients.map((c) => c.close().catch(() => undefined)));
   await gw.close();
   rmSync(dir, { recursive: true, force: true });
@@ -1076,5 +1084,55 @@ describe("UserVault", () => {
       new Map([["jira", { token: "sent" }]])
     );
     expect(merged.get("jira")).toEqual({ token: "sent", extra: "kept" });
+  });
+});
+
+describe("R3 regression: UI cannot set code-loading env or inheritEnv", () => {
+  it("refuses NODE_OPTIONS (and other code-loading env) on an allowlisted command", async () => {
+    const prev = process.env.LAZYGATE_ALLOWED_COMMANDS;
+    process.env.LAZYGATE_ALLOWED_COMMANDS = process.execPath;
+    try {
+      const created = await ui("POST", "/ui/api/servers", admin, {
+        name: "r3-probe",
+        command: process.execPath,
+        args: ["-e", "1"],
+        env: { NODE_OPTIONS: "--import data:text/javascript,process.exit(1)" },
+      });
+      expect(created.status).toBe(403);
+      expect(created.json.error).toMatch(/NODE_OPTIONS.*cannot be set from the UI/);
+
+      // A safe env var is still allowed.
+      const ok = await ui("POST", "/ui/api/servers", admin, {
+        name: "r3-safe",
+        command: process.execPath,
+        args: ["-e", "1"],
+        env: { FEATURE_FLAG: "on" },
+      });
+      expect(ok.status).toBe(200);
+      await ui("DELETE", "/ui/api/servers/r3-safe", admin);
+    } finally {
+      if (prev === undefined) delete process.env.LAZYGATE_ALLOWED_COMMANDS;
+      else process.env.LAZYGATE_ALLOWED_COMMANDS = prev;
+    }
+  });
+
+  it("refuses to flip inheritEnv from the UI when an allowlist is configured", async () => {
+    const prev = process.env.LAZYGATE_ALLOWED_COMMANDS;
+    process.env.LAZYGATE_ALLOWED_COMMANDS = process.execPath;
+    try {
+      const created = await ui("POST", "/ui/api/servers", admin, {
+        name: "r3-inherit",
+        command: process.execPath,
+        args: ["-e", "1"],
+      });
+      expect(created.status).toBe(200);
+      const patched = await ui("PATCH", "/ui/api/servers/r3-inherit", admin, { inheritEnv: true });
+      expect(patched.status).toBe(403);
+      expect(patched.json.error).toMatch(/inheritEnv can only be changed on the host/);
+      await ui("DELETE", "/ui/api/servers/r3-inherit", admin);
+    } finally {
+      if (prev === undefined) delete process.env.LAZYGATE_ALLOWED_COMMANDS;
+      else process.env.LAZYGATE_ALLOWED_COMMANDS = prev;
+    }
   });
 });

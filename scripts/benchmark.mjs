@@ -119,6 +119,9 @@ const mcpOnly = has("--mcp-only");
 const skillsOnly = has("--skills-only");
 const estimateOnly = has("--estimate");
 const tasksOnly = has("--tasks");
+// --tasks runs Claude with permission checks bypassed. By default it only sees the tickets fixture;
+// the user's real catalog (and its destructive tools) is loaded only with an explicit flag.
+const includeCatalog = has("--include-catalog");
 if (tasksOnly && (mcpOnly || skillsOnly)) {
   console.error("--tasks cannot be combined with --mcp-only / --skills-only.");
   process.exit(1);
@@ -703,7 +706,9 @@ console.log(`\nlazygate benchmark`);
 console.log(`${"─".repeat(60)}`);
 if (tasksOnly) {
   // Task mode still uses the tickets fixture for the workload; direct wires the user's catalog too.
-  console.log(`Mode:    --tasks (direct | call_tool | run_chain; direct loads all runnable Lazygate MCPs)`);
+  console.log(
+    `Mode:    --tasks (direct | call_tool | run_chain; ${includeCatalog ? "loads your full Lazygate catalog (--include-catalog)" : "fixture server only (pass --include-catalog for the full catalog)"})`
+  );
   console.log(
     `Catalog: ${Object.keys(servers).length} runnable` +
       (Object.keys(servers).length ? ` (${Object.keys(servers).join(", ")})` : "")
@@ -821,7 +826,9 @@ function ticketsServerEntry() {
  */
 function taskBrokerConfig(strategyDir) {
   const cfgPath = join(strategyDir, "servers.json");
-  const merged = { ...servers, tickets: ticketsServerEntry() };
+  // Only the fixture unless --include-catalog: the real catalog can hold destructive tools and
+  // --tasks bypasses permission prompts.
+  const merged = { ...(includeCatalog ? servers : {}), tickets: ticketsServerEntry() };
   // Expand ${VAR} the same way direct MCP wiring does, so stdio children get real secrets.
   const out = {};
   for (const [name, cfg] of Object.entries(merged)) {
@@ -848,7 +855,9 @@ function taskBrokerConfig(strategyDir) {
 function taskMcpConfig(strategy, strategyDir) {
   const ticketsServer = resolve(__dirname, "..", "src", "__tests__", "fixtures", "tickets-server.mjs");
   if (strategy.mcp === "direct") {
-    const mcp = buildMcpConfig(Object.keys(servers));
+    const mcp = includeCatalog
+      ? buildMcpConfig(Object.keys(servers))
+      : { mcpServers: {} };
     // Fixture wins if the user already has a server named "tickets".
     mcp.mcpServers.tickets = { command: process.execPath, args: [ticketsServer] };
     return mcp;

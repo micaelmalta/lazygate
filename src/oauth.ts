@@ -9,7 +9,7 @@ import {
   type IncomingMessage,
   type ServerResponse,
 } from "http";
-import { createHash, randomBytes, timingSafeEqual } from "crypto";
+import { createCipheriv, createDecipheriv, createHash, randomBytes, timingSafeEqual } from "crypto";
 import {
   readFileSync,
   writeFileSync,
@@ -110,7 +110,11 @@ const TOKEN_DIR = resolve(CONFIG_DIR, "tokens");
 const CLIENT_DIR = resolve(CONFIG_DIR, "clients");
 
 function safeFileName(serverName: string): string {
-  return serverName.replace(/[^A-Za-z0-9._-]/g, "_");
+  // Replace every non-[A-Za-z0-9-] character (dots included) so names like ".." cannot traverse
+  // and distinct names cannot collide after mapping (a/b and a_b both used to become a_b).
+  const mapped = serverName.replace(/[^A-Za-z0-9_-]/g, (c) => `%${c.charCodeAt(0).toString(16).padStart(2, "0")}`);
+  if (!mapped) throw new Error("Empty server or owner name");
+  return mapped;
 }
 
 /** Tokens are shared per server, or per user when `owner` is set (gateway user-scope servers). */
@@ -153,12 +157,85 @@ function readJson<T>(path: string): T | null {
   }
 }
 
+/**
+ * OAuth tokens are encrypted at rest (AES-256-GCM, bound to the token path). The key comes from
+ * LAZYGATE_VAULT_KEY (base64, 32 bytes) when set, otherwise from a 0600 `token.key` file beside
+ * the token directory, created on first use. Files written before encryption was added (plain
+ * JSON) are still read and re-sealed on the next save.
+ */
+const TOKEN_KEY_FILE = resolve(CONFIG_DIR, "token.key");
+let tokenKeyCache: Buffer | undefined;
+
+function tokenKey(): Buffer {
+  if (tokenKeyCache) return tokenKeyCache;
+  const fromEnv = process.env.LAZYGATE_VAULT_KEY;
+  if (fromEnv) {
+    tokenKeyCache = Buffer.from(fromEnv, "base64");
+  } else if (existsSync(TOKEN_KEY_FILE)) {
+    tokenKeyCache = Buffer.from(readFileSync(TOKEN_KEY_FILE, "utf-8").trim(), "base64");
+  } else {
+    tokenKeyCache = randomBytes(32);
+    mkdirSync(dirname(TOKEN_KEY_FILE), { recursive: true, mode: 0o700 });
+    writeFileSync(TOKEN_KEY_FILE, tokenKeyCache.toString("base64") + "\n", { mode: 0o600 });
+  }
+  if (tokenKeyCache.length !== 32) throw new Error("Token encryption key must be 32 bytes (base64)");
+  return tokenKeyCache;
+}
+
+function sealToken(plain: string, aad: string): string {
+  const iv = randomBytes(12);
+  const c = createCipheriv("aes-256-gcm", tokenKey(), iv);
+  c.setAAD(Buffer.from(aad));
+  const ct = Buffer.concat([c.update(plain, "utf-8"), c.final()]);
+  return JSON.stringify({ v: 1, iv: iv.toString("base64url"), tag: c.getAuthTag().toString("base64url"), ct: ct.toString("base64url") });
+}
+
+function openToken(sealed: string, aad: string): string | undefined {
+  try {
+    const { v, iv, tag, ct } = JSON.parse(sealed) as { v?: number; iv?: string; tag?: string; ct?: string };
+    if (v !== 1 || !iv || !tag || !ct) return undefined;
+    const d = createDecipheriv("aes-256-gcm", tokenKey(), Buffer.from(iv, "base64url"));
+    d.setAAD(Buffer.from(aad));
+    d.setAuthTag(Buffer.from(tag, "base64url"));
+    return Buffer.concat([d.update(Buffer.from(ct, "base64url")), d.final()]).toString("utf-8");
+  } catch {
+    return undefined;
+  }
+}
+
 function loadToken(serverName: string, owner?: string): TokenSet | null {
-  return readJson<TokenSet>(tokenPath(serverName, owner));
+  const path = tokenPath(serverName, owner);
+  if (!existsSync(path)) return null;
+  let raw: string;
+  try {
+    raw = readFileSync(path, "utf-8");
+  } catch {
+    return null;
+  }
+  // Encrypted envelope: { v, iv, tag, ct }. Anything else is a legacy plain token file.
+  if (/^\{"v":1,/.test(raw.trim())) {
+    const plain = openToken(raw.trim(), tokenAad(serverName, owner));
+    if (plain === undefined) return null;
+    try {
+      return JSON.parse(plain) as TokenSet;
+    } catch {
+      return null;
+    }
+  }
+  return readJson<TokenSet>(path);
+}
+
+function tokenAad(serverName: string, owner?: string): string {
+  return `${owner ?? "(shared)"}\0${serverName}`;
 }
 
 function saveToken(serverName: string, token: TokenSet, owner?: string): void {
-  writePrivateJson(tokenPath(serverName, owner), token);
+  const path = tokenPath(serverName, owner);
+  const sealed = sealToken(JSON.stringify(token), tokenAad(serverName, owner));
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  const tmp = `${path}.${process.pid}.tmp`;
+  writeFileSync(tmp, sealed + "\n", { mode: 0o600 });
+  renameSync(tmp, path);
 }
 
 /** Whether a non-expired (or refreshable) token is on disk for this server/owner. */
@@ -876,7 +953,7 @@ export async function finishRemoteAuthorization(
     pendingAuth.delete(state);
     throw new Error("OAuth state is invalid or expired — start Connect again from the UI");
   }
-  if (!bindToken || bindToken !== pending.bindToken) {
+  if (!bindToken || !safeEqual(bindToken, pending.bindToken)) {
     throw new Error(
       "OAuth callback was not started from this browser — open Connect again and continue in the same browser"
     );
