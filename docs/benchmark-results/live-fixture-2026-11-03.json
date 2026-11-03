@@ -1,0 +1,275 @@
+{
+  "method": "live MCP calls; optimizer policies applied to each captured response; no model calls",
+  "iterations": 30,
+  "limitations": [
+    "Token counts are estimates from serialized JSON characters divided by four.",
+    "Latency includes the upstream tool call and local response transformation, not model inference or full agent task success.",
+    "Each case must be a read-only tool call and provide preservation checks."
+  ],
+  "measurements": [
+    {
+      "case": "large-json-projection",
+      "server": "benchmark-fixture",
+      "tool": "search_records",
+      "setupMs": 76.466,
+      "policy": "off",
+      "sampleCount": 30,
+      "tokenEstimate": "serialized JSON characters / 4",
+      "originalTokens": {
+        "median": 2107,
+        "p95": 2107
+      },
+      "optimizedTokens": {
+        "median": 2107,
+        "p95": 2107
+      },
+      "savedTokens": {
+        "median": 0,
+        "p95": 0
+      },
+      "reductionPercent": 0,
+      "upstreamLatencyMs": {
+        "median": 0.184,
+        "p95": 0.353,
+        "stdDev": 0.129
+      },
+      "optimizationLatencyMs": {
+        "median": 0.016,
+        "p95": 0.027,
+        "stdDev": 0.046
+      },
+      "endToEndToolLatencyMs": {
+        "median": 0.198,
+        "p95": 0.374,
+        "stdDev": 0.171
+      },
+      "completeSamples": 30,
+      "correctness": {
+        "passed": 30,
+        "checked": 30
+      },
+      "upstreamErrors": 0
+    },
+    {
+      "case": "large-json-projection",
+      "server": "benchmark-fixture",
+      "tool": "search_records",
+      "setupMs": 76.466,
+      "policy": "project-record-fields",
+      "sampleCount": 30,
+      "tokenEstimate": "serialized JSON characters / 4",
+      "originalTokens": {
+        "median": 2107,
+        "p95": 2107
+      },
+      "optimizedTokens": {
+        "median": 147,
+        "p95": 147
+      },
+      "savedTokens": {
+        "median": 1960,
+        "p95": 1960
+      },
+      "reductionPercent": 93,
+      "upstreamLatencyMs": {
+        "median": 0.184,
+        "p95": 0.353,
+        "stdDev": 0.129
+      },
+      "optimizationLatencyMs": {
+        "median": 0.055,
+        "p95": 0.215,
+        "stdDev": 0.093
+      },
+      "endToEndToolLatencyMs": {
+        "median": 0.246,
+        "p95": 0.467,
+        "stdDev": 0.217
+      },
+      "completeSamples": 0,
+      "correctness": {
+        "passed": 30,
+        "checked": 30
+      },
+      "upstreamErrors": 0
+    },
+    {
+      "case": "html-documentation-markdown",
+      "server": "benchmark-fixture",
+      "tool": "get_document",
+      "setupMs": 75.449,
+      "policy": "off",
+      "sampleCount": 30,
+      "tokenEstimate": "serialized JSON characters / 4",
+      "originalTokens": {
+        "median": 114,
+        "p95": 114
+      },
+      "optimizedTokens": {
+        "median": 114,
+        "p95": 114
+      },
+      "savedTokens": {
+        "median": 0,
+        "p95": 0
+      },
+      "reductionPercent": 0,
+      "upstreamLatencyMs": {
+        "median": 0.373,
+        "p95": 1.005,
+        "stdDev": 0.26
+      },
+      "optimizationLatencyMs": {
+        "median": 0.008,
+        "p95": 0.015,
+        "stdDev": 0.003
+      },
+      "endToEndToolLatencyMs": {
+        "median": 0.383,
+        "p95": 1.014,
+        "stdDev": 0.262
+      },
+      "completeSamples": 30,
+      "correctness": {
+        "passed": 30,
+        "checked": 30
+      },
+      "upstreamErrors": 0
+    },
+    {
+      "case": "html-documentation-markdown",
+      "server": "benchmark-fixture",
+      "tool": "get_document",
+      "setupMs": 75.449,
+      "policy": "markdown",
+      "sampleCount": 30,
+      "tokenEstimate": "serialized JSON characters / 4",
+      "originalTokens": {
+        "median": 114,
+        "p95": 114
+      },
+      "optimizedTokens": {
+        "median": 66,
+        "p95": 66
+      },
+      "savedTokens": {
+        "median": 48,
+        "p95": 48
+      },
+      "reductionPercent": 42.1,
+      "upstreamLatencyMs": {
+        "median": 0.373,
+        "p95": 1.005,
+        "stdDev": 0.26
+      },
+      "optimizationLatencyMs": {
+        "median": 0.87,
+        "p95": 2.015,
+        "stdDev": 2.564
+      },
+      "endToEndToolLatencyMs": {
+        "median": 1.244,
+        "p95": 2.839,
+        "stdDev": 2.68
+      },
+      "completeSamples": 30,
+      "correctness": {
+        "passed": 30,
+        "checked": 30
+      },
+      "upstreamErrors": 0
+    },
+    {
+      "case": "html-reader-mode",
+      "server": "benchmark-fixture",
+      "tool": "get_article",
+      "setupMs": 64.954,
+      "policy": "off",
+      "sampleCount": 30,
+      "tokenEstimate": "serialized JSON characters / 4",
+      "originalTokens": {
+        "median": 84,
+        "p95": 84
+      },
+      "optimizedTokens": {
+        "median": 84,
+        "p95": 84
+      },
+      "savedTokens": {
+        "median": 0,
+        "p95": 0
+      },
+      "reductionPercent": 0,
+      "upstreamLatencyMs": {
+        "median": 0.137,
+        "p95": 0.301,
+        "stdDev": 0.28
+      },
+      "optimizationLatencyMs": {
+        "median": 0.005,
+        "p95": 0.011,
+        "stdDev": 0.002
+      },
+      "endToEndToolLatencyMs": {
+        "median": 0.142,
+        "p95": 0.309,
+        "stdDev": 0.281
+      },
+      "completeSamples": 30,
+      "correctness": {
+        "passed": 30,
+        "checked": 30
+      },
+      "upstreamErrors": 0
+    },
+    {
+      "case": "html-reader-mode",
+      "server": "benchmark-fixture",
+      "tool": "get_article",
+      "setupMs": 64.954,
+      "policy": "reader",
+      "sampleCount": 30,
+      "tokenEstimate": "serialized JSON characters / 4",
+      "originalTokens": {
+        "median": 84,
+        "p95": 84
+      },
+      "optimizedTokens": {
+        "median": 99,
+        "p95": 99
+      },
+      "savedTokens": {
+        "median": -15,
+        "p95": -14
+      },
+      "reductionPercent": -17.9,
+      "upstreamLatencyMs": {
+        "median": 0.137,
+        "p95": 0.301,
+        "stdDev": 0.28
+      },
+      "optimizationLatencyMs": {
+        "median": 0.174,
+        "p95": 0.393,
+        "stdDev": 0.148
+      },
+      "endToEndToolLatencyMs": {
+        "median": 0.312,
+        "p95": 1.154,
+        "stdDev": 0.347
+      },
+      "completeSamples": 0,
+      "correctness": {
+        "passed": 30,
+        "checked": 30
+      },
+      "upstreamErrors": 0
+    }
+  ],
+  "recordedAt": "2026-11-03T13:41:00.595Z",
+  "nodeVersion": "v24.12.0",
+  "caseFile": "src/__tests__/fixtures/live-benchmark-cases.json",
+  "serverConfig": "src/__tests__/fixtures/live-benchmark-servers.json",
+  "fixtureServer": "src/__tests__/fixtures/benchmark-response-server.mjs",
+  "command": "node dist/index.js benchmark --responses-live --cases src/__tests__/fixtures/live-benchmark-cases.json --config src/__tests__/fixtures/live-benchmark-servers.json --iterations 30"
+}

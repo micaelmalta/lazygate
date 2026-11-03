@@ -44,5 +44,7 @@ describe("live response benchmark", () => {
       measurement.case === "html-reader-mode" && measurement.policy === "reader");
     expect(markdown.correctness).toEqual({ passed: 2, checked: 2 });
     expect(reader.correctness).toEqual({ passed: 2, checked: 2 });
+    expect(reader.optimizedTokens.median).toBeGreaterThan(reader.originalTokens.median);
+    expect(reader.reductionPercent).toBeLessThan(0);
   });
 });

@@ -446,11 +446,12 @@ if (liveResponsesOnly) {
           const transformMs = performance.now() - transformStarted;
           const correctness = await checkPreservation(original, optimized.result, benchmarkCase);
           if (correctness === false) failed = true;
+          const optimizedTokens = estimateTokens(optimized.result);
           measurements.get(label).push({
             originalTokens,
-            optimizedTokens: estimateTokens(optimized.result),
-            savedTokens: Math.max(0, originalTokens - estimateTokens(optimized.result)),
-            reductionPercent: originalTokens ? Math.max(0, (originalTokens - estimateTokens(optimized.result)) / originalTokens * 100) : 0,
+            optimizedTokens,
+            savedTokens: originalTokens - optimizedTokens,
+            reductionPercent: originalTokens ? (originalTokens - optimizedTokens) / originalTokens * 100 : 0,
             upstreamMs,
             transformMs,
             totalMs: upstreamMs + transformMs,

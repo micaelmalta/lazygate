@@ -484,7 +484,8 @@ checks that selected JSONPath values stay identical; `preserveText` checks that 
 fragment remains in the response. Every sample must pass these checks for the policy to preserve
 correctness. The output includes estimated response token counts and median, p95, and standard
 deviation for upstream tool latency, transformation latency, and their sum. Token counts use
-serialized JSON characters divided by four. This mode makes no model calls and does not measure
+serialized JSON characters divided by four; a negative reduction percentage means the transformed
+response grew. This mode makes no model calls and does not measure
 model round trips or full task success. `--responses` remains the deterministic, synthetic local
 optimizer smoke benchmark.
 
