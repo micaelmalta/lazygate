@@ -1,0 +1,8 @@
+{
+  "servers": {
+    "benchmark-fixture": {
+      "command": "node",
+      "args": ["src/__tests__/fixtures/benchmark-response-server.mjs"]
+    }
+  }
+}

@@ -488,6 +488,22 @@ serialized JSON characters divided by four. This mode makes no model calls and d
 model round trips or full task success. `--responses` remains the deterministic, synthetic local
 optimizer smoke benchmark.
 
+To exercise the live CLI against the repository's local MCP fixture, use the bundled cases and
+server config from the repository root:
+
+```bash
+npm run build
+node dist/index.js benchmark \
+  --responses-live \
+  --cases src/__tests__/fixtures/live-benchmark-cases.json \
+  --config src/__tests__/fixtures/live-benchmark-servers.json \
+  --iterations 5
+```
+
+These fixtures cover JSON projection, HTML-to-Markdown, and HTML reader mode. They validate the MCP
+call and measurement path with deterministic local data; use your own case file and configured
+read-only services for production measurements.
+
 ### What it measures
 
 | Strategy | Meaning |

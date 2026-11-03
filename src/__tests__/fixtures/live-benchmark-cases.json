@@ -1,0 +1,43 @@
+{
+  "cases": [
+    {
+      "name": "large-json-projection",
+      "server": "benchmark-fixture",
+      "tool": "search_records",
+      "args": {},
+      "readOnly": true,
+      "preservePaths": [
+        "$.structuredContent.items[*].id",
+        "$.structuredContent.items[*].title"
+      ],
+      "policies": [
+        { "name": "off", "mode": "off" },
+        { "name": "project-record-fields", "mode": "project", "fields": ["items.id", "items.title"] }
+      ]
+    },
+    {
+      "name": "html-documentation-markdown",
+      "server": "benchmark-fixture",
+      "tool": "get_document",
+      "args": {},
+      "readOnly": true,
+      "preserveText": ["Benchmark handbook", "npm install lazygate"],
+      "policies": [
+        { "name": "off", "mode": "off" },
+        { "name": "markdown", "mode": "html_markdown" }
+      ]
+    },
+    {
+      "name": "html-reader-mode",
+      "server": "benchmark-fixture",
+      "tool": "get_article",
+      "args": {},
+      "readOnly": true,
+      "preserveText": ["Response optimization guide", "Keep the benchmark safe."],
+      "policies": [
+        { "name": "off", "mode": "off" },
+        { "name": "reader", "mode": "html_reader" }
+      ]
+    }
+  ]
+}
