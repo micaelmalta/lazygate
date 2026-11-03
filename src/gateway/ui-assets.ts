@@ -789,7 +789,7 @@ export const UI_JS = String.raw`(function () {
   // ── tabs ─────────────────────────────────────────────────────────────────
   // [id, label, viewFn]
   var USER_TABS = [
-    ["dashboard", "Dashboard", dashboardView],
+    ["dashboard", "Dashboard", function (r) { return dashboardView(r, false); }],
     ["mcps", "Servers", function (r) { return mcpsView(r, false); }],
     ["skills", "Skills", function (r) { return skillsView(r, false); }],
     ["connections", "Credentials", connectionsView],
@@ -798,6 +798,7 @@ export const UI_JS = String.raw`(function () {
   var ADMIN_TABS = [
     ["manage-mcps", "Manage servers", function (r) { return mcpsView(r, true); }],
     ["manage-skills", "Manage skills", function (r) { return skillsView(r, true); }],
+    ["admin-dashboard", "Usage", function (r) { return dashboardView(r, true); }],
     ["sessions", "Sessions", sessionsView],
     ["tokens", "Tokens", tokensView],
     ["secrets", "All secrets", secretsView]
@@ -1415,9 +1416,9 @@ export const UI_JS = String.raw`(function () {
     }).catch(function (e) { show(root, notice("error", e.message)); });
   }
 
-  // ── dashboard ────────────────────────────────────────────────────────────
-  function dashboardView(root) {
-    var all = me.admin ? "&all=1" : "";
+  // ── dashboard (personal homepage, or admin everyone-scope) ───────────────
+  function dashboardView(root, everyone) {
+    var all = everyone ? "&all=1" : "";
     var timer = null;
     var inflight = false;
     var built = false;
@@ -1475,7 +1476,7 @@ export const UI_JS = String.raw`(function () {
       var to = u.to ? ago(u.to) : null;
       rangeEl.textContent = u.calls
         ? ("Based on the last " + u.calls + " MCP calls" + (from && to ? " (" + from + " → " + to + ")" : "") +
-          (d.scope === "all" ? " · everyone" : " · you") +
+          (everyone ? " · everyone" : " · you") +
           ". Token figures are estimates (≈4 chars/token); savings appear when response optimization shrinks a payload.")
         : "No MCP tool calls in the recent audit window yet.";
 
@@ -1494,9 +1495,14 @@ export const UI_JS = String.raw`(function () {
       if (built) return;
       built = true;
       clear(root);
-      root.appendChild(marketHero("Dashboard", "Usage and estimated token spend across recent MCP traffic."));
+      root.appendChild(marketHero(
+        everyone ? "Usage" : "Dashboard",
+        everyone
+          ? "Gateway-wide usage and estimated token spend across recent MCP traffic."
+          : "Your usage and estimated token spend across recent MCP traffic."
+      ));
       root.appendChild(h("div", { class: "card" },
-        h("h2", null, me.admin ? "Overview (everyone)" : "Your overview"),
+        h("h2", null, everyone ? "Overview (everyone)" : "Your overview"),
         h("p", { class: "row" },
           h("label", { class: "inline" }, auto, " auto-refresh"),
           h("button", { class: "btn", type: "button", onclick: function () { load(); } }, "Refresh"),
@@ -1505,7 +1511,7 @@ export const UI_JS = String.raw`(function () {
         rangeEl));
       root.appendChild(h("div", { class: "card" }, h("h2", null, "Top servers"), serversOut));
       root.appendChild(h("div", { class: "card" }, h("h2", null, "Top tools"), toolsOut));
-      if (me.admin) {
+      if (everyone) {
         usersCard = h("div", { class: "card" }, h("h2", null, "Top users"), usersOut);
         root.appendChild(usersCard);
       }
