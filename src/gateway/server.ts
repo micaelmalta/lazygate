@@ -6,6 +6,7 @@
 import { createServer, type IncomingMessage, type ServerResponse, type Server as HttpServer } from "http";
 import type { AddressInfo } from "net";
 import { randomUUID } from "crypto";
+import { AsyncLocalStorage } from "async_hooks";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import {
@@ -25,6 +26,7 @@ import { META_TOOL_NAMES } from "../meta-tools.js";
 import { formatSkillUri, parseSkillUri } from "../skill-router.js";
 import { composePrompt, promptArgumentsForList } from "../prompt-compose.js";
 import { skillProvenance } from "../broker.js";
+import { estimateTokens, type OptimizationMetrics } from "../response-optimizer.js";
 import type { Registry } from "../registry.js";
 import { APP_NAME } from "../paths.js";
 import { VERSION, LOG_PREFIX } from "../version.js";
@@ -52,6 +54,9 @@ import { effectiveAuthScope, type ServerConfig } from "../router.js";
 import type { SkillConfig } from "../skill-router.js";
 import { gatewayStartupWarnings } from "./warnings.js";
 import { isSharedIndexable } from "./tool-index-warm.js";
+
+/** Per-request bag so optimization metrics can be audited without attaching them to the client result. */
+const callMetrics = new AsyncLocalStorage<{ last?: OptimizationMetrics }>();
 
 export interface GatewayOptions {
   registry: Registry;
@@ -391,15 +396,22 @@ export async function startGateway(opts: GatewayOptions): Promise<Gateway> {
       skillHashes: registry.skillHashes,
       access,
       secrets,
+      onOptimizationMetrics: (_ctx, metrics) => {
+        const bag = callMetrics.getStore();
+        if (bag) bag.last = metrics;
+      },
     });
 
     server.setRequestHandler(ListToolsRequestSchema, async () => broker.listTools());
     server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const { name, arguments: args } = request.params;
       const started = Date.now();
+      const metricsBag: { last?: OptimizationMetrics } = {};
       let result: ToolResult;
       try {
-        result = await broker.callTool(name, args as Record<string, unknown> | undefined);
+        result = await callMetrics.run(metricsBag, () =>
+          broker.callTool(name, args as Record<string, unknown> | undefined)
+        );
       } catch (err) {
         result = { content: [{ type: "text", text: `Error: ${(err as Error).message}` }], isError: true };
       }
@@ -413,6 +425,10 @@ export async function startGateway(opts: GatewayOptions): Promise<Gateway> {
       const isProxyMeta = name === "call_tool" || name === "describe_tool";
       const innerServer = isProxyMeta && typeof a.server === "string" ? a.server : undefined;
       const innerTool = isProxyMeta && typeof a.tool === "string" ? a.tool.slice(0, 200) : undefined;
+      const measured = metricsBag.last;
+      const optimizedTokens = measured?.optimizedTokens ?? estimateTokens(result);
+      const originalTokens = measured?.originalTokens ?? optimizedTokens;
+      const savedTokens = measured?.savedTokens ?? Math.max(0, originalTokens - optimizedTokens);
       audit.record({
         user: user.id,
         session: session.id,
@@ -422,6 +438,9 @@ export async function startGateway(opts: GatewayOptions): Promise<Gateway> {
         ok: !result.isError,
         ms: Date.now() - started,
         error: result.isError ? firstText(result).slice(0, 200) : undefined,
+        originalTokens,
+        optimizedTokens,
+        savedTokens,
       });
       return result;
     });

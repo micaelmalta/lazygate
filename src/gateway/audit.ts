@@ -27,6 +27,116 @@ export interface AuditEvent {
   beforeHash?: string;
   /** SHA-256 prefix of a sanitized after snapshot (no secret values). */
   afterHash?: string;
+  /** Estimated tokens before response optimization (approx; never secret values). */
+  originalTokens?: number;
+  /** Estimated tokens delivered to the client after optimization. */
+  optimizedTokens?: number;
+  /** originalTokens − optimizedTokens (0 when optimization did not shrink the payload). */
+  savedTokens?: number;
+}
+
+export type AuditedEvent = AuditEvent & { ts: string };
+
+export interface UsageBucket {
+  key: string;
+  calls: number;
+  ok: number;
+  error: number;
+  originalTokens: number;
+  optimizedTokens: number;
+  savedTokens: number;
+}
+
+export interface UsageSummary {
+  /** Events included in the summary (MCP tool traffic only). */
+  calls: number;
+  ok: number;
+  error: number;
+  originalTokens: number;
+  optimizedTokens: number;
+  savedTokens: number;
+  reductionPercent: number;
+  from: string | null;
+  to: string | null;
+  byServer: UsageBucket[];
+  byTool: UsageBucket[];
+  byUser: UsageBucket[];
+}
+
+/** True for MCP session tool traffic (excludes UI admin mutations and auth noise). */
+export function isUsageEvent(e: AuditEvent): boolean {
+  if (!e.tool || !e.session) return false;
+  if (e.session === "ui" || e.session === "mcp") return false;
+  return true;
+}
+
+function bump(
+  map: Map<string, UsageBucket>,
+  key: string,
+  e: AuditEvent
+): void {
+  let b = map.get(key);
+  if (!b) {
+    b = { key, calls: 0, ok: 0, error: 0, originalTokens: 0, optimizedTokens: 0, savedTokens: 0 };
+    map.set(key, b);
+  }
+  b.calls += 1;
+  if (e.ok === false) b.error += 1;
+  else b.ok += 1;
+  b.originalTokens += e.originalTokens ?? 0;
+  b.optimizedTokens += e.optimizedTokens ?? 0;
+  b.savedTokens += e.savedTokens ?? 0;
+}
+
+function ranked(map: Map<string, UsageBucket>, limit: number): UsageBucket[] {
+  return [...map.values()]
+    .sort((a, b) => b.calls - a.calls || b.savedTokens - a.savedTokens || a.key.localeCompare(b.key))
+    .slice(0, limit);
+}
+
+/** Aggregate MCP tool-call audit rows into dashboard totals. */
+export function summarizeUsage(events: AuditedEvent[], top = 10): UsageSummary {
+  const usage = events.filter(isUsageEvent);
+  let ok = 0;
+  let error = 0;
+  let originalTokens = 0;
+  let optimizedTokens = 0;
+  let savedTokens = 0;
+  const byServer = new Map<string, UsageBucket>();
+  const byTool = new Map<string, UsageBucket>();
+  const byUser = new Map<string, UsageBucket>();
+  let from: string | null = null;
+  let to: string | null = null;
+
+  for (const e of usage) {
+    if (e.ok === false) error += 1;
+    else ok += 1;
+    originalTokens += e.originalTokens ?? 0;
+    optimizedTokens += e.optimizedTokens ?? 0;
+    savedTokens += e.savedTokens ?? 0;
+    if (e.server) bump(byServer, e.server, e);
+    const toolKey = e.server && e.target ? `${e.server}/${e.target}` : e.tool || "(unknown)";
+    bump(byTool, toolKey, e);
+    bump(byUser, e.user, e);
+    // events are newest-first from tail()
+    if (!to) to = e.ts;
+    from = e.ts;
+  }
+
+  return {
+    calls: usage.length,
+    ok,
+    error,
+    originalTokens,
+    optimizedTokens,
+    savedTokens,
+    reductionPercent: originalTokens ? Math.round((savedTokens / originalTokens) * 100) : 0,
+    from,
+    to,
+    byServer: ranked(byServer, top),
+    byTool: ranked(byTool, top),
+    byUser: ranked(byUser, top),
+  };
 }
 
 /** Short content hash for before/after snapshots — never pass raw secrets into this. */

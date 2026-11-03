@@ -461,6 +461,31 @@ main { max-width: 1040px; margin: 0 auto; padding: 40px 28px 88px; }
 }
 .card h2 { font: 600 1.2rem/1.2 var(--display); margin: 0 0 14px; letter-spacing: -0.02em; }
 
+.stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 10px;
+  margin: 4px 0 18px;
+}
+.stat {
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--bg);
+}
+.stat .n {
+  font: 600 1.55rem/1.1 var(--display);
+  letter-spacing: -0.03em;
+  font-variant-numeric: tabular-nums;
+}
+.stat .l {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.stat .n.good { color: var(--good); }
+.stat .n.warn { color: var(--warn); }
+
 .table-wrap { overflow-x: auto; margin: 0 -8px; }
 table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
 th, td { text-align: left; padding: 10px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
@@ -624,8 +649,10 @@ export const UI_JS = String.raw`(function () {
   }
   var token = loadStoredToken();
   var me = null;
-  var tab = null;
+  /** Active tab id — seeded from the URL hash so refresh stays on the same page. */
+  var tab = (location.hash || "").replace(/^#\/?/, "").split("/")[0] || null;
   var focusServer = null;
+  var suppressHash = false;
   var app = document.getElementById("app");
   var tabsEl = document.getElementById("tabs");
   var whoEl = document.getElementById("who");
@@ -669,6 +696,13 @@ export const UI_JS = String.raw`(function () {
     });
   }
   function notice(kind, text) { return h("div", { class: "notice " + kind }, text); }
+  function fmtCount(n) {
+    n = Number(n) || 0;
+    if (n >= 1e6) return (n / 1e6).toFixed(n >= 1e7 ? 0 : 1).replace(/\.0$/, "") + "M";
+    if (n >= 1e4) return Math.round(n / 1e3) + "k";
+    if (n >= 1e3) return (n / 1e3).toFixed(1).replace(/\.0$/, "") + "k";
+    return String(n);
+  }
   function ago(ts) {
     var s = Math.round((Date.now() - (typeof ts === "number" ? ts : Date.parse(ts))) / 1000);
     if (s < 60) return s + "s ago"; if (s < 3600) return Math.round(s / 60) + "m ago"; if (s < 86400) return Math.round(s / 3600) + "h ago";
@@ -687,13 +721,36 @@ export const UI_JS = String.raw`(function () {
     var hay = parts.filter(Boolean).join(" ").toLowerCase();
     return q.toLowerCase().split(/\s+/).filter(Boolean).every(function (w) { return hay.indexOf(w) !== -1; });
   }
+  function tabHash(id) { return "#" + id; }
+
+  function writeHash(id, replace) {
+    var want = tabHash(id);
+    if (location.hash === want) return;
+    suppressHash = true;
+    if (replace) history.replaceState(null, "", location.pathname + location.search + want);
+    else location.hash = want;
+    suppressHash = false;
+  }
+
   function go(next, server) {
     tab = next;
     focusServer = server || null;
     if (next !== "manage-mcps") focusConfig = null;
     if (next !== "manage-skills") focusSkill = null;
+    writeHash(next, false);
     render();
   }
+
+  window.addEventListener("hashchange", function () {
+    if (suppressHash) return;
+    var id = (location.hash || "").replace(/^#\/?/, "").split("/")[0] || null;
+    if (id === tab) return;
+    tab = id;
+    focusServer = null;
+    focusConfig = null;
+    focusSkill = null;
+    render();
+  });
 
   function mapToText(m) { return Object.keys(m || {}).map(function (k) { return k + "=" + m[k]; }).join("\n"); }
   function textToMap(t) {
@@ -732,6 +789,7 @@ export const UI_JS = String.raw`(function () {
   // ── tabs ─────────────────────────────────────────────────────────────────
   // [id, label, viewFn]
   var USER_TABS = [
+    ["dashboard", "Dashboard", dashboardView],
     ["mcps", "Servers", function (r) { return mcpsView(r, false); }],
     ["skills", "Skills", function (r) { return skillsView(r, false); }],
     ["connections", "Credentials", connectionsView],
@@ -759,6 +817,8 @@ export const UI_JS = String.raw`(function () {
   }
 
   var closeAdminMenu = null;
+  var stopActivityRefresh = null;
+  var stopDashboardRefresh = null;
   function bindAdminMenu(wrap, panel, trigger) {
     if (closeAdminMenu) { document.removeEventListener("click", closeAdminMenu); closeAdminMenu = null; }
     trigger.addEventListener("click", function (e) {
@@ -776,6 +836,8 @@ export const UI_JS = String.raw`(function () {
   }
 
   function render() {
+    if (stopActivityRefresh) { stopActivityRefresh(); stopActivityRefresh = null; }
+    if (stopDashboardRefresh) { stopDashboardRefresh(); stopDashboardRefresh = null; }
     clear(app); clear(tabsEl); clear(whoEl);
     if (!token || !me) {
       tabsEl.hidden = true;
@@ -784,7 +846,12 @@ export const UI_JS = String.raw`(function () {
       return;
     }
     var visible = allTabs();
-    if (!tab || !visible.some(function (t) { return t[0] === tab; })) tab = visible[0][0];
+    if (!tab || !visible.some(function (t) { return t[0] === tab; })) {
+      tab = visible[0][0];
+      writeHash(tab, true);
+    } else if (location.hash !== tabHash(tab)) {
+      writeHash(tab, true);
+    }
     tabsEl.hidden = false;
     USER_TABS.forEach(function (t) {
       tabsEl.appendChild(h("button", { class: "tab" + (t[0] === tab ? " on" : ""), type: "button", onclick: function () { go(t[0]); } }, t[1]));
@@ -1348,45 +1415,228 @@ export const UI_JS = String.raw`(function () {
     }).catch(function (e) { show(root, notice("error", e.message)); });
   }
 
+  // ── dashboard ────────────────────────────────────────────────────────────
+  function dashboardView(root) {
+    var all = me.admin ? "&all=1" : "";
+    var timer = null;
+    var inflight = false;
+    var built = false;
+    var auto = h("input", { type: "checkbox", checked: true });
+    var status = h("span", { class: "muted" });
+    var statsEl = h("div", { class: "stats" });
+    var serversOut = h("div");
+    var toolsOut = h("div");
+    var usersOut = h("div");
+    var usersCard = null;
+    var rangeEl = h("p", { class: "muted" });
+
+    function stop() {
+      if (timer) { clearInterval(timer); timer = null; }
+    }
+    function schedule() {
+      stop();
+      if (auto.checked) timer = setInterval(tick, 5000);
+    }
+    function tick() {
+      if (!root.isConnected) { stop(); return; }
+      if (document.hidden || !auto.checked) return;
+      load();
+    }
+
+    function stat(label, value, cls) {
+      return h("div", { class: "stat" },
+        h("div", { class: "n" + (cls ? " " + cls : "") }, value),
+        h("div", { class: "l" }, label));
+    }
+
+    function bucketRows(list) {
+      return (list || []).map(function (b) {
+        return [
+          h("code", null, b.key),
+          String(b.calls),
+          fmtCount(b.optimizedTokens),
+          fmtCount(b.savedTokens),
+          b.originalTokens ? Math.round((b.savedTokens / b.originalTokens) * 100) + "%" : "—"
+        ];
+      });
+    }
+
+    function paint(d) {
+      var u = d.usage || {};
+      clear(statsEl);
+      statsEl.appendChild(stat("Tool calls", fmtCount(u.calls)));
+      statsEl.appendChild(stat("Errors", fmtCount(u.error), u.error ? "warn" : null));
+      statsEl.appendChild(stat("Tokens used", fmtCount(u.optimizedTokens)));
+      statsEl.appendChild(stat("Tokens saved", fmtCount(u.savedTokens), u.savedTokens ? "good" : null));
+      statsEl.appendChild(stat("Reduction", (u.reductionPercent || 0) + "%", u.reductionPercent ? "good" : null));
+      statsEl.appendChild(stat("Live sessions", fmtCount(d.liveSessions)));
+
+      var from = u.from ? ago(u.from) : null;
+      var to = u.to ? ago(u.to) : null;
+      rangeEl.textContent = u.calls
+        ? ("Based on the last " + u.calls + " MCP calls" + (from && to ? " (" + from + " → " + to + ")" : "") +
+          (d.scope === "all" ? " · everyone" : " · you") +
+          ". Token figures are estimates (≈4 chars/token); savings appear when response optimization shrinks a payload.")
+        : "No MCP tool calls in the recent audit window yet.";
+
+      clear(serversOut);
+      serversOut.appendChild(table(["Server", "Calls", "Used", "Saved", "↓"], bucketRows(u.byServer), "No server traffic yet."));
+      clear(toolsOut);
+      toolsOut.appendChild(table(["Tool", "Calls", "Used", "Saved", "↓"], bucketRows(u.byTool), "No tool traffic yet."));
+      if (usersCard) {
+        clear(usersOut);
+        usersOut.appendChild(table(["User", "Calls", "Used", "Saved", "↓"], bucketRows(u.byUser), "No user traffic yet."));
+      }
+      status.textContent = "Updated " + new Date().toLocaleTimeString();
+    }
+
+    function ensureUi() {
+      if (built) return;
+      built = true;
+      clear(root);
+      root.appendChild(marketHero("Dashboard", "Usage and estimated token spend across recent MCP traffic."));
+      root.appendChild(h("div", { class: "card" },
+        h("h2", null, me.admin ? "Overview (everyone)" : "Your overview"),
+        h("p", { class: "row" },
+          h("label", { class: "inline" }, auto, " auto-refresh"),
+          h("button", { class: "btn", type: "button", onclick: function () { load(); } }, "Refresh"),
+          status),
+        statsEl,
+        rangeEl));
+      root.appendChild(h("div", { class: "card" }, h("h2", null, "Top servers"), serversOut));
+      root.appendChild(h("div", { class: "card" }, h("h2", null, "Top tools"), toolsOut));
+      if (me.admin) {
+        usersCard = h("div", { class: "card" }, h("h2", null, "Top users"), usersOut);
+        root.appendChild(usersCard);
+      }
+      auto.addEventListener("change", schedule);
+    }
+
+    function load() {
+      if (inflight || !root.isConnected) return;
+      inflight = true;
+      api("GET", "dashboard?limit=500" + all).then(function (d) {
+        inflight = false;
+        if (!root.isConnected) return;
+        ensureUi();
+        paint(d);
+      }).catch(function (e) {
+        inflight = false;
+        if (!root.isConnected) return;
+        if (!built) show(root, notice("error", e.message));
+        else status.textContent = "Refresh failed: " + e.message;
+      });
+    }
+
+    if (stopDashboardRefresh) stopDashboardRefresh();
+    stopDashboardRefresh = stop;
+    load();
+    schedule();
+  }
+
   // ── activity ─────────────────────────────────────────────────────────────
   function activityView(root) {
     var all = me.admin ? "&all=1" : "";
-    api("GET", "audit?limit=200" + all).then(function (d) {
-      clear(root);
+    var events = [];
+    var timer = null;
+    var inflight = false;
+    var built = false;
+    var serverSel = h("select", null, h("option", { value: "" }, "All servers"));
+    var errOnly = h("input", { type: "checkbox" });
+    var auto = h("input", { type: "checkbox", checked: true });
+    var status = h("span", { class: "muted" });
+    var out = h("div");
+
+    function stop() {
+      if (timer) { clearInterval(timer); timer = null; }
+    }
+
+    function schedule() {
+      stop();
+      if (auto.checked) timer = setInterval(tick, 5000);
+    }
+
+    function tick() {
+      if (!root.isConnected) { stop(); return; }
+      if (document.hidden || !auto.checked) return;
+      load();
+    }
+
+    function syncServers() {
+      var prev = serverSel.value;
       var servers = [];
-      d.events.forEach(function (e) { if (e.server && servers.indexOf(e.server) === -1) servers.push(e.server); });
+      events.forEach(function (e) { if (e.server && servers.indexOf(e.server) === -1) servers.push(e.server); });
       servers.sort();
-      var serverSel = h("select", null, h("option", { value: "" }, "All servers"), servers.map(function (s) { return h("option", { value: s }, s); }));
-      var errOnly = h("input", { type: "checkbox" });
-      var out = h("div");
-      function draw() {
-        var rows = d.events.filter(function (e) {
-          if (serverSel.value && e.server !== serverSel.value) return false;
-          if (errOnly.checked && e.ok !== false) return false;
-          return true;
-        }).map(function (e) {
-          var result = e.ok !== false
-            ? h("span", { class: "good" }, "ok")
-            : h("span", { class: "bad wrap", title: e.error || "" }, "error" + (e.error ? ": " + (e.error.length > 60 ? e.error.slice(0, 60) + "\u2026" : e.error) : ""));
-          return [
-            h("span", { title: new Date(e.ts).toLocaleString() }, ago(e.ts)),
-            e.user,
-            h("code", null, e.tool || e.action || ""),
-            (e.server && e.target ? e.server + " \u00b7 " + e.target : e.server || e.target || ""),
-            e.session ? h("code", { title: e.session }, String(e.session).slice(0, 8)) : "",
-            result,
-            String(e.ms || 0)
-          ];
-        });
-        clear(out);
-        out.appendChild(table(["When", "User", "Action", "Target", "Session", "Result", "ms"], rows, "Nothing yet."));
-      }
+      clear(serverSel);
+      serverSel.appendChild(h("option", { value: "" }, "All servers"));
+      servers.forEach(function (s) { serverSel.appendChild(h("option", { value: s }, s)); });
+      if (prev && servers.indexOf(prev) !== -1) serverSel.value = prev;
+    }
+
+    function draw() {
+      var rows = events.filter(function (e) {
+        if (serverSel.value && e.server !== serverSel.value) return false;
+        if (errOnly.checked && e.ok !== false) return false;
+        return true;
+      }).map(function (e) {
+        var result = e.ok !== false
+          ? h("span", { class: "good" }, "ok")
+          : h("span", { class: "bad wrap", title: e.error || "" }, "error" + (e.error ? ": " + (e.error.length > 60 ? e.error.slice(0, 60) + "\u2026" : e.error) : ""));
+        return [
+          h("span", { title: new Date(e.ts).toLocaleString() }, ago(e.ts)),
+          e.user,
+          h("code", null, e.tool || e.action || ""),
+          (e.server && e.target ? e.server + " \u00b7 " + e.target : e.server || e.target || ""),
+          e.session ? h("code", { title: e.session }, String(e.session).slice(0, 8)) : "",
+          result,
+          String(e.ms || 0)
+        ];
+      });
+      clear(out);
+      out.appendChild(table(["When", "User", "Action", "Target", "Session", "Result", "ms"], rows, "Nothing yet."));
+    }
+
+    function ensureUi() {
+      if (built) return;
+      built = true;
+      clear(root);
+      root.appendChild(h("div", { class: "card" },
+        h("h2", null, me.admin ? "Recent activity (everyone)" : "Your recent activity"),
+        h("p", { class: "row" },
+          serverSel,
+          h("label", { class: "inline" }, errOnly, " errors only"),
+          h("label", { class: "inline" }, auto, " auto-refresh"),
+          h("button", { class: "btn", type: "button", onclick: function () { load(); } }, "Refresh"),
+          status),
+        out));
       serverSel.addEventListener("change", draw);
       errOnly.addEventListener("change", draw);
-      root.appendChild(h("div", { class: "card" }, h("h2", null, me.admin ? "Recent activity (everyone)" : "Your recent activity"),
-        h("p", { class: "row" }, serverSel, h("label", { class: "inline" }, errOnly, " errors only")), out));
-      draw();
-    }).catch(function (e) { show(root, notice("error", e.message)); });
+      auto.addEventListener("change", schedule);
+    }
+
+    function load() {
+      if (inflight || !root.isConnected) return;
+      inflight = true;
+      api("GET", "audit?limit=200" + all).then(function (d) {
+        inflight = false;
+        if (!root.isConnected) return;
+        events = d.events || [];
+        ensureUi();
+        syncServers();
+        draw();
+        status.textContent = "Updated " + new Date().toLocaleTimeString();
+      }).catch(function (e) {
+        inflight = false;
+        if (!root.isConnected) return;
+        if (!built) show(root, notice("error", e.message));
+        else status.textContent = "Refresh failed: " + e.message;
+      });
+    }
+
+    if (stopActivityRefresh) stopActivityRefresh();
+    stopActivityRefresh = stop;
+    load();
+    schedule();
   }
 
   // ── sessions (admin) ─────────────────────────────────────────────────────
