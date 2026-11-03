@@ -1,4 +1,5 @@
 FROM node:24-slim AS build
+# Pin to the patched 24.x line; rebuild regularly to pick up Node security releases.
 WORKDIR /app
 COPY package*.json tsconfig.json ./
 RUN npm ci
@@ -15,4 +16,6 @@ COPY config ./config
 USER node
 EXPOSE 8787
 ENTRYPOINT ["node", "dist/index.js"]
-CMD ["serve", "--host", "0.0.0.0", "--allow-remote", "--allowed-host", "127.0.0.1:8787,localhost:8787"]
+# Loopback inside the container by default (safe for a bare `docker run`; unreachable from outside).
+# docker-compose.yml passes --host 0.0.0.0 --allow-remote together with a loopback-only port publish.
+CMD ["serve"]

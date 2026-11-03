@@ -128,7 +128,10 @@ lazygate serve
 - **An audit trail.** Every tool call is logged, with credentials redacted.
 
 The gateway speaks plain HTTP, so put a TLS reverse proxy in front of it for anything beyond
-localhost. Setup guide: [docs/gateway.md](docs/gateway.md).
+localhost. Stdio servers are refused in gateway mode unless `LAZYGATE_GATEWAY_ALLOW_STDIO=1` (they
+share the gateway's OS user; this is not isolation). Skill `prompt.context` fetches reach private
+networks only with `"allowPrivate": true`. `lazygate benchmark --tasks` loads only its fixture
+server unless you pass `--include-catalog`. Setup guide: [docs/gateway.md](docs/gateway.md).
 
 ## Docs
 

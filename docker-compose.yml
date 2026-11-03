@@ -7,6 +7,24 @@ services:
   lazygate:
     build: .
     restart: unless-stopped
+    # The container must listen on 0.0.0.0 for the published port to work; --allow-remote
+    # acknowledges that. Exposure stays loopback-only through the port mapping below.
+    # For remote users put a TLS proxy in front and add:
+    #   --public-url https://lazygate.example.com --allowed-host lazygate.example.com
+    command:
+      - serve
+      - --host
+      - 0.0.0.0
+      - --allow-remote
+      - --allowed-host
+      - 127.0.0.1:8787,localhost:8787
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp
     ports:
       # Published on loopback only: the gateway speaks plain HTTP.
       - "127.0.0.1:8787:8787"

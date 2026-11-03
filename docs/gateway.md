@@ -210,6 +210,55 @@ lazygate serve --allow-remote --allowed-host gw.example.com \
 
 Do not expose the gateway port directly on the public internet without TLS and Host checks.
 
+### Docker
+
+The image's default command is `serve` (loopback inside the container, so a bare `docker run -p`
+is unreachable rather than exposed). `docker-compose.yml` passes `--host 0.0.0.0 --allow-remote`
+and publishes the port on `127.0.0.1:8787` only; it also runs with `read_only: true`,
+`cap_drop: [ALL]`, `no-new-privileges` and a `tmpfs` for `/tmp`. To serve remote users, keep the
+loopback publish, run a TLS proxy on the host (or in the same compose project), and extend the
+`command` in a compose override:
+
+```yaml
+services:
+  lazygate:
+    command: ["serve", "--host", "0.0.0.0", "--allow-remote",
+              "--allowed-host", "127.0.0.1:8787,gw.example.com",
+              "--public-url", "https://gw.example.com"]
+```
+
+Never publish `0.0.0.0:8787` directly. Set `LAZYGATE_VAULT_KEY` from a secret manager (and keep
+`.env` out of git).
+
+## Security hardening
+
+- **Stdio servers are off in gateway mode.** Stdio children run as the gateway's OS user and share
+  its filesystem, so a gateway refuses them unless `LAZYGATE_GATEWAY_ALLOW_STDIO=1` is set. For real
+  isolation set `LAZYGATE_STDIO_WRAPPER` to a JSON array prefix (for example
+  `["docker","run","--rm","-i","--network=none","node:24-slim"]`, or a `bwrap`/`nsjail` command); every
+  stdio child is then launched as `<prefix> <command> <args…>`, and setting it also enables stdio. Relative
+  paths in stdio `args` resolve against the scratch directory, so use absolute paths. When it is
+  set, each session's children get a private scratch working directory (`mkdtemp`, never the config
+  dir, deleted when the session ends) and the gateway tightens permissions on `~/.config/lazygate`
+  (directories `0700`; `token.key`, `secrets.json`, `vault.json`, `tokens.json`, `tokens/`,
+  `clients/` `0600`) at startup. **This is not isolation.** A child can still read any file the
+  gateway user can, including other tenants' OAuth tokens and `secrets.json`, by absolute path.
+  Multi-tenant deployments should keep stdio off (use HTTP servers) or run each tenant's stdio
+  servers in separate containers/VMs.
+- **Failed logins are audited and rate limited.** 401s on `/mcp` and `/ui/api`, admin-only denials
+  (403), session-id/user mismatches and successful session creation are written to `audit.log`
+  (`auth.failed`, `auth.denied`, `session.mismatch`, `session.create`, with the peer IP; never token
+  values). More than 20 failed attempts per minute from one address get `429` with `Retry-After`.
+  Behind a proxy the peer is the proxy, so also rate limit there. `GET /ui/api/audit` reads only the
+  last 1 MB of the log.
+- **Skill provenance.** `load_skill` marks plugin / migrated skills (`Source: plugin:<name>`) and warns
+  when a skill's body changed since it was first seen (hashes in `~/.config/lazygate/skills-hashes.json`).
+  The catalog shows `changed`; an admin accepts a reviewed change with
+  `POST /ui/api/skills/<name>/ack-hash`.
+- **Startup warnings** flag shared-scope servers (stdio included) visible to more than one group, and
+  catalog entries without `groups` when more than one user has a token.
+- Skill `prompt.context` entries can only reach private networks with `"allowPrivate": true`.
+
 ## OAuth Connect
 
 For HTTP servers with `oauth` (and usually `auth.scope: "user"`):
@@ -261,4 +310,4 @@ Set `LAZYGATE_DEBUG_RPC=1` on `lazygate serve` to log the JSON-RPC methods each 
   gateway's own `/oauth/callback` (set `--public-url` when behind a proxy). The vault is a local
   encrypted file, not a database.
 - Upstream processes are per session, not pooled across a user's sessions.
-- Per-user skills, containers for stdio servers, rate limits and metrics.
+- Per-user skills, containers for stdio servers, and metrics.

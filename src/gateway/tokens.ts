@@ -64,6 +64,10 @@ export class TokenStore {
 
   /** Returns the token — this is the only time it is available. */
   create(opts: { user: string; groups?: string[]; expiresInMs?: number; label?: string; admin?: boolean }): { id: string; token: string } {
+    // User names become file paths (OAuth token dirs) and profile keys, so keep them to a safe charset.
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(opts.user) || opts.user === "." || opts.user.includes("..")) {
+      throw new Error(`Invalid user "${opts.user}": use letters, digits, '.', '_' and '-' (no leading dot, no "..")`);
+    }
     const data = this.load();
     let id = randomBytes(4).toString("hex");
     for (let i = 0; i < 8 && data.tokens[id]; i++) id = randomBytes(4).toString("hex");

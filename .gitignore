@@ -2,3 +2,10 @@ dist/
 node_modules/
 *.tgz
 
+
+# Local secrets and env files (never commit)
+.env
+.env.*
+!.env.example
+*.bak-*
+security-report-*.md

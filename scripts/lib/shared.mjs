@@ -82,10 +82,12 @@ export function backupFile(path) {
 }
 
 /** Write via temp file + rename so readers never observe a half-written file. */
-export function writeFileAtomic(path, data) {
+export function writeFileAtomic(path, data, { defaultMode = 0o600 } = {}) {
   const target = existsSync(path) ? realpathSync(path) : path; // keep symlinks intact
   mkdirSync(dirname(target), { recursive: true });
-  let mode;
+  // Existing files keep their mode; new files get `defaultMode` (0600) instead of the umask default,
+  // since migrated shell rc files can hold API keys.
+  let mode = defaultMode;
   try { mode = statSync(target).mode & 0o777; } catch { /* new file */ }
   const tmp = `${target}.${process.pid}.tmp`;
   writeFileSync(tmp, data, mode !== undefined ? { mode } : undefined);

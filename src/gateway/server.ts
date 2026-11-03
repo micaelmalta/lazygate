@@ -24,6 +24,7 @@ import { createBroker, type BrokerAccess, type ToolResult } from "../broker.js";
 import { META_TOOL_NAMES } from "../meta-tools.js";
 import { formatSkillUri, parseSkillUri } from "../skill-router.js";
 import { composePrompt, promptArgumentsForList } from "../prompt-compose.js";
+import { skillProvenance } from "../broker.js";
 import type { Registry } from "../registry.js";
 import { APP_NAME } from "../paths.js";
 import { VERSION, LOG_PREFIX } from "../version.js";
@@ -34,6 +35,7 @@ import { Redactor } from "./redact.js";
 import { UserVault, mergeCreds } from "./vault.js";
 import { UserProfileStore } from "./profile.js";
 import { readBody, sendJson } from "./http-util.js";
+import { AuthFailureLimiter, clientKey } from "./rate-limit.js";
 import { handleUi, isUiPath } from "./ui-api.js";
 import {
   OAUTH_BIND_COOKIE,
@@ -46,7 +48,9 @@ import {
   startRemoteAuthorization,
   type OAuthConfig,
 } from "../oauth.js";
-import { effectiveAuthScope, sharedScopeMultiGroup, type ServerConfig } from "../router.js";
+import { effectiveAuthScope, type ServerConfig } from "../router.js";
+import type { SkillConfig } from "../skill-router.js";
+import { gatewayStartupWarnings } from "./warnings.js";
 import { isSharedIndexable } from "./tool-index-warm.js";
 
 export interface GatewayOptions {
@@ -159,6 +163,29 @@ function oauthBindSetCookie(token: string): string {
   return `${OAUTH_BIND_COOKIE}=${encodeURIComponent(token)}; Path=/oauth; HttpOnly; SameSite=Lax; Max-Age=600`;
 }
 
+/** Security headers for the OAuth pages (they are HTML, so they get the same framing/MIME rules). */
+const OAUTH_PAGE_HEADERS = {
+  "Cache-Control": "no-store",
+  "X-Content-Type-Options": "nosniff",
+  "Referrer-Policy": "no-referrer",
+  "X-Frame-Options": "DENY",
+  "Content-Security-Policy":
+    "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+};
+
+/** LAZYGATE_STDIO_WRAPPER: JSON array of strings, e.g. ["docker","run","--rm","-i","--network=none","img"]. */
+function stdioWrapper(env: NodeJS.ProcessEnv = process.env): string[] {
+  const raw = env.LAZYGATE_STDIO_WRAPPER?.trim();
+  if (!raw) return [];
+  try {
+    const v = JSON.parse(raw) as unknown;
+    if (Array.isArray(v) && v.length > 0 && v.every((x) => typeof x === "string" && x.length > 0)) return v as string[];
+  } catch {
+    /* fall through */
+  }
+  throw new Error("LAZYGATE_STDIO_WRAPPER must be a non-empty JSON array of strings");
+}
+
 function oauthBindClearCookie(): string {
   return `${OAUTH_BIND_COOKIE}=; Path=/oauth; HttpOnly; SameSite=Lax; Max-Age=0`;
 }
@@ -171,6 +198,7 @@ export async function startGateway(opts: GatewayOptions): Promise<Gateway> {
   const maxPerUser = opts.maxSessionsPerUser ?? 10;
   const resolver = new CredentialResolver(secrets);
   const sessions = new Map<string, Session>();
+  const authLimiter = new AuthFailureLimiter(20, 60_000);
   const startedAt = Date.now();
   /** Filled after listen; used by OAuth redirect and connect links. */
   let publicUrl = opts.publicUrl?.replace(/\/$/, "") ?? "";
@@ -240,6 +268,14 @@ export async function startGateway(opts: GatewayOptions): Promise<Gateway> {
       oauthInteractive: false,
       // Gateway: never inherit the full process env by default; LAZYGATE_* is always stripped.
       defaultInheritEnv: false,
+      // Gateway stdio children share the gateway's OS user and filesystem (see R2). Off unless the
+      // operator sets LAZYGATE_GATEWAY_ALLOW_STDIO=1.
+      // A configured LAZYGATE_STDIO_WRAPPER (container/bwrap/nsjail prefix) provides the isolation
+      // itself, so it also enables stdio.
+      allowStdio: process.env.LAZYGATE_GATEWAY_ALLOW_STDIO === "1" || stdioWrapper().length > 0,
+      stdioWrapper: stdioWrapper(),
+      // Defence in depth: children get a per-session scratch cwd (removed on dispose), never the config dir.
+      scratchCwd: true,
       stdioCommandAllowlist: opts.stdioCommandAllowlist,
       idleTtlMs: opts.serverIdleTtlMs,
       maxActiveServers: opts.maxActiveServers,
@@ -333,6 +369,7 @@ export async function startGateway(opts: GatewayOptions): Promise<Gateway> {
           ? `Disconnected "${name}" (${parts.join(", ")}).`
           : `Nothing stored for "${name}".`;
       },
+      onSecrets: (values) => redactor.add(values),
       // Each tool call a script makes is audited like a direct call, tagged with its origin.
       onNestedCall: (e) =>
         audit.record({
@@ -351,9 +388,9 @@ export async function startGateway(opts: GatewayOptions): Promise<Gateway> {
       router: registry.router,
       manager: session.manager,
       skillRouter: registry.skillRouter,
+      skillHashes: registry.skillHashes,
       access,
       secrets,
-      allowPrivatePromptUrls: true,
     });
 
     server.setRequestHandler(ListToolsRequestSchema, async () => broker.listTools());
@@ -489,12 +526,12 @@ export async function startGateway(opts: GatewayOptions): Promise<Gateway> {
       try {
         const cfg = registry.skillRouter.getConfig(name)!;
         const body = registry.skillRouter.load(name, { maxBytes: 0 });
+        const skillCheck = registry.skillHashes.observe(name, body);
         const composed = await composePrompt({
           body,
           config: cfg,
           args: request.params.arguments,
           secrets,
-          allowPrivateUrls: true,
         });
         redactor.add(composed.secretValues);
         let files: string[] = [];
@@ -516,7 +553,9 @@ export async function startGateway(opts: GatewayOptions): Promise<Gateway> {
               role: "user" as const,
               content: {
                 type: "text" as const,
-                text: `# Skill: ${name}\n\n${composed.text}${fileNote}`,
+                text: redactor.text(
+                  `${skillProvenance(name, cfg, skillCheck.changed)}# Skill: ${name}\n\n${composed.text}${fileNote}`
+                ),
               },
             },
           ],
@@ -598,7 +637,7 @@ export async function startGateway(opts: GatewayOptions): Promise<Gateway> {
       const pending = peekPendingAuth(state);
       if (!pending) {
         const html = oauthCallbackPage(false, "OAuth state is invalid or expired — start Connect again from the UI", `${publicUrl}/ui`);
-        res.writeHead(400, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+        res.writeHead(400, { "Content-Type": "text/html; charset=utf-8", ...OAUTH_PAGE_HEADERS });
         res.end(req.method === "HEAD" ? undefined : html);
         return;
       }
@@ -606,7 +645,7 @@ export async function startGateway(opts: GatewayOptions): Promise<Gateway> {
         res.writeHead(302, {
           Location: pending.authorizationUrl,
           "Set-Cookie": oauthBindSetCookie(pending.bindToken),
-          "Cache-Control": "no-store",
+          ...OAUTH_PAGE_HEADERS,
         });
         res.end();
         return;
@@ -618,7 +657,7 @@ export async function startGateway(opts: GatewayOptions): Promise<Gateway> {
         confirmUrl,
         uiUrl: `${publicUrl}/ui`,
       });
-      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", ...OAUTH_PAGE_HEADERS });
       res.end(req.method === "HEAD" ? undefined : html);
       return;
     }
@@ -650,7 +689,7 @@ export async function startGateway(opts: GatewayOptions): Promise<Gateway> {
       }
       res.writeHead(ok ? 200 : 400, {
         "Content-Type": "text/html; charset=utf-8",
-        "Cache-Control": "no-store",
+        ...OAUTH_PAGE_HEADERS,
         "Set-Cookie": oauthBindClearCookie(),
       });
       res.end(req.method === "HEAD" ? undefined : html);
@@ -689,6 +728,7 @@ export async function startGateway(opts: GatewayOptions): Promise<Gateway> {
             })),
           notifyPromptCatalogChanged,
           stdioCommandAllowlist: opts.stdioCommandAllowlist,
+          authLimiter,
         },
         req,
         res,
@@ -697,8 +737,16 @@ export async function startGateway(opts: GatewayOptions): Promise<Gateway> {
       );
     }
 
+    const ip = clientKey(req);
+    const wait = authLimiter.retryAfterSec(ip);
+    if (wait > 0) {
+      audit.recordSecurity({ action: "auth.rate_limited", surface: "mcp", ip, ok: false });
+      return sendJson(res, 429, { error: "too many failed attempts" }, { "Retry-After": String(wait) });
+    }
     const user = tokens.verify(bearerToken(req.headers.authorization));
     if (!user) {
+      authLimiter.fail(ip);
+      audit.recordSecurity({ action: "auth.failed", surface: "mcp", ip, ok: false });
       return sendJson(res, 401, { error: "unauthorized" }, { "WWW-Authenticate": 'Bearer realm="lazygate"' });
     }
 
@@ -727,6 +775,15 @@ export async function startGateway(opts: GatewayOptions): Promise<Gateway> {
       const session = sessions.get(sessionId);
       // A session id is not a credential: it only works for the user who created it.
       if (!session || session.user.id !== user.id) {
+        audit.recordSecurity({
+          user: user.id,
+          action: session ? "session.mismatch" : "session.unknown",
+          surface: "mcp",
+          ip,
+          ok: false,
+          // The id is not a credential, but keep only a prefix in the log anyway.
+          session: sessionId.slice(0, 8),
+        });
         const e = rpcError(404, -32001, "Session not found");
         return sendJson(res, e.status, e.body);
       }
@@ -745,6 +802,14 @@ export async function startGateway(opts: GatewayOptions): Promise<Gateway> {
       const session = createSession(user, creds);
       session.redactor.add(Array.from(creds.values()).flatMap((f) => Object.values(f)));
       await session.server.connect(session.transport);
+      audit.recordSecurity({
+        user: user.id,
+        action: "session.create",
+        surface: "mcp",
+        ip,
+        ok: true,
+        target: user.tokenId,
+      });
       return session.transport.handleRequest(req, res, body);
     }
 
@@ -782,13 +847,19 @@ export async function startGateway(opts: GatewayOptions): Promise<Gateway> {
     const loopback = host === "127.0.0.1" || host === "localhost" || host === "::1";
     publicUrl = `http://${loopback ? "127.0.0.1" : shownHost}:${port}`;
   }
-  for (const name of registry.router.listAll()) {
-    const cfg = registry.router.getConfig(name);
-    if (cfg && sharedScopeMultiGroup(cfg)) {
-      console.error(
-        `${LOG_PREFIX} warning: server "${name}" uses shared credentials (auth.scope=server) and is visible to more than one group — every caller acts as the same identity`
-      );
+  {
+    const servers: Record<string, ServerConfig> = {};
+    for (const name of registry.router.listAll()) {
+      const cfg = registry.router.getConfig(name);
+      if (cfg) servers[name] = cfg;
     }
+    const skills: Record<string, SkillConfig> = {};
+    for (const name of registry.skillRouter.listAll()) {
+      const cfg = registry.skillRouter.getConfig(name);
+      if (cfg) skills[name] = cfg;
+    }
+    const userCount = new Set(tokens.list().map((t) => t.user)).size;
+    for (const w of gatewayStartupWarnings({ servers, skills, userCount })) console.error(`${LOG_PREFIX} ${w}`);
   }
   return {
     url: `http://${shownHost}:${port}/mcp`,
