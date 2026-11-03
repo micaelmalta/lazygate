@@ -333,6 +333,18 @@ export async function startGateway(opts: GatewayOptions): Promise<Gateway> {
           ? `Disconnected "${name}" (${parts.join(", ")}).`
           : `Nothing stored for "${name}".`;
       },
+      // Each tool call a script makes is audited like a direct call, tagged with its origin.
+      onNestedCall: (e) =>
+        audit.record({
+          user: user.id,
+          session: session.id,
+          tool: e.tool,
+          server: e.server,
+          ok: e.ok,
+          ms: e.ms,
+          error: e.error ? e.error.slice(0, 200) : undefined,
+          via: "run_chain",
+        }),
     };
 
     const broker = createBroker({

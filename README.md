@@ -1,44 +1,76 @@
-# lazygate
+# LAZYGATE
 
-**Your agent doesn't need every tool schema and every skill playbook to say hello.**
+**Give your coding agent every tool and skill your team has, without paying for them on every turn.**
 
-lazygate loads MCP servers **and** agent skills *only when the task needs them*.  
+lazygate sits between your agent and your MCP servers and skills. The agent starts with a short
+menu, and lazygate loads Jira, GitHub, Datadog, or your release-notes playbook only when the task
+needs it.
 
-Works with Claude Code, Cursor, and OpenCode.
+Works with Claude Code, Cursor, and OpenCode, on your laptop or as a shared team gateway.
 
-[Quick start](#quick-start) · [How it works](#how-it-works) · [Team gateway](#team-gateway) · [Docs](#docs)
+[Why lazygate](#why-lazygate) · [What you get](#what-you-get) · [Install](#install) · [For teams](#for-teams) · [Docs](#docs)
 
 ---
 
-## The problem
+## Why lazygate
 
-Two things quietly fill your agent's context before you've typed anything:
+Every MCP server you connect sends its full tool list to the model on every turn, whether you use
+it or not. Every skill and plugin you install adds more text to each session. Connect a handful of
+servers and collect a few dozen skills, and your agent spends thousands of tokens on reading the menu
+before it does any work.
 
-- **MCP servers.** Each one sends its full tool list to the model on every turn, whether you use it or not. Connect Jira, GitHub, Datadog and a few others, and you're carrying thousands of tokens of schemas.
-- **Skills.** Every skill and plugin you install adds more text to each session. The more playbooks you collect, the less room is left for the actual work.
+That costs you three ways:
 
-lazygate puts both behind a small set of meta-tools. The agent finds and starts a server, or finds and loads a skill, only when the task calls for it.
+- **Money.** You pay for those tokens on every request.
+- **Room to think.** Context spent on unused schemas is context the agent can't use for your code.
+- **Accuracy.** A long tool list makes it harder for the model to pick the right tool.
 
-Measure it on your own catalog (MCP servers **and** skills):
+So people end up rationing: they disconnect servers, uninstall skills, and keep a different setup
+for each project. lazygate removes the trade-off. Connect everything once, and the agent only pulls
+in what the current task needs.
+
+## What you get
+
+- **A lighter agent.** Until a server or skill is needed, the agent carries a dozen small
+  meta-tools and one line per skill. On a 40-skill catalog, idle input dropped from 81,865 to
+  21,244 tokens per request, about **74% fewer**.
+- **A skill library that scales.** Install as many skills as you like; each one costs a line until
+  it's used.
+- **Cheaper, faster multi-step work.** For "find, filter, then fetch" tasks, the agent can run the
+  whole chain in one step and get back only the answer. The intermediate results never enter the
+  conversation (see [the task benchmark](#on-a-real-task)).
+- **Move in with one command.** lazygate imports your existing servers and skills from Claude Code,
+  Cursor or OpenCode, backs up every file it touches, and reverts cleanly.
+- **Secrets out of config files.** Tokens move out of client JSON into your shell environment or an
+  encrypted per-user vault.
+- **Remote servers too,** including ones that sign in with OAuth.
+
+### On a real task
+
+The task benchmark gives Claude one multi-step job: count the open tickets assigned to one person
+and add up a field from each ticket's details. It runs the job three ways and only compares answers
+that are correct. "Classic MCP" means Claude connected directly to the same 16 servers, so every
+tool schema sits in context.
+
+| Setup | Input tokens | Agent turns | Time | vs classic MCP |
+|---|---:|---:|---:|---:|
+| Classic MCP (16 servers) | 537,456 | 10.3 | 6.2 s | — |
+| lazygate, one call at a time | 225,877 | 10 | 5.8 s | **−58%** |
+| lazygate, one chained script | 206,200 | 3 | 5.0 s | **−62%** |
+
+Averages of 3 cold runs per setup; all 9 runs answered correctly. Most of the saving comes from not
+loading every schema. Chaining cuts a further 9% and drops the job from 10 agent turns to 3. lazygate
+is also steadier: its runs varied by under 50 tokens, while classic MCP ranged from 479,132 to
+654,070, because every extra turn re-sends all 16 servers' schemas.
+
+Measure it on your own setup:
 
 ```bash
-npm run build
-lazygate benchmark --estimate                         # free local preview
-lazygate benchmark --runner codex --model gpt-6-luna  # skills (+ MCP attempt)
-lazygate benchmark                                    # Claude: best for MCP schemas
+lazygate benchmark --estimate    # free local preview, no model calls
+lazygate benchmark --tasks       # the multi-step task above (needs a logged-in `claude`)
 ```
 
-On one Codex/`gpt-6-luna` run against a 40-skill catalog:
-
-| Strategy | Input tokens |
-|---|---:|
-| All skill bodies in context | 81,865 |
-| **Stubs only (lazygate)** | **21,244** |
-| Stubs + largest skill loaded | 28,415 |
-
-That's about **74% fewer idle tokens** for skills (−60,621 / request). MCP schema cost shows up more clearly with `--runner claude` (Codex keeps a large fixed system prompt and does not surface tool schemas the same way). Details: [Benchmark](docs/reference.md#benchmark).
-
-## Quick start
+## Install
 
 lazygate isn't on npm yet. Build it from source (Node.js 20 or later):
 
@@ -52,93 +84,34 @@ npm link          # puts `lazygate` on your PATH
 Then move your existing servers and skills behind it:
 
 ```bash
-lazygate migrate --from claude --dry-run   # preview
+lazygate migrate --from claude --dry-run   # preview what changes
 lazygate migrate --from claude             # servers, skills and plugins
-lazygate migrate --from cursor             # or: opencode (servers)
+lazygate migrate --from cursor             # or: opencode
 ```
 
-From Claude Code, `migrate` picks up your MCP servers, the skills in `~/.claude/skills`, and plugin skills. Skills stay where they are; nothing is moved.
+Restart your client and try *"list active servers"* or *"find a skill for writing release notes"*.
 
-Restart your client and ask it to *"list active servers"* or *"find a skill for writing release notes"*. Changed your mind? Run `lazygate revert --from claude`. Every file lazygate touches is backed up first.
+Changed your mind? `lazygate revert --from claude` puts everything back.
 
-## How it works
+## How it feels
 
-```mermaid
-flowchart LR
-    A[Coding agent] -- "meta-tools only" --> G[lazygate]
-    subgraph Servers["MCP servers: started on demand"]
-        J[Jira]
-        H[GitHub]
-        D[Datadog]
-    end
-    subgraph Skills["Skills: loaded on demand"]
-        R[release-notes]
-        T[tdd]
-        P[plugin skills]
-    end
-    G -.-> Servers
-    G -.-> Skills
-```
-
-### Servers
+You keep asking for what you want. The agent finds the right server or skill on its own:
 
 ```
 You:    Find open GitHub issues labelled "bug"
-Agent:  discover_tools("github issues")   → github looks like the right server
-        activate_server("github")         → starts it
-        describe_tool("github", "search_issues")
-                                          → fetches just this one schema
-        call_tool("github", "search_issues", { … })
-```
+Agent:  finds the GitHub server → starts it → reads one tool's schema → runs the search
 
-### Skills
-
-```
 You:    Write release notes for v2.3
-Agent:  discover_skill("release notes")   → release-notes matches
-        load_skill("release-notes")       → pulls in the full instructions
-        read_skill_file("release-notes", "template.md")
-                                          → reads a bundled file, if the skill has one
+Agent:  finds the release-notes skill → loads its instructions → follows them
 ```
 
-Until a skill is loaded, the session only carries its name, description and a one-line pointer. lazygate does this by splitting each `SKILL.md` in two: the frontmatter stays in `SKILL.md`, and the body moves to `INSTRUCTIONS.md`, which `load_skill` returns. `revert` merges them back into the original file, and a `SessionStart` hook redoes the split when plugins update.
+Nothing changes in how you work; the agent just stops carrying what it isn't using. The full
+mechanics are in [How it works](docs/how-it-works.md).
 
-### Meta-tools
+## For teams
 
-The agent sees these instead of every server's tools and every skill's body:
-
-| Tool | What it does |
-|---|---|
-| `discover_tools` | Find the right server for a task |
-| `activate_server` / `deactivate_server` | Start or stop a server |
-| `describe_tool` / `call_tool` | Fetch one schema, call a tool |
-| `list_active_servers` | Show what's running in this session |
-| `discover_skill` | Find the right skill for a task |
-| `load_skill` | Load a skill's full instructions |
-| `read_skill_file` | Read a file bundled with a skill (templates, scripts, references) |
-| `connect_server` / `disconnect_server` | Gateway only: attach or remove credentials |
-
-Why activated tools don't show up in `tools/list`
-
-By default (`expose: "none"`), activated servers stay out of `tools/list`, and the agent reaches them through `describe_tool` / `call_tool`. Two reasons:
-
-- Many clients ignore `notifications/tools/list_changed`, so newly added tools would never appear anyway.
-- Changing `tools/list` mid-session invalidates the prompt cache for everything after the tools block.
-
-You can opt in per server with `expose: "all"` or an allowlist of tool names in `servers.json`. See [Routing](docs/reference.md#routing).
-
-## What you get
-
-- **Lean context.** Only meta-tools are loaded until a server or skill is actually needed.
-- **A skill library that scales.** Install as many skills as you like; each one costs a line until it's loaded.
-- **One-command migration.** Imports servers from Claude Code, Cursor or OpenCode, plus skills and plugin skills from Claude Code, and reverts cleanly.
-- **Secrets out of client JSON.** Secrets move to your shell environment, `${secret:…}` templates, or a per-user encrypted vault.
-- **Live config.** Edits to `servers.json` and `skills.json` apply without a restart.
-- **Stdio and HTTP servers,** including OAuth (PKCE) for remote MCP servers.
-
-## Team gateway
-
-Run one shared lazygate for a whole team instead of every developer maintaining their own collection of MCP servers and skills.
+Run one lazygate for the whole team instead of every developer maintaining their own collection of
+MCP servers, skills and API keys.
 
 ```bash
 lazygate token create --user you --admin
@@ -147,59 +120,22 @@ lazygate serve
 # UI  → http://127.0.0.1:8787/ui
 ```
 
-Open `/ui`, paste your token, **Install** the servers and skills you want, and **Connect** your credentials. Each user gets their own session, personal access token and encrypted credential vault. Admins curate the shared catalog of servers and skills.
+- **One catalog.** Admins curate the shared list of servers and skills; developers **Install** the
+  ones they want from the web UI.
+- **Personal credentials.** Each user **Connects** their own accounts. Keys are stored encrypted per
+  user and never shared across sessions.
+- **Isolated sessions.** Every user gets their own session and personal access token.
+- **An audit trail.** Every tool call is logged, with credentials redacted.
 
-The gateway speaks plain HTTP, so put a TLS reverse proxy in front of it and pass `--allow-remote` for anything beyond localhost. Full guide: [docs/gateway.md](docs/gateway.md).
-
-## Manual setup
-
-If you'd rather not migrate, point your client at lazygate directly:
-
-```bash
-claude mcp add --scope user lazygate -- lazygate
-```
-
-Or in `~/.claude.json` / Cursor's `mcp.json`:
-
-```json
-{
-  "mcpServers": {
-    "lazygate": { "command": "lazygate" }
-  }
-}
-```
-
-Without `npm link`, use `"command": "node", "args": ["/path/to/lazygate/dist/index.js"]`. Keep the name `lazygate` so a later `migrate` doesn't add a second entry.
-
-Servers live in `~/.config/lazygate/servers.json` and skills in `~/.config/lazygate/skills.json`. Registering a skill by hand is one entry pointing at its `SKILL.md`:
-
-```json
-{
-  "skills": {
-    "release-notes": {
-      "description": "Write release notes from merged PRs",
-      "keywords": ["release", "changelog", "notes"],
-      "path": "/path/to/skills/release-notes/SKILL.md"
-    }
-  }
-}
-```
-
-For both servers and skills, `description` and `keywords` drive discovery. See [Configuration](docs/reference.md#configuration) and [Skills](docs/reference.md#skills) for every field.
+The gateway speaks plain HTTP, so put a TLS reverse proxy in front of it for anything beyond
+localhost. Setup guide: [docs/gateway.md](docs/gateway.md).
 
 ## Docs
 
 | | |
 |---|---|
+| [How it works](docs/how-it-works.md) | Architecture, meta-tools, skill split, tool chain, manual setup, development |
 | [Gateway guide](docs/gateway.md) | HTTP gateway, web UI, tokens, vault, TLS |
-| [Reference](docs/reference.md) | Server and skill configuration, routing, migration, benchmark |
+| [Reference](docs/reference.md) | Every server and skill setting, routing, migration, benchmark |
 | [Upgrading from context-broker](docs/reference.md#upgrading-from-context-broker) | The old name still works; installs upgrade in place |
-| [CLAUDE.md](CLAUDE.md) | Architecture notes for contributors |
-
-## Development
-
-```bash
-npm run build && npm test
-npm run dev          # run from source, no build step
-npm run benchmark    # MCP + skills token savings (needs `claude` on PATH)
-```
+| [CLAUDE.md](CLAUDE.md) | Source map for contributors |

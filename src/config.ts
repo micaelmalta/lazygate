@@ -55,6 +55,8 @@ const ServerSchema = z
     expose: z.union([z.literal("none"), z.literal("all"), z.array(z.string())]).optional(),
     /** Expose/call tools as `server__tool` to avoid name collisions (default false). */
     namespaceTools: z.boolean().optional(),
+    /** Let run_chain scripts call this server's tools (see ServerConfig.toolChain). */
+    toolChain: z.union([z.boolean(), z.array(z.string())]).optional(),
   })
   .passthrough()
   .refine((c) => Boolean(c.command) || Boolean(c.url), {

@@ -53,14 +53,32 @@ export const META_TOOLS: Tool[] = [
     name: "describe_tool",
     description:
       "Return one tool's full schema (name, description, inputSchema) from an active server. " +
-      "Activates the server if needed. Prefer this over dumping every schema into tools/list.",
+      "Activates the server if needed. Omit tool to get TypeScript stubs for the server's tool-chain tools.",
     inputSchema: {
       type: "object",
       properties: {
         server: { type: "string", description: "Server name (from discover_tools / activate_server)" },
-        tool: { type: "string", description: "Tool name on that server" },
+        tool: { type: "string", description: "Tool name on that server (omit for tool-chain stubs)" },
       },
-      required: ["server", "tool"],
+      required: ["server"],
+    },
+  },
+  {
+    name: "run_chain",
+    description:
+      "Run a short JavaScript workflow that calls tool-chain tools as servers.<name>.<tool>(args). " +
+      "Use it for multi-step chains; intermediate results stay in the script and only logs and the " +
+      "return value come back. Write the body only: use await and return (no imports, require, fetch " +
+      "or fs). Each run is a fresh scope. Single or destructive calls: use call_tool.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        code: {
+          type: "string",
+          description: "JavaScript function body. The value you return is sent back to the model.",
+        },
+      },
+      required: ["code"],
     },
   },
   {
@@ -190,7 +208,17 @@ export const ReadSkillFileSchema = z.object({
 });
 export const DescribeToolSchema = z.object({
   server: z.string().min(1, "`server` must be a non-empty string"),
-  tool: z.string().min(1, "`tool` must be a non-empty string"),
+  tool: z.string().min(1, "`tool` must be a non-empty string").optional(),
+});
+/** Max source size for run_chain (bytes of UTF-8 are checked in the broker as well). */
+export const MAX_CODE_BYTES = 64 * 1024;
+export const RunChainSchema = z.object({
+  code: z
+    .string()
+    .min(1, "`code` must be a non-empty string")
+    .refine((c) => Buffer.byteLength(c, "utf-8") <= MAX_CODE_BYTES, {
+      message: `\`code\` exceeds the ${MAX_CODE_BYTES / 1024} KiB limit`,
+    }),
 });
 export const CallToolSchema = z.object({
   server: z.string().min(1, "`server` must be a non-empty string"),
