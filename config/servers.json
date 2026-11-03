@@ -1,4 +1,26 @@
 {
+  "responseOptimization": {
+    "enabled": false,
+    "defaultMode": "off",
+    "maxOutputTokens": 4000,
+    "tools": {
+      "github.search_issues": {
+        "mode": "project",
+        "fields": ["id", "title", "state"]
+      },
+      "fetch.get_page": {
+        "mode": "html_markdown"
+      },
+      "docs.get_documentation": {
+        "mode": "html_reader"
+      },
+      "jira.search_issues": {
+        "mode": "prune",
+        "removeNulls": true,
+        "removeEmptyObjects": true
+      }
+    }
+  },
   "servers": {
     "fetch-mcp": {
       "description": "Web fetch, search, and HTTP tooling",

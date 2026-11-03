@@ -105,6 +105,64 @@ the clash; deactivate the other server first, or set `namespaceTools: true` (per
 
 **Errors** from lazygate and from proxied calls are returned with `isError: true`.
 
+## Response optimization
+
+Response transformations are opt-in and are disabled by default. Add a top-level
+`responseOptimization` section to `servers.json`; policy changes reload with the server registry.
+Set `enabled` to `true` to apply the global `defaultMode` and per-tool policies. A tool key uses
+`server.tool`; `lazygate.run_chain` selects the policy for the final value returned by a script.
+
+```json
+{
+  "responseOptimization": {
+    "enabled": true,
+    "defaultMode": "off",
+    "maxOutputTokens": 4000,
+    "tools": {
+      "github.search_issues": {
+        "mode": "project",
+        "fields": ["id", "title", "state", "assignee.login"]
+      },
+      "fetch.get_page": { "mode": "html_markdown" },
+      "docs.get_documentation": { "mode": "html_reader" },
+      "jira.search_issues": {
+        "mode": "prune",
+        "removeNulls": true,
+        "removeEmptyObjects": true
+      }
+    }
+  }
+}
+```
+
+Supported modes are `off`, `prune`, `project`, `jsonpath`, `schema`, `html_markdown`, and
+`html_reader`. Projection paths use dot notation or quoted/numeric bracket notation and continue
+through arrays. JSONPath uses `jsonpath-plus` with bounded data filters; function calls and prototype
+access are rejected. `prune` removes only the empty values
+enabled by its flags and configured `removeFields`; it preserves `false`, `0`, and duplicate array
+items. `schema` returns `_count`, an inferred `_schema`, and a bounded `_sample`.
+
+`html_markdown` converts semantic content while keeping navigation and page chrome. `html_reader`
+extracts a main or article area and removes navigation, sidebars, headers, and footers. Both strip
+scripts, styles, comments, tracking pixels, hidden content, and unsafe link schemes. The optimizer
+does not fetch URLs, execute page code, or alter intermediate `run_chain` results.
+
+`maxOutputTokens` and the per-tool `maxTokens` are approximate limits based on four characters per
+token. Oversized text is cut at paragraph or line boundaries where possible; structured values are
+cut at record or property boundaries. A partial result carries `_meta.lazygate.responseOptimization`
+with `complete: false`; `run_chain` also includes a summary in its returned text when needed. Projection, JSONPath, schema,
+reader mode, and pruning that removes values are marked incomplete because they intentionally omit
+source information. Metrics include original and optimized token estimates, savings, duration, and
+failure status; they are emitted to stderr unless the broker caller supplies a metrics sink.
+
+Input and processing safeguards are configurable with `maxInputBytes`, `maxOutputBytes`,
+`maxNestingDepth`, `maxHtmlNodes`, and `maxTransformMs`. JSONPath queries are limited to 512
+characters, 10,000 matches, and the configured input limits. Parsing failures return the original
+result when there is no hard output limit. Tool errors pass through unchanged unless a hard output
+limit requires an explicit incomplete-result or budget error. To roll back,
+set `enabled` to `false` or remove the `responseOptimization` section; optimization is off when no
+section is present.
+
 ---
 
 ## HTTP servers and OAuth

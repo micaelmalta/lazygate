@@ -77,6 +77,11 @@ beforeAll(async () => {
   writeFileSync(
     join(dir, "servers.json"),
     JSON.stringify({
+      responseOptimization: {
+        enabled: true,
+        defaultMode: "off",
+        tools: { "jira.search": { mode: "prune", removeNulls: true } },
+      },
       servers: {
         jira: server("jira", { scope: "user", env: { TEST_TOKEN: "${cred:token}" } }),
         shared: server("shared", { scope: "server", env: { TEST_TOKEN: "${secret:shared/token}" } }),
@@ -989,6 +994,11 @@ describe("servers (admin)", () => {
     });
     expect(r.status).toBe(200);
     const onDisk = JSON.parse(readFileSync(join(dir, "servers.json"), "utf-8"));
+    expect(onDisk.responseOptimization).toEqual({
+      enabled: true,
+      defaultMode: "off",
+      tools: { "jira.search": { mode: "prune", removeNulls: true } },
+    });
     expect(onDisk.servers.plain.groups).toEqual(["sre"]);
     expect(onDisk.servers.plain.auth).toEqual({ scope: "user", fallback: "server", env: { SVC_TOKEN: "${cred:key}" } });
     expect(onDisk.servers.plain.command).toBe(process.execPath); // untouched fields survive

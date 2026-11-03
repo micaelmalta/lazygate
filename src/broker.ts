@@ -22,6 +22,15 @@ import { composePrompt, type SecretLookup } from "./prompt-compose.js";
 import { bareToolName, parseNamespacedTool } from "./tool-names.js";
 import { LOG_PREFIX } from "./version.js";
 import { runCode, serverStubs, toScriptResult, type CodeBinding } from "./tool-chain/index.js";
+import {
+  estimateTokens,
+  optimizeToolResult,
+  resolveOptimizationPolicy,
+  type OptimizationContext,
+  type OptimizationMetrics,
+  type OptimizableToolResult,
+  type ResponseOptimizationConfig,
+} from "./response-optimizer.js";
 
 export interface ToolResult {
   content: unknown[];
@@ -67,6 +76,10 @@ export interface BrokerDeps {
   secrets?: SecretLookup;
   /** Content-hash tracking for skill bodies (provenance + changed warning in load_skill). */
   skillHashes?: SkillHashStore;
+  /** Opt-in JSON/HTML response transformations from the top-level servers.json section. */
+  responseOptimization?: ResponseOptimizationConfig;
+  /** Receives per-tool timing and estimated-token measurements when optimization is enabled. */
+  onOptimizationMetrics?: (context: OptimizationContext, metrics: OptimizationMetrics) => void;
 }
 
 /** Reject if the promise does not settle within `ms` (nested calls in scripts use the run budget). */
@@ -84,6 +97,32 @@ function text(t: string): ToolResult {
 
 function fail(t: string): ToolResult {
   return { content: [{ type: "text", text: t }], isError: true };
+}
+
+function attachOptimizationMetadata<T extends ToolResult>(result: T, metrics: OptimizationMetrics): T {
+  const responseOptimization = {
+    mode: metrics.mode,
+    originalTokens: metrics.originalTokens,
+    optimizedTokens: metrics.optimizedTokens,
+    savedTokens: metrics.savedTokens,
+    reductionPercent: metrics.reductionPercent,
+    durationMs: metrics.durationMs,
+    complete: metrics.complete,
+  };
+  const rootMeta = result._meta && typeof result._meta === "object" && !Array.isArray(result._meta)
+    ? (result._meta as Record<string, unknown>)
+    : {};
+  const current = rootMeta.lazygate;
+  if (current !== undefined && (!current || typeof current !== "object" || Array.isArray(current))) {
+    return { ...result, _meta: { ...rootMeta, responseOptimization } };
+  }
+  return {
+    ...result,
+    _meta: {
+      ...rootMeta,
+      lazygate: { ...((current as Record<string, unknown> | undefined) ?? {}), responseOptimization },
+    },
+  };
 }
 
 function matchedLine(keywords: string[], descriptionWords: string[], toolWords: string[] = []): string {
@@ -192,7 +231,26 @@ export function createBroker({
   access,
   secrets,
   skillHashes,
+  responseOptimization,
+  onOptimizationMetrics,
 }: BrokerDeps) {
+  const currentOptimizationConfig = (): ResponseOptimizationConfig =>
+    responseOptimization ?? router.getResponseOptimization();
+  const optimize = async (result: ToolResult, context: OptimizationContext): Promise<ToolResult> => {
+    const policy = resolveOptimizationPolicy(currentOptimizationConfig(), context);
+    if (policy.mode === "off" && policy.maxTokens === undefined && policy.maxOutputBytes === undefined) return result;
+    const sink = onOptimizationMetrics ?? ((event, metrics) => {
+      console.error(
+        `${LOG_PREFIX} response optimization ${JSON.stringify({
+          server: event.serverName,
+          tool: event.toolName,
+          source: event.source,
+          ...metrics,
+        })}`
+      );
+    });
+    return (await optimizeToolResult(result, policy, context, sink)).result as ToolResult;
+  };
   /** Servers this caller may see. Hidden servers behave exactly like unknown ones. */
   const visible = (name: string): boolean => {
     const cfg = router.getConfig(name);
@@ -486,7 +544,8 @@ export function createBroker({
           );
         }
         try {
-          const res = (await manager.callTool(a.server, a.tool, a.args ?? {})) as ToolResult;
+          const raw = (await manager.callTool(a.server, a.tool, a.args ?? {})) as ToolResult;
+          const res = await optimize(raw, { serverName: a.server, toolName: a.tool, source: "call_tool" });
           // Surface the upstream hints on the result too (kept in _meta so content is untouched).
           const hinted = manager
             .getAllActiveTools()
@@ -494,7 +553,14 @@ export function createBroker({
           const tags = annotationTags(hinted);
           if (!tags.length) return res;
           const meta = (res._meta as Record<string, unknown> | undefined) ?? {};
-          return { ...res, _meta: { ...meta, lazygate: { tool: a.tool, server: a.server, annotations: tags } } };
+          const lazygateMeta =
+            meta.lazygate && typeof meta.lazygate === "object" && !Array.isArray(meta.lazygate)
+              ? (meta.lazygate as Record<string, unknown>)
+              : {};
+          return {
+            ...res,
+            _meta: { ...meta, lazygate: { ...lazygateMeta, tool: a.tool, server: a.server, annotations: tags } },
+          };
         } catch (err) {
           return fail(`Error calling ${a.tool}: ${(err as Error).message}`);
         }
@@ -633,18 +699,131 @@ export function createBroker({
         router.reloadServersFromDisk();
         const bindings = toolChainBindings();
         const run = await runCode({ code: a.code, bindings, callTool: nestedCall });
+        const context: OptimizationContext = {
+          serverName: "lazygate",
+          toolName: "run_chain",
+          source: "run_chain",
+        };
+        const currentConfig = currentOptimizationConfig();
+        const policy = resolveOptimizationPolicy(currentConfig, context);
+        const hasBudget = policy.maxTokens !== undefined || policy.maxOutputBytes !== undefined;
+        const optimizationEnabled = currentConfig.enabled && (policy.mode !== "off" || hasBudget);
+        const reportMetrics = (metrics: OptimizationMetrics): void => {
+          if (!optimizationEnabled) return;
+          try {
+            if (onOptimizationMetrics) onOptimizationMetrics(context, metrics);
+            else {
+              console.error(
+                `${LOG_PREFIX} response optimization ${JSON.stringify({
+                  server: context.serverName,
+                  tool: context.toolName,
+                  source: context.source,
+                  ...metrics,
+                })}`
+              );
+            }
+          } catch {
+            // Metrics are advisory and must not make the run_chain call fail.
+          }
+        };
         const lines: string[] = [];
         if (run.logs) lines.push(`Logs:\n${run.logs}`);
         if (run.error) {
           lines.push(`Error: ${run.error}`);
-          return fail(lines.join("\n\n"));
+          const errorResponse = fail(lines.join("\n\n"));
+          if (!hasBudget) return errorResponse;
+          const boundedError = await optimizeToolResult(
+            errorResponse,
+            { mode: "off", maxTokens: policy.maxTokens, maxOutputBytes: policy.maxOutputBytes, includeMetadata: false },
+            context
+          );
+          reportMetrics({ ...boundedError.metrics, mode: policy.mode });
+          return boundedError.result as ToolResult;
         }
         const failedNote = run.failedCalls > 0 ? ` (${run.failedCalls} nested call${run.failedCalls === 1 ? "" : "s"} failed)` : "";
         lines.push(`Completed${failedNote}; ${run.calls} nested call${run.calls === 1 ? "" : "s"}.`);
-        lines.push(
-          `Return value: ${run.value === undefined ? "(none)" : JSON.stringify(run.value, null, 2)}`
+        let finalValue = run.value;
+        let optimizationMeta: Record<string, unknown> | undefined;
+        let transformationMetrics: OptimizationMetrics | undefined;
+        if (run.value !== undefined) {
+          const { maxTokens: _maxTokens, maxOutputBytes: _maxOutputBytes, ...transformPolicy } = policy;
+          const optimized = await optimizeToolResult<OptimizableToolResult>(
+            { content: [], structuredContent: run.value },
+            transformPolicy,
+            context
+          );
+          finalValue = optimized.result.structuredContent;
+          transformationMetrics = optimized.metrics;
+          optimizationMeta = (optimized.result._meta?.lazygate as Record<string, unknown> | undefined)
+            ?.responseOptimization as Record<string, unknown> | undefined;
+          if (optimized.result.isError) {
+            return {
+              ...optimized.result,
+              content: [...lines.map((line) => ({ type: "text", text: line })), ...optimized.result.content],
+            } as ToolResult;
+          }
+        }
+        const rawResponse = text(
+          [...lines, `Return value: ${run.value === undefined ? "(none)" : JSON.stringify(run.value, null, 2)}`].join("\n\n")
         );
-        return text(lines.join("\n\n"));
+        lines.push(`Return value: ${finalValue === undefined ? "(none)" : JSON.stringify(finalValue, null, 2)}`);
+        if (optimizationMeta && optimizationMeta.complete === false) {
+          lines.push(`Response optimization: ${JSON.stringify(optimizationMeta)}`);
+        }
+        let response: ToolResult = text(lines.join("\n\n"));
+        if (optimizationMeta) response = { ...response, _meta: { lazygate: { responseOptimization: optimizationMeta } } };
+
+        let budgetMetrics: OptimizationMetrics | undefined;
+        if (hasBudget) {
+          const bounded = await optimizeToolResult(
+            response,
+            { mode: "off", maxTokens: policy.maxTokens, maxOutputBytes: policy.maxOutputBytes, includeMetadata: false },
+            context
+          );
+          response = bounded.result as ToolResult;
+          budgetMetrics = bounded.metrics;
+        }
+
+        const originalTokens = estimateTokens(rawResponse);
+        let metrics: OptimizationMetrics = {
+          mode: policy.mode,
+          originalTokens,
+          optimizedTokens: estimateTokens(response),
+          savedTokens: Math.max(0, originalTokens - estimateTokens(response)),
+          reductionPercent: originalTokens
+            ? Math.round((Math.max(0, originalTokens - estimateTokens(response)) / originalTokens) * 100)
+            : 0,
+          durationMs: (transformationMetrics?.durationMs ?? 0) + (budgetMetrics?.durationMs ?? 0),
+          changed: (transformationMetrics?.changed ?? false) || (budgetMetrics?.changed ?? false),
+          complete: (transformationMetrics?.complete ?? true) && (budgetMetrics?.complete ?? true),
+          ...((transformationMetrics?.failure ?? budgetMetrics?.failure)
+            ? { failure: transformationMetrics?.failure ?? budgetMetrics?.failure }
+            : {}),
+        };
+        if (policy.includeMetadata || !metrics.complete) response = attachOptimizationMetadata(response, metrics);
+
+        const exceedsFinalLimit =
+          (policy.maxTokens !== undefined && estimateTokens(response) > policy.maxTokens) ||
+          (policy.maxOutputBytes !== undefined && Buffer.byteLength(JSON.stringify(response), "utf8") > policy.maxOutputBytes);
+        if (exceedsFinalLimit) {
+          response = fail(
+            policy.maxOutputBytes !== undefined && Buffer.byteLength(JSON.stringify(response), "utf8") > policy.maxOutputBytes
+              ? "Response exceeded the configured output byte limit; output is incomplete."
+              : "Response exceeded the configured output token budget; output is incomplete."
+          );
+          metrics = {
+            ...metrics,
+            optimizedTokens: estimateTokens(response),
+            savedTokens: Math.max(0, originalTokens - estimateTokens(response)),
+            reductionPercent: originalTokens
+              ? Math.round((Math.max(0, originalTokens - estimateTokens(response)) / originalTokens) * 100)
+              : 0,
+            changed: true,
+            complete: false,
+          };
+        }
+        reportMetrics(metrics);
+        return response;
       }
 
       case "connect_server": {

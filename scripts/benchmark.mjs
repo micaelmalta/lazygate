@@ -27,6 +27,7 @@
 //   lazygate benchmark --mcp-only | --skills-only
 //   lazygate benchmark --rounds 3
 //   lazygate benchmark --estimate   # local chars÷4 preview, no API
+//   lazygate benchmark --responses  # local JSON/HTML optimizer benchmark, no API
 
 import { execFile, spawn } from "child_process";
 import { promisify } from "util";
@@ -119,6 +120,8 @@ const mcpOnly = has("--mcp-only");
 const skillsOnly = has("--skills-only");
 const estimateOnly = has("--estimate");
 const tasksOnly = has("--tasks");
+const responsesOnly = has("--responses");
+const responseIterations = Number.parseInt(get("--iterations") ?? "30", 10);
 // --tasks runs Claude with permission checks bypassed. By default it only sees the tickets fixture;
 // the user's real catalog (and its destructive tools) is loaded only with an explicit flag.
 const includeCatalog = has("--include-catalog");
@@ -144,6 +147,72 @@ const estTokens = (chars) => Math.round(chars / 4);
 // ─── Paths ─────────────────────────────────────────────────────────────────
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+
+if (responsesOnly) {
+  if (!Number.isInteger(responseIterations) || responseIterations < 1 || responseIterations > 1000) {
+    console.error("--iterations must be an integer from 1 to 1000.");
+    process.exit(1);
+  }
+  const optimizerPath = resolve(__dirname, "../dist/response-optimizer.js");
+  if (!existsSync(optimizerPath)) {
+    console.error("✗ dist/response-optimizer.js not found. Run `npm run build` first.");
+    process.exit(1);
+  }
+  const { estimateTokens, optimizeToolResult } = await import(pathToFileURL(optimizerPath).href);
+  const context = { serverName: "benchmark", toolName: "response", source: "call_tool" };
+  const jsonResult = {
+    content: [],
+    structuredContent: {
+      issues: Array.from({ length: 500 }, (_, id) => ({
+        id,
+        title: `Issue ${id}`,
+        state: id % 2 ? "open" : "closed",
+        body: "A long description that is not needed by this projection. ".repeat(8),
+        metadata: { owner: `team-${id % 12}`, labels: [], optional: null },
+      })),
+    },
+  };
+  const nav = Array.from({ length: 180 }, (_, id) => `<a href="/section/${id}">Navigation section ${id}</a>`).join(" ");
+  const htmlResult = {
+    content: [{
+      type: "text",
+      text: `<html><head><style>${".hidden { display:none }".repeat(80)}</style><script>${"var tracker = 1;".repeat(120)}</script></head><body><nav>${nav}</nav><main><h1>Guide</h1><p>${"Core instructions and reference content. ".repeat(24)}</p><pre><code>Authorization: Bearer KEY</code></pre></main><footer>${"Footer navigation. ".repeat(30)}</footer></body></html>`,
+    }],
+  };
+  const smallJson = { content: [], structuredContent: { id: 17, state: "open", labels: ["bug"] } };
+  const cases = [
+    { name: "small-json-off", result: smallJson, policy: { mode: "off" } },
+    { name: "large-json-project", result: jsonResult, policy: { mode: "project", fields: ["issues.id", "issues.title", "issues.state"] } },
+    { name: "html-markdown", result: htmlResult, policy: { mode: "html_markdown" } },
+    { name: "html-reader", result: htmlResult, policy: { mode: "html_reader" } },
+  ];
+  const percentile = (values, p) => values.slice().sort((a, b) => a - b)[Math.min(values.length - 1, Math.ceil(values.length * p) - 1)];
+  const measurements = [];
+  for (const benchmark of cases) {
+    const samples = [];
+    let metrics;
+    for (let i = 0; i < responseIterations + 3; i++) {
+      const start = performance.now();
+      const optimized = await optimizeToolResult(benchmark.result, benchmark.policy, context);
+      const elapsed = performance.now() - start;
+      if (i >= 3) samples.push(elapsed);
+      metrics = optimized.metrics;
+    }
+    measurements.push({
+      workload: benchmark.name,
+      iterations: responseIterations,
+      originalTokens: estimateTokens(benchmark.result),
+      optimizedTokens: metrics.optimizedTokens,
+      savedTokens: metrics.savedTokens,
+      reductionPercent: metrics.reductionPercent,
+      medianMs: Number(percentile(samples, 0.5).toFixed(3)),
+      p95Ms: Number(percentile(samples, 0.95).toFixed(3)),
+      complete: metrics.complete,
+    });
+  }
+  console.log(JSON.stringify({ method: "local deterministic fixtures; token estimates use serialized characters / 4", measurements }, null, 2));
+  process.exit(0);
+}
 
 function resolveUnderConfig(file, explicit) {
   if (explicit) return resolve(explicit);

@@ -617,17 +617,25 @@ function uninstallSkill(ctx: UiContext, user: UserIdentity, name: string): unkno
   return undefined;
 }
 
-function readServersFile(path: string): { servers: Record<string, Record<string, unknown>> } {
+interface ServersFile {
+  servers: Record<string, Record<string, unknown>>;
+  [key: string]: unknown;
+}
+
+function readServersFile(path: string): ServersFile {
   if (!existsSync(path)) return { servers: {} };
   try {
-    const file = JSON.parse(readFileSync(path, "utf-8")) as { servers?: Record<string, Record<string, unknown>> };
-    return { servers: file.servers && typeof file.servers === "object" ? file.servers : {} };
+    const file = JSON.parse(readFileSync(path, "utf-8")) as Partial<ServersFile>;
+    return {
+      ...file,
+      servers: file.servers && typeof file.servers === "object" ? file.servers : {},
+    };
   } catch (e) {
     throw new HttpError(500, `Could not read servers.json: ${(e as Error).message}`);
   }
 }
 
-function writeServersFile(path: string, file: { servers: Record<string, Record<string, unknown>> }): void {
+function writeServersFile(path: string, file: ServersFile): void {
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const mode = existsSync(path) ? statSync(path).mode & 0o777 : 0o600;
   if (existsSync(path)) writeFileSync(`${path}.bak-ui`, readFileSync(path));
