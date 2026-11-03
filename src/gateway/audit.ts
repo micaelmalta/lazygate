@@ -15,6 +15,8 @@ export interface AuditEvent {
   ms?: number;
   /** Short reason for failures (never contains credential values). */
   error?: string;
+  /** How the call was reached: "run_chain" for tool calls made from a tool-chain script. */
+  via?: string;
   /** Admin UI/API mutation (e.g. token.create, secret.set, server.patch). */
   action?: string;
   /** Resource id (token id, secret path, server/skill name). */

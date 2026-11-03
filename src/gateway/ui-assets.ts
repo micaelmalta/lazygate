@@ -977,6 +977,11 @@ export const UI_JS = String.raw`(function () {
       var groups = h("input", { type: "text", placeholder: "everyone" });
       if (existing) groups.value = (existing.groups || []).join(", ");
       var auto = h("input", { type: "checkbox" }); auto.checked = Boolean(existing && existing.autoActivate);
+      var cm = existing ? existing.toolChain : "off";
+      var toolChainSel = h("select", null, h("option", { value: "off" }, "off (call_tool only)"), h("option", { value: "all" }, "all tools"), h("option", { value: "list" }, "allowlist"));
+      toolChainSel.value = Array.isArray(cm) ? "list" : (cm === "all" ? "all" : "off");
+      var toolChainList = h("input", { type: "text", placeholder: "search, get_issue" });
+      if (Array.isArray(cm)) toolChainList.value = cm.join(", ");
       var disabledIn = h("input", { type: "checkbox" }); disabledIn.checked = Boolean(existing && existing.disabled);
 
       var sheet = h("div", { class: "sheet" },
@@ -1006,6 +1011,8 @@ export const UI_JS = String.raw`(function () {
             h("label", { class: "inline top" }, fallback, " fall back to shared secret"),
             h("label", { class: "inline top" }, auto, " auto-activate")),
           h("label", null, "Groups (comma separated, blank = everyone)"), groups,
+          h("label", null, "Tool chain (run_chain scripts may call these tools)"), toolChainSel,
+          h("label", null, "Allowlisted tools (comma separated, for allowlist only)"), toolChainList,
           h("label", null, "Env templates"), env,
           h("label", null, "Header templates"), hdr));
 
@@ -1020,6 +1027,9 @@ export const UI_JS = String.raw`(function () {
             keywords: kw,
             groups: groups.value.split(","),
             autoActivate: auto.checked,
+            toolChain: toolChainSel.value === "list"
+              ? toolChainList.value.split(",").map(function (x) { return x.trim(); }).filter(Boolean)
+              : toolChainSel.value,
             auth: scope.value === "none" ? null : { scope: scope.value, fallback: fallback.checked, env: textToMap(env.value), headers: textToMap(hdr.value) }
           };
           if (!isNew) payload.disabled = disabledIn.checked;

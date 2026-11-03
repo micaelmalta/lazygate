@@ -14,11 +14,13 @@ import {
   ReadSkillFileSchema,
   DescribeToolSchema,
   CallToolSchema,
+  RunChainSchema,
 } from "./meta-tools.js";
 import { formatSkillUri, parseSkillUri } from "./skill-router.js";
 import { composePrompt, type SecretLookup } from "./prompt-compose.js";
 import { bareToolName, parseNamespacedTool } from "./tool-names.js";
 import { LOG_PREFIX } from "./version.js";
+import { runCode, serverStubs, toScriptResult, type CodeBinding } from "./tool-chain/index.js";
 
 export interface ToolResult {
   content: unknown[];
@@ -49,6 +51,8 @@ export interface BrokerAccess {
   connect?(name: string, cfg: ServerConfig): Promise<string>;
   /** Drop the caller's stored credentials for the server (gateway). */
   disconnect?(name: string, cfg: ServerConfig): Promise<string>;
+  /** Called once per tool call a script makes through run_chain (gateway audit). */
+  onNestedCall?(e: { server: string; tool: string; ok: boolean; ms: number; error?: string }): void;
 }
 
 export interface BrokerDeps {
@@ -60,6 +64,15 @@ export interface BrokerDeps {
   secrets?: SecretLookup;
   /** Allow private/link-local URLs in skill prompt.context (gateway admin-configured). */
   allowPrivatePromptUrls?: boolean;
+}
+
+/** Reject if the promise does not settle within `ms` (nested calls in scripts use the run budget). */
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`timed out after ${ms}ms`)), ms);
+  });
+  return Promise.race([p, timeout]).finally(() => clearTimeout(timer));
 }
 
 function text(t: string): ToolResult {
@@ -135,23 +148,10 @@ export function formatActivation(
   );
 }
 
-/**
- * First sentence of a tool description, capped in length. Activation output uses this so a
- * server with dozens of tools doesn't dump its full documentation into the context window —
- * the complete descriptions are available via describe_tool (or in tools/list when expose is set).
- */
-export function summarizeDescription(description: string | undefined, max = SUMMARY_MAX): string {
-  const flat = (description ?? "").trim().split(/\n\s*\n/)[0].replace(/\s+/g, " ");
-  let end = flat.length;
-  for (const m of flat.matchAll(/[.!?](?=\s|$)/g)) {
-    const i = m.index!;
-    if (/(?:e\.g|i\.e|etc|vs)$/i.test(flat.slice(0, i))) continue; // abbreviation, not a sentence end
-    end = i + 1;
-    break;
-  }
-  const sentence = flat.slice(0, end);
-  return sentence.length > max ? sentence.slice(0, max - 1).trimEnd() + "…" : sentence;
-}
+// Activation output uses the first sentence of each tool description so a server with dozens of
+// tools doesn't dump its full documentation into the context window (see tool-chain/stubs.ts).
+import { summarizeDescription } from "./tool-chain/stubs.js";
+export { summarizeDescription };
 
 export function createBroker({
   router,
@@ -174,6 +174,79 @@ export function createBroker({
     return !access?.canUseSkill || access.canUseSkill(name);
   };
   const visibleSkillNames = (): string[] => (skillRouter ? skillRouter.listAll().filter(skillVisible) : []);
+
+  /** Upstream tool names this server allows in tool chain (empty when toolChain is off). */
+  const toolChainAllows = (cfg: ServerConfig): ((tool: string) => boolean) | null => {
+    const mode = cfg.toolChain;
+    if (mode === true) return () => true;
+    if (Array.isArray(mode) && mode.length > 0) {
+      const allowed = new Set(mode);
+      return (tool) => allowed.has(tool);
+    }
+    return null;
+  };
+
+  /** Servers this caller may script right now (visible + toolChain set). */
+  const toolChainServers = (): string[] =>
+    router.listAll().filter((n) => visible(n) && toolChainAllows(router.getConfig(n)!) !== null);
+
+  /**
+   * Bindings for one script: every visible tool-chain server. The names come from the toolChain
+   * config (an allowlist, or "*" for toolChain: true), not from what is active, so a server that
+   * is not activated yet is still callable and activates on its first call (see nestedCall).
+   */
+  const toolChainBindings = (): CodeBinding[] =>
+    toolChainServers().map((server) => {
+      const mode = router.getConfig(server)!.toolChain;
+      return { server, tools: mode === true ? "*" : [...new Set(mode as string[])] };
+    });
+
+  /**
+   * The single policy chokepoint for every script-initiated tool call: visibility, toolChain
+   * allowlist, lazy activation, then the upstream call. A refused call becomes an error value.
+   */
+  async function nestedCall(
+    server: string,
+    tool: string,
+    args: unknown,
+    timeoutMs: number
+  ): Promise<{ value: unknown; failed: boolean }> {
+    const started = Date.now();
+    const report = (ok: boolean, error?: string) =>
+      access?.onNestedCall?.({ server, tool, ok, ms: Date.now() - started, error });
+    const refuse = (message: string) => {
+      report(false, message);
+      return { value: { error: message }, failed: true };
+    };
+
+    if (!visible(server)) return refuse(`Unknown server: "${server}"`);
+    const cfg = router.getConfig(server)!;
+    const allows = toolChainAllows(cfg);
+    if (!allows) return refuse(`Server "${server}" is not enabled for tool chain`);
+    if (!allows(tool)) return refuse(`Tool "${tool}" on "${server}" is not enabled for tool chain`);
+
+    const actErr = await ensureActive(server, cfg);
+    if (actErr) {
+      const msg = actErr.content.map((c) => (c as { text?: string }).text ?? "").join("");
+      return refuse(msg || `Failed to activate "${server}"`);
+    }
+    const known = manager
+      .getAllActiveTools()
+      .some((t) => t.serverName === server && toolNameMatches(server, t.name, tool));
+    if (!known) return refuse(`Tool "${tool}" not found on server "${server}"`);
+
+    let raw: unknown;
+    try {
+      raw = await withTimeout(manager.callTool(server, tool, (args ?? {}) as Record<string, unknown>), timeoutMs);
+    } catch (err) {
+      const msg = `Error calling ${tool}: ${(err as Error).message}`;
+      report(false, msg);
+      return { value: { error: msg }, failed: true };
+    }
+    const converted = toScriptResult(raw as { content?: unknown[]; isError?: boolean });
+    report(!("failed" in converted));
+    return { value: converted.value, failed: "failed" in converted };
+  }
 
   function listTools() {
     // Gateway-only connect/disconnect stay off the list in stdio (no access.connect).
@@ -298,16 +371,31 @@ export function createBroker({
         }
         const actErr = await ensureActive(a.server, cfg);
         if (actErr) return actErr;
+        if (a.tool === undefined) {
+          // No tool named: return TypeScript stubs for the server's tool-chain tools.
+          const allows = toolChainAllows(cfg);
+          if (!allows) {
+            return fail(`Server "${a.server}" is not enabled for tool chain. Name a tool to describe it.`);
+          }
+          // Stubs cover the allowlisted tools that exist upstream (the active tool list).
+          const scoped = manager
+            .getAllActiveTools()
+            .filter((t) => t.serverName === a.server && allows(bareToolName(a.server, t.name)));
+          const stubs = serverStubs(a.server, scoped);
+          if (!stubs) return text(`No tool-chain tools on "${a.server}" (toolChain allowlist matches none).`);
+          return text(stubs);
+        }
+        const toolName = a.tool;
         const tool = manager
           .getAllActiveTools()
-          .find((t) => t.serverName === a.server && toolNameMatches(a.server, t.name, a.tool));
+          .find((t) => t.serverName === a.server && toolNameMatches(a.server, t.name, toolName));
         if (!tool) {
           const names = manager
             .getAllActiveTools()
             .filter((t) => t.serverName === a.server)
             .map((t) => t.name);
           return fail(
-            `Tool "${a.tool}" not found on server "${a.server}". ` +
+            `Tool "${toolName}" not found on server "${a.server}". ` +
               `Available: ${names.join(", ") || "(none)"}`
           );
         }
@@ -467,6 +555,26 @@ export function createBroker({
         } catch (err) {
           return fail((err as Error).message);
         }
+      }
+
+      case "run_chain": {
+        const a = parseArgs(RunChainSchema, rawArgs);
+        if (isResult(a)) return a;
+        router.reloadServersFromDisk();
+        const bindings = toolChainBindings();
+        const run = await runCode({ code: a.code, bindings, callTool: nestedCall });
+        const lines: string[] = [];
+        if (run.logs) lines.push(`Logs:\n${run.logs}`);
+        if (run.error) {
+          lines.push(`Error: ${run.error}`);
+          return fail(lines.join("\n\n"));
+        }
+        const failedNote = run.failedCalls > 0 ? ` (${run.failedCalls} nested call${run.failedCalls === 1 ? "" : "s"} failed)` : "";
+        lines.push(`Completed${failedNote}; ${run.calls} nested call${run.calls === 1 ? "" : "s"}.`);
+        lines.push(
+          `Return value: ${run.value === undefined ? "(none)" : JSON.stringify(run.value, null, 2)}`
+        );
+        return text(lines.join("\n\n"));
       }
 
       case "connect_server": {
