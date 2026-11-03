@@ -1312,16 +1312,27 @@ describe("ProcessManager", () => {
         }) as unknown as Response;
       const fetchMock = jest.fn<typeof fetch>();
       global.fetch = fetchMock as unknown as typeof fetch;
+      let resolveFetchStarted!: () => void;
+      const fetchStarted = new Promise<void>((resolve) => {
+        resolveFetchStarted = resolve;
+      });
       fetchMock
-        .mockImplementationOnce(() => initGate)
+        .mockImplementationOnce(() => {
+          resolveFetchStarted();
+          return initGate;
+        })
         .mockResolvedValueOnce(jsonResponse({})) // initialized notification
         .mockResolvedValueOnce(jsonResponse({ result: { tools: [] } })); // tools/list
 
       const pending = manager.activate("http-srv", makeHttpConfig());
       // safeFetch awaits assertSafeUrl (async DNS) before calling fetch.
-      for (let i = 0; i < 50 && fetchMock.mock.calls.length === 0; i++) {
-        await new Promise((r) => setImmediate(r));
-      }
+      let fetchStartTimer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([
+        fetchStarted,
+        new Promise<never>((_, reject) => {
+          fetchStartTimer = setTimeout(() => reject(new Error("HTTP initialize request did not start")), 2_000);
+        }),
+      ]).finally(() => clearTimeout(fetchStartTimer));
       expect(fetchMock).toHaveBeenCalledTimes(1);
 
       manager.dispose();
