@@ -1,7 +1,7 @@
 // src/gateway/audit.ts
 // Append-only JSON-lines audit log. Records who called what — never arguments, results, or secret values.
 
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from "fs";
+import { appendFileSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readSync } from "fs";
 import { createHash } from "crypto";
 import { dirname } from "path";
 
@@ -17,6 +17,8 @@ export interface AuditEvent {
   error?: string;
   /** How the call was reached: "run_chain" for tool calls made from a tool-chain script. */
   via?: string;
+  /** Peer address for security events (auth failures, denials). */
+  ip?: string;
   /** Admin UI/API mutation (e.g. token.create, secret.set, server.patch). */
   action?: string;
   /** Resource id (token id, secret path, server/skill name). */
@@ -32,16 +34,39 @@ export function auditHash(value: unknown): string {
   return createHash("sha256").update(JSON.stringify(value ?? null)).digest("hex").slice(0, 16);
 }
 
+/** `tail` never reads more than this many bytes from the end of the log. */
+export const TAIL_BYTES = 1024 * 1024;
+
 export class AuditLog {
   constructor(private readonly path: string | null) {
     if (path) mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   }
 
-  /** Most recent events first; optionally only one user's. Reads the whole file — fine for a POC. */
+  /** Most recent events first; optionally only one user's. Reads at most the last TAIL_BYTES of the file. */
   tail(limit: number, user?: string): Array<AuditEvent & { ts: string }> {
     if (!this.path || !existsSync(this.path)) return [];
     const out: Array<AuditEvent & { ts: string }> = [];
-    const lines = readFileSync(this.path, "utf-8").split("\n");
+    let text: string;
+    let truncated = false;
+    const fd = openSync(this.path, "r");
+    try {
+      const size = fstatSync(fd).size;
+      const len = Math.min(size, TAIL_BYTES);
+      const buf = Buffer.alloc(len);
+      let read = 0;
+      while (read < len) {
+        const n = readSync(fd, buf, read, len - read, size - len + read);
+        if (n <= 0) break;
+        read += n;
+      }
+      truncated = size > len;
+      text = buf.subarray(0, read).toString("utf-8");
+    } finally {
+      closeSync(fd);
+    }
+    const lines = text.split("\n");
+    // When we started mid-file the first line is probably partial.
+    if (truncated) lines.shift();
     for (let i = lines.length - 1; i >= 0 && out.length < limit; i--) {
       if (!lines[i]) continue;
       try {
@@ -61,6 +86,33 @@ export class AuditLog {
     } catch (err) {
       console.error(`[lazygate] audit write failed: ${(err as Error).message}`);
     }
+  }
+
+  /**
+   * Record a security-relevant event (failed auth, denial, session mismatch, session start).
+   * `ip` is the peer address; never pass token values.
+   */
+  recordSecurity(opts: {
+    user?: string;
+    action: string;
+    surface: "mcp" | "ui";
+    ip?: string;
+    ok: boolean;
+    session?: string;
+    target?: string;
+    error?: string;
+  }): void {
+    this.record({
+      user: opts.user ?? "-",
+      session: opts.session ?? opts.surface,
+      tool: opts.action,
+      action: opts.action,
+      target: opts.target,
+      ip: opts.ip,
+      ok: opts.ok,
+      ms: 0,
+      error: opts.error,
+    });
   }
 
   /**

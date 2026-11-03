@@ -3,6 +3,7 @@
 
 import { jest, describe, it, expect, beforeAll, afterAll, beforeEach } from "@jest/globals";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync, statSync, existsSync } from "fs";
+import { createDecipheriv } from "crypto";
 import { tmpdir } from "os";
 import { join } from "path";
 import { createServer, type Server } from "http";
@@ -50,6 +51,19 @@ if (!home.startsWith(tmpdir())) throw new Error("test home not isolated");
 const SERVER_URL = "https://mcp.example.com/mcp";
 const tokenDir = join(home, ".config", "lazygate", "tokens");
 const tokenFile = (n: string) => join(tokenDir, `${n}.json`);
+
+// Token files are sealed (AES-256-GCM). Pin the key via LAZYGATE_VAULT_KEY so the module and this
+// helper agree even after beforeEach clears the config directory (the module caches its key).
+const TEST_TOKEN_KEY = Buffer.alloc(32, 7);
+process.env.LAZYGATE_VAULT_KEY = TEST_TOKEN_KEY.toString("base64");
+const tokenKey = () => TEST_TOKEN_KEY;
+const openSealedToken = (path: string, serverName: string): Record<string, unknown> => {
+  const env = JSON.parse(readFileSync(path, "utf-8")) as { iv: string; tag: string; ct: string };
+  const d = createDecipheriv("aes-256-gcm", tokenKey(), Buffer.from(env.iv, "base64url"));
+  d.setAAD(Buffer.from(`(shared)\0${serverName}`));
+  d.setAuthTag(Buffer.from(env.tag, "base64url"));
+  return JSON.parse(Buffer.concat([d.update(Buffer.from(env.ct, "base64url")), d.final()]).toString("utf-8"));
+};
 
 let as: Server;
 const tokenRequests: URLSearchParams[] = [];
@@ -206,8 +220,10 @@ describe("getAccessToken", () => {
       expect(statSync(tokenFile("srv")).mode & 0o777).toBe(0o600);
       expect(statSync(tokenDir).mode & 0o777).toBe(0o700);
     }
-    const saved = JSON.parse(readFileSync(tokenFile("srv"), "utf-8"));
+    const saved = openSealedToken(tokenFile("srv"), "srv");
     expect(saved.resource).toBe(SERVER_URL);
+    // The file on disk must not contain the plaintext token.
+    expect(readFileSync(tokenFile("srv"), "utf-8")).not.toContain("access_token");
   });
 
   it("force=true skips the cached access token and refreshes instead", async () => {
@@ -265,7 +281,8 @@ describe("getAccessToken", () => {
       return [{ url: ok, expectStatus: 200 }];
     });
     await getAccessToken("../../escape", SERVER_URL, { clientId: "pre" });
-    expect(existsSync(join(home, ".config", "lazygate", "tokens", ".._.._escape.json"))).toBe(true);
+    // Separators and dots are percent-encoded, so the name stays inside the token directory.
+    expect(existsSync(join(home, ".config", "lazygate", "tokens", "%2e%2e%2f%2e%2e%2fescape.json"))).toBe(true);
     expect(existsSync(join(home, "escape.json"))).toBe(false);
   });
 });

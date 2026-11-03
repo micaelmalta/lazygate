@@ -2,7 +2,7 @@
 // Scores and loads relevant skills based on a query.
 // Also lists/reads bundled skill files for remote clients (skill:// URIs).
 
-import { readFileSync, existsSync, readdirSync, statSync } from "fs";
+import { readFileSync, existsSync, readdirSync, realpathSync, statSync } from "fs";
 import { dirname, join, relative, resolve, sep } from "path";
 import { parseSkillsConfig, reportConfigErrors } from "./config.js";
 import { scoreEntry } from "./scoring.js";
@@ -53,6 +53,11 @@ export interface SkillPromptContext {
   timeoutMs?: number;
   /** If the fetch fails, inject an error note instead of failing the prompt. */
   optional?: boolean;
+  /**
+   * Opt in to private / link-local targets (RFC 1918, ULA, CGNAT, 169.254/16 except the cloud
+   * metadata address) for this fetch. Default false: only public hosts (or loopback http).
+   */
+  allowPrivate?: boolean;
 }
 
 export interface SkillPromptConfig {
@@ -229,6 +234,15 @@ export function resolveSkillFilePath(root: string, relPath: string): string {
   const prefix = rootAbs.endsWith(sep) ? rootAbs : rootAbs + sep;
   if (abs !== rootAbs && !abs.startsWith(prefix)) {
     throw new Error(`Skill file path escapes skill directory: "${relPath}"`);
+  }
+  // Lexical checks pass for symlinks; resolve the real path and require it to stay inside the root.
+  if (existsSync(abs)) {
+    const realRoot = realpathSync(rootAbs);
+    const realAbs = realpathSync(abs);
+    const realPrefix = realRoot.endsWith(sep) ? realRoot : realRoot + sep;
+    if (realAbs !== realRoot && !realAbs.startsWith(realPrefix)) {
+      throw new Error(`Skill file path escapes skill directory via symlink: "${relPath}"`);
+    }
   }
   return abs;
 }

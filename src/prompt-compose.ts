@@ -2,7 +2,7 @@
 // Compose skill bodies into MCP prompts: argument defaults, {{arg}} / {{context.name}}
 // substitution, and optional SSRF-checked context fetches (admin-configured URLs).
 
-import { assertSafeUrl, UnsafeUrlError, safeFetch } from "./ssrf.js";
+import { pinnedFetch } from "./ssrf.js";
 import type { SkillConfig, SkillPromptArgument, SkillPromptContext } from "./skill-router.js";
 
 /** Soft cap on each context response body (UTF-8 bytes). */
@@ -29,11 +29,6 @@ export interface ComposePromptOptions {
   secrets?: SecretLookup;
   /** Max bytes kept from each context response. */
   contextMaxBytes?: number;
-  /**
-   * When true (gateway default for admin-configured URLs), allow private/link-local
-   * targets the same way ProcessManager does for MCP HTTP hosts. Redirects stay manual.
-   */
-  allowPrivateUrls?: boolean;
 }
 
 export interface ComposePromptResult {
@@ -109,20 +104,17 @@ async function fetchConfiguredUrl(
   allowPrivate: boolean
 ): Promise<Response> {
   const signal = AbortSignal.timeout(timeoutMs);
-  const withSignal = { ...init, signal, redirect: "manual" as const };
-  try {
-    await assertSafeUrl(url);
-    return await safeFetch(url, withSignal);
-  } catch (err) {
-    if (
-      allowPrivate &&
-      err instanceof UnsafeUrlError &&
-      /private\/link-local/i.test(err.message)
-    ) {
-      return fetch(url, withSignal);
-    }
-    throw err;
-  }
+  // pinnedFetch validates the DNS answer and connects to that exact address (no second lookup).
+  return pinnedFetch(
+    url,
+    {
+      method: init.method,
+      headers: init.headers as Record<string, string> | undefined,
+      body: typeof init.body === "string" ? init.body : undefined,
+      signal,
+    },
+    { allowPrivate }
+  );
 }
 
 function formatContextBody(raw: string, asJson: boolean, maxBytes: number): string {
@@ -141,6 +133,41 @@ function formatContextBody(raw: string, asJson: boolean, maxBytes: number): stri
   }
 }
 
+/**
+ * Argument values come from the caller, so they must never be able to pull in a secret.
+ * Refuse any value containing a secret or credential template.
+ */
+function assertArgsHaveNoTemplates(args: Record<string, string>): void {
+  for (const [key, value] of Object.entries(args)) {
+    if (/\$\{(secret|cred):/.test(value)) {
+      throw new Error(`Prompt argument "${key}" may not contain \${secret:…} or \${cred:…} templates`);
+    }
+  }
+}
+
+/**
+ * Render one admin-authored template: secrets are expanded from the template itself first, then
+ * caller arguments are substituted with encoding appropriate to where they land (URL query/path
+ * component, or header/body text with control characters stripped). Expanding secrets before
+ * substitution means a caller can never inject a `${secret:…}` reference.
+ */
+function renderContextTemplate(
+  template: string,
+  argVars: Record<string, string>,
+  secrets: SecretLookup | undefined,
+  usedSecrets: string[],
+  encode: (value: string) => string
+): string {
+  const withSecrets = expandSecrets(template, secrets, usedSecrets);
+  return withSecrets.replace(PLACEHOLDER, (_, key: string) => {
+    if (!Object.prototype.hasOwnProperty.call(argVars, key)) return "";
+    return encode(argVars[key]!);
+  });
+}
+
+const encodeUrlPart = (v: string): string => encodeURIComponent(v);
+const encodeHeaderOrBody = (v: string): string => v.replace(/[\r\n\0]/g, "");
+
 async function fetchContext(
   ctx: SkillPromptContext,
   argVars: Record<string, string>,
@@ -150,21 +177,26 @@ async function fetchContext(
   const maxBytes = opts.contextMaxBytes ?? DEFAULT_CONTEXT_MAX_BYTES;
   const timeoutMs = ctx.timeoutMs ?? DEFAULT_CONTEXT_TIMEOUT_MS;
   const method = (ctx.method ?? "GET").toUpperCase();
-  const url = expandSecrets(renderTemplate(ctx.url, argVars), opts.secrets, usedSecrets);
+  assertArgsHaveNoTemplates(argVars);
+  // The URL must have an admin-fixed scheme and host; arguments only fill path/query values.
+  if (!/^https?:\/\/[^{}$]/i.test(ctx.url)) {
+    throw new Error(`Context "${ctx.name}" URL must start with a literal http(s):// host`);
+  }
+  const url = renderContextTemplate(ctx.url, argVars, opts.secrets, usedSecrets, encodeUrlPart);
   const headers: Record<string, string> = {};
   for (const [k, v] of Object.entries(ctx.headers ?? {})) {
-    headers[k] = expandSecrets(renderTemplate(v, argVars), opts.secrets, usedSecrets);
+    headers[k] = renderContextTemplate(v, argVars, opts.secrets, usedSecrets, encodeHeaderOrBody);
   }
   let body: string | undefined;
   if (ctx.body !== undefined && method !== "GET" && method !== "HEAD") {
-    body = expandSecrets(renderTemplate(ctx.body, argVars), opts.secrets, usedSecrets);
+    body = renderContextTemplate(ctx.body, argVars, opts.secrets, usedSecrets, encodeHeaderOrBody);
   }
 
   const res = await fetchConfiguredUrl(
     url,
     { method, headers, body },
     timeoutMs,
-    opts.allowPrivateUrls === true
+    ctx.allowPrivate === true
   );
   const raw = await res.text();
   if (!res.ok) {

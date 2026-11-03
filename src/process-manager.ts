@@ -3,6 +3,10 @@
 
 import { createHash } from "crypto";
 import { spawn, ChildProcess } from "child_process";
+import { mkdtempSync, realpathSync, rmSync } from "fs";
+import { tmpdir } from "os";
+import { join, relative, isAbsolute } from "path";
+import { configDir } from "./paths.js";
 import { ServerConfig, OAuthConfig, effectiveAuthScope } from "./router.js";
 import { getAccessToken } from "./oauth.js";
 import { VERSION, LOG_PREFIX } from "./version.js";
@@ -202,6 +206,14 @@ export interface MCPTool {
   name: string;
   description: string;
   inputSchema: Record<string, unknown>;
+  /** Upstream MCP tool annotations (hints only — untrusted, but surfaced to the caller). */
+  annotations?: {
+    title?: string;
+    readOnlyHint?: boolean;
+    destructiveHint?: boolean;
+    idempotentHint?: boolean;
+    openWorldHint?: boolean;
+  };
   serverName: string; // track which server owns this tool
 }
 
@@ -248,6 +260,24 @@ export interface ProcessManagerOptions {
    * `0` means unlimited. Excess servers are LRU-evicted after activate.
    */
   maxActiveTools?: number;
+  /**
+   * Gateway: when false, stdio servers are refused. Multi-tenant gateway children share the
+   * gateway's OS user and filesystem (plaintext OAuth tokens, secrets.json), so they stay off
+   * unless the operator explicitly opts in. Stdio mode leaves this unset (allowed).
+   */
+  allowStdio?: boolean;
+  /**
+   * Gateway: run stdio children in a per-manager scratch directory (mkdtemp, removed on
+   * `dispose()`) instead of the gateway's cwd. Never the config dir. This limits accidental
+   * file access only; it is not isolation.
+   */
+  scratchCwd?: boolean;
+  /**
+   * Command prefix that runs every stdio child inside an operator-provided sandbox, e.g.
+   * `["docker","run","--rm","-i","--network=none","node:24-slim"]` or `["bwrap", ...]`.
+   * The real command and args are appended. Parsed from LAZYGATE_STDIO_WRAPPER (JSON array).
+   */
+  stdioWrapper?: readonly string[];
   /**
    * Gateway: receive secret values (runtime credentials, resolved env/headers) so a
    * session redactor can scrub them from tool results and logs.
@@ -317,6 +347,10 @@ export class ProcessManager {
   private readonly oauthInteractive: boolean;
   private readonly defaultInheritEnv?: boolean | string[];
   private readonly stdioCommandAllowlist?: readonly string[];
+  private readonly allowStdio: boolean;
+  private readonly scratchCwd: boolean;
+  private readonly stdioWrapper: readonly string[];
+  private scratchDir: string | undefined;
   private readonly idleTtlMs: number;
   private readonly maxActiveServers: number;
   private readonly maxActiveTools: number;
@@ -332,6 +366,9 @@ export class ProcessManager {
     this.reserved = new Set(opts.reservedToolNames ?? []);
     this.defaultInheritEnv = opts.defaultInheritEnv;
     this.stdioCommandAllowlist = opts.stdioCommandAllowlist;
+    this.allowStdio = opts.allowStdio !== false;
+    this.scratchCwd = opts.scratchCwd === true;
+    this.stdioWrapper = opts.stdioWrapper ?? [];
     this.idleTtlMs = opts.idleTtlMs ?? DEFAULT_IDLE_TTL_MS;
     this.maxActiveServers = opts.maxActiveServers ?? DEFAULT_MAX_ACTIVE_SERVERS;
     this.maxActiveTools = opts.maxActiveTools ?? DEFAULT_MAX_ACTIVE_TOOLS;
@@ -503,6 +540,37 @@ export class ProcessManager {
       this.disposeChild(child, reason);
     }
     this.pendingStdio.clear();
+    if (this.scratchDir) {
+      try {
+        rmSync(this.scratchDir, { recursive: true, force: true });
+      } catch {
+        /* best effort */
+      }
+      this.scratchDir = undefined;
+    }
+  }
+
+  /** Working directory of the per-manager scratch dir (created lazily); undefined when disabled. */
+  scratchDirectory(): string | undefined {
+    if (!this.scratchCwd) return undefined;
+    if (!this.scratchDir) {
+      const dir = mkdtempSync(join(tmpdir(), "lazygate-session-"));
+      const real = realpathSync(dir);
+      let cfgReal = configDir();
+      try {
+        cfgReal = realpathSync(cfgReal);
+      } catch {
+        /* config dir may not exist yet */
+      }
+      const rel = relative(cfgReal, real);
+      // mkdtemp lives under the OS temp dir; refuse if that ever resolves inside the config dir.
+      if (rel === "" || (!rel.startsWith("..") && !isAbsolute(rel))) {
+        rmSync(dir, { recursive: true, force: true });
+        throw new Error("Refusing to use a scratch directory inside the lazygate config directory");
+      }
+      this.scratchDir = real;
+    }
+    return this.scratchDir;
   }
 
   private async doActivate(
@@ -542,6 +610,12 @@ export class ProcessManager {
     if (!config.command) {
       throw new Error(`Server "${name}" has no command or url configured`);
     }
+    if (!this.allowStdio) {
+      throw new Error(
+        `Server "${name}" is a stdio server, which is disabled in gateway mode ` +
+          `(children share the gateway's filesystem). Use an HTTP server, or set LAZYGATE_GATEWAY_ALLOW_STDIO=1 to accept this risk.`
+      );
+    }
     assertStdioCommandAllowed(config.command, this.stdioCommandAllowlist);
 
     this.assertNotDisposed();
@@ -549,7 +623,12 @@ export class ProcessManager {
 
     const env = { ...this.resolveEnv(config.env ?? {}, name), ...(runtime?.env ?? {}) };
     this.reportSecrets(config.env, env, runtime?.env);
-    const child = spawn(config.command, config.args ?? [], {
+    // Operator-provided sandbox (docker/bwrap/nsjail/sudo -u): the wrapper runs the real command.
+    const [spawnCmd, ...spawnArgs] = this.stdioWrapper.length
+      ? [...this.stdioWrapper, config.command, ...(config.args ?? [])]
+      : [config.command, ...(config.args ?? [])];
+    const child = spawn(spawnCmd, spawnArgs, {
+      cwd: this.scratchDirectory(),
       env: buildChildEnv(process.env, this.effectiveInheritEnv(config), env),
     }) as ChildProcess;
 
@@ -1217,7 +1296,7 @@ export class ProcessManager {
     }
 
     type ToolsListResult = {
-      tools: Array<{ name: string; description: string; inputSchema: Record<string, unknown> }>;
+      tools: Array<{ name: string; description: string; inputSchema: Record<string, unknown>; annotations?: MCPTool["annotations"] }>;
       nextCursor?: string;
     };
 
@@ -1283,7 +1362,7 @@ export class ProcessManager {
     timeoutMs: number
   ): Promise<MCPTool[]> {
     type ToolsListResult = {
-      tools: Array<{ name: string; description: string; inputSchema: Record<string, unknown> }>;
+      tools: Array<{ name: string; description: string; inputSchema: Record<string, unknown>; annotations?: MCPTool["annotations"] }>;
       nextCursor?: string;
     };
 
