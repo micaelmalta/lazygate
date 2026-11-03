@@ -11,6 +11,7 @@ import { UserProfileStore } from "./profile.js";
 import { TokenStore, parseDuration } from "./tokens.js";
 import { AuditLog } from "./audit.js";
 import { startGateway } from "./server.js";
+import { hardenGatewayDirs } from "./hardening.js";
 import { parseStdioCommandAllowlist } from "../stdio-policy.js";
 
 function flag(args: string[], name: string): string | undefined {
@@ -50,6 +51,9 @@ async function serve(args: string[]): Promise<void> {
     );
   }
 
+  for (const p of hardenGatewayDirs(configDir(), dir)) {
+    console.error(`${LOG_PREFIX} tightened permissions on ${p}`);
+  }
   const tokens = new TokenStore(dir);
   if (tokens.count() === 0) {
     throw new Error("No access tokens yet. Create one first:  lazygate token create --user <you> [--groups eng,sre]");
@@ -92,6 +96,12 @@ async function serve(args: string[]): Promise<void> {
     );
   }
   if (!LOOPBACK.has(host)) console.error(`${LOG_PREFIX} warning: listening on ${host} without TLS`);
+  if (process.env.LAZYGATE_GATEWAY_ALLOW_STDIO === "1") {
+    console.error(
+      `${LOG_PREFIX} warning: LAZYGATE_GATEWAY_ALLOW_STDIO=1 — stdio children run as the gateway's OS user ` +
+        `(scratch cwd only, NOT isolation). Do not use for untrusted tenants; use containers instead.`
+    );
+  }
   if (stdioCommandAllowlist?.length) {
     console.error(`${LOG_PREFIX} stdio command allowlist: ${stdioCommandAllowlist.join(", ")}`);
   }

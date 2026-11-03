@@ -4,6 +4,8 @@
 
 import { lookup } from "dns/promises";
 import { isIP } from "net";
+import http from "http";
+import https from "https";
 
 export class UnsafeUrlError extends Error {
   constructor(message: string) {
@@ -58,12 +60,32 @@ export function isLoopbackHostname(hostname: string): boolean {
   return h === "localhost" || h === "127.0.0.1" || h === "::1";
 }
 
+export interface SafeUrlOptions {
+  /**
+   * Allow https targets that resolve to private (RFC 1918 / ULA / CGNAT) or link-local
+   * addresses. Cloud metadata (169.254.0.0/16, fe80::/10) stays blocked unless this is set,
+   * and 169.254.169.254 / fd00:ec2::254 stay blocked always.
+   */
+  allowPrivate?: boolean;
+}
+
+export interface ResolvedTarget {
+  url: URL;
+  /** The address the connection must use (DNS answer already validated). */
+  address: string;
+  family: 4 | 6;
+}
+
+const ALWAYS_BLOCKED = new Set(["169.254.169.254", "fd00:ec2::254"]);
+
 /**
- * Parse and validate a URL for outbound fetch.
+ * Parse, resolve and validate a URL for outbound fetch.
  * - Prefer https; http only for loopback hostnames.
- * - After DNS, block private/link-local unless the hostname was already loopback.
+ * - After DNS, block private/link-local unless the hostname was already loopback
+ *   (or `allowPrivate` is set for that caller).
+ * Returns the validated address so the caller can pin the connection to it.
  */
-export async function assertSafeUrl(urlString: string): Promise<URL> {
+export async function resolveSafeUrl(urlString: string, opts: SafeUrlOptions = {}): Promise<ResolvedTarget> {
   let url: URL;
   try {
     url = new URL(urlString);
@@ -91,18 +113,30 @@ export async function assertSafeUrl(urlString: string): Promise<URL> {
       throw new UnsafeUrlError(`DNS lookup failed for ${host}: ${(err as Error).message}`);
     }
   }
+  const family = isIP(address) === 6 ? 6 : 4;
 
   if (loopbackHost) {
     if (!isLoopbackAddress(address)) {
       throw new UnsafeUrlError(`Loopback host ${host} resolved to non-loopback ${address}`);
     }
-    return url;
+    return { url, address, family };
   }
 
-  if (isLoopbackAddress(address) || isPrivateOrLinkLocal(address)) {
+  const bare = normalizeIp(ipv4Mapped(address) ?? address);
+  if (ALWAYS_BLOCKED.has(bare)) {
     throw new UnsafeUrlError(`Refusing URL resolving to private/link-local address (${address})`);
   }
-  return url;
+  if (isLoopbackAddress(address)) {
+    throw new UnsafeUrlError(`Refusing URL resolving to private/link-local address (${address})`);
+  }
+  if (isPrivateOrLinkLocal(address) && !opts.allowPrivate) {
+    throw new UnsafeUrlError(`Refusing URL resolving to private/link-local address (${address})`);
+  }
+  return { url, address, family };
+}
+
+export async function assertSafeUrl(urlString: string, opts: SafeUrlOptions = {}): Promise<URL> {
+  return (await resolveSafeUrl(urlString, opts)).url;
 }
 
 /**
@@ -146,4 +180,68 @@ export async function safeFetch(input: string | URL, init?: RequestInit): Promis
   const href = typeof input === "string" ? input : input.href;
   await assertSafeUrl(href);
   return fetch(href, { ...init, redirect: "manual" });
+}
+
+const PINNED_MAX_BYTES = 4 * 1024 * 1024;
+
+/**
+ * fetch-like request that connects to the address validated by {@link resolveSafeUrl} instead of
+ * resolving the hostname a second time (closes the DNS-rebinding window). The Host header and
+ * TLS SNI/certificate checks still use the original hostname. Redirects are never followed.
+ */
+export async function pinnedFetch(
+  urlString: string,
+  init: { method?: string; headers?: Record<string, string>; body?: string; signal?: AbortSignal } = {},
+  opts: SafeUrlOptions = {}
+): Promise<Response> {
+  const target = await resolveSafeUrl(urlString, opts);
+  const { url, address, family } = target;
+  const mod = url.protocol === "https:" ? https : http;
+  const hostname = url.hostname.replace(/^\[|\]$/g, "");
+
+  return new Promise<Response>((resolve, reject) => {
+    const req = mod.request(
+      {
+        protocol: url.protocol,
+        hostname,
+        port: url.port || undefined,
+        path: `${url.pathname}${url.search}`,
+        method: init.method ?? "GET",
+        headers: init.headers,
+        signal: init.signal,
+        // Pin: every connection attempt uses the validated address.
+        lookup: ((_host: string, options: { all?: boolean }, cb: (...args: unknown[]) => void) => {
+          if (options?.all) cb(null, [{ address, family }]);
+          else cb(null, address, family);
+        }) as never,
+        ...(url.protocol === "https:" && !isIP(hostname) ? { servername: hostname } : {}),
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+        let size = 0;
+        res.on("data", (c: Buffer) => {
+          size += c.length;
+          if (size > PINNED_MAX_BYTES) {
+            req.destroy(new Error("Response body too large"));
+            return;
+          }
+          chunks.push(c);
+        });
+        res.on("error", reject);
+        res.on("end", () => {
+          const status = res.statusCode ?? 0;
+          const headers = new Headers();
+          for (const [k, v] of Object.entries(res.headers)) {
+            if (Array.isArray(v)) v.forEach((x) => headers.append(k, x));
+            else if (v !== undefined) headers.set(k, v);
+          }
+          const noBody = status === 204 || status === 205 || status === 304 || (status >= 100 && status < 200);
+          resolve(new Response(noBody ? null : Buffer.concat(chunks), { status: status < 200 ? 200 : status, headers }));
+        });
+      }
+    );
+    req.on("error", reject);
+    if (init.body !== undefined) req.write(init.body);
+    req.end();
+  });
 }

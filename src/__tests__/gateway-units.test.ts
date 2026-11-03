@@ -330,8 +330,9 @@ describe("per-user OAuth token paths", () => {
     const base = "/t";
     expect(tokenPath("github", undefined, base)).toBe("/t/github.json");
     expect(tokenPath("github", "alice", base)).toBe("/t/users/alice/github.json");
-    expect(tokenPath("github", "../../etc", base)).toBe("/t/users/.._.._etc/github.json");
-    expect(tokenPath("../x", "alice", base)).toBe("/t/users/alice/.._x.json");
+    // Dots and separators are percent-encoded so a name can never leave the token directory.
+    expect(tokenPath("github", "../../etc", base)).toBe("/t/users/%2e%2e%2f%2e%2e%2fetc/github.json");
+    expect(tokenPath("../x", "alice", base)).toBe("/t/users/alice/%2e%2e%2fx.json");
   });
 });
 

@@ -6,6 +6,7 @@ import { resolve } from "path";
 import { ToolRouter, type ServerConfig } from "./router.js";
 import { SkillRouter } from "./skill-router.js";
 import { ToolIndex } from "./tool-index.js";
+import { SkillHashStore } from "./skill-hashes.js";
 import { parseServersConfig, parseSkillsConfig, reportConfigErrors } from "./config.js";
 import { configDir } from "./paths.js";
 import { LOG_PREFIX } from "./version.js";
@@ -14,6 +15,8 @@ export interface Registry {
   router: ToolRouter;
   skillRouter: SkillRouter;
   toolIndex: ToolIndex;
+  /** Per-skill content hashes (skills-hashes.json in the config dir). */
+  skillHashes: SkillHashStore;
   serverConfigs: Record<string, ServerConfig>;
   /** Absolute path used for servers.json reads/writes (may not exist yet). */
   configPath: string;
@@ -79,5 +82,7 @@ export function loadRegistry(argv: string[], dir: string = configDir()): Registr
 
   const skillRouter = new SkillRouter(skillEntries, skillsConfigPath);
 
-  return { router, skillRouter, toolIndex, serverConfigs, configPath, skillsConfigPath, configDir: dir };
+  const skillHashes = new SkillHashStore(resolve(dir, "skills-hashes.json"));
+
+  return { router, skillRouter, toolIndex, skillHashes, serverConfigs, configPath, skillsConfigPath, configDir: dir };
 }

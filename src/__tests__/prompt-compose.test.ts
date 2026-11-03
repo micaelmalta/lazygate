@@ -124,7 +124,6 @@ describe("composePrompt", () => {
       }),
       args: { service_name: "billing" },
       secrets: { get: (p) => (p === "api" ? "tok" : undefined) },
-      allowPrivateUrls: true,
     });
     expect(r.text).toContain("Service billing");
     expect(r.text).toContain('"health": "ok"');
@@ -152,7 +151,6 @@ describe("composePrompt", () => {
           ],
         },
       }),
-      allowPrivateUrls: true,
     });
     expect(r.text).toMatch(/^ctx=\(unavailable:.*HTTP 503/);
   });
@@ -172,7 +170,6 @@ describe("composePrompt", () => {
             context: [{ name: "status", url: `http://127.0.0.1:${srv.port}/x` }],
           },
         }),
-        allowPrivateUrls: true,
       })
     ).rejects.toThrow(/HTTP 500/);
   });

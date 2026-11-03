@@ -10,6 +10,12 @@ import { createRequire } from "module";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
+// These suites drive stdio fixture servers through the gateway. Stdio is refused in gateway mode
+// by default (R2); opt in for this file only, the same way an operator would.
+const PRIOR_ALLOW_STDIO = process.env.LAZYGATE_GATEWAY_ALLOW_STDIO;
+process.env.LAZYGATE_GATEWAY_ALLOW_STDIO = "1";
+
+
 const home = mkdtempSync(join(tmpdir(), "lzg-goa-"));
 const realOs = createRequire(import.meta.url)("os") as typeof import("os");
 jest.unstable_mockModule("os", () => ({
@@ -125,6 +131,8 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  if (PRIOR_ALLOW_STDIO === undefined) delete process.env.LAZYGATE_GATEWAY_ALLOW_STDIO;
+  else process.env.LAZYGATE_GATEWAY_ALLOW_STDIO = PRIOR_ALLOW_STDIO;
   await Promise.all(clients.map((c) => c.close().catch(() => undefined)));
   await gw.close();
   await new Promise<void>((r) => as.close(() => r()));

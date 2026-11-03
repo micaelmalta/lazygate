@@ -27,6 +27,7 @@ import { UserVault } from "./vault.js";
 import { UserProfileStore } from "./profile.js";
 import { AuditLog } from "./audit.js";
 import { readBody, sendJson } from "./http-util.js";
+import { AuthFailureLimiter, clientKey } from "./rate-limit.js";
 import { UI_HTML, UI_JS, UI_CSS } from "./ui-assets.js";
 import { warmSharedToolIndex } from "./tool-index-warm.js";
 import { renameStoredServer } from "../oauth.js";
@@ -43,6 +44,21 @@ export function isCommandAllowed(command: string, env: NodeJS.ProcessEnv = proce
   const list = parseStdioCommandAllowlist(env);
   if (!list) return false; // UI: unset = CLI-only (activation policy differs — see stdio-policy.ts)
   return isStdioCommandAllowed(command, list);
+}
+
+/**
+ * Env keys that change how a launched program loads code or resolves binaries. Setting any of
+ * these from the UI would turn an allowlisted command into arbitrary code execution.
+ */
+const CODE_LOADING_ENV = /^(NODE_OPTIONS|NODE_PATH|NODE_EXTRA_CA_CERTS|LD_.*|DYLD_.*|PYTHON.*|PERL5.*|RUBYOPT|RUBYLIB|BASH_ENV|ENV|PATH|IFS|PS4|PROMPT_COMMAND|GIT_SSH.*|GIT_EXEC_PATH|NPM_CONFIG_.*|NPM_TOKEN|CLASSPATH|JAVA_TOOL_OPTIONS|_JAVA_OPTIONS|GCONV_PATH|PYTHONSTARTUP)$/i;
+
+/** Reject UI env edits that load code. Applies whenever a stdio allowlist is configured. */
+function assertUiEnvSafe(env: Record<string, string> | undefined): void {
+  if (!env || !allowedCommands()) return;
+  const bad = Object.keys(env).filter((k) => CODE_LOADING_ENV.test(k));
+  if (bad.length) {
+    throw new HttpError(403, `Env var(s) ${bad.join(", ")} can load code into a child process and cannot be set from the UI`);
+  }
 }
 
 function assertUiCommand(command: string): void {
@@ -83,6 +99,8 @@ export interface UiContext {
   notifyPromptCatalogChanged?: () => void;
   /** Passed through to admin tool-index warm (stdio allowlist). */
   stdioCommandAllowlist?: readonly string[];
+  /** Shared failed-auth limiter (per client IP). */
+  authLimiter?: AuthFailureLimiter;
 }
 
 const SECURITY_HEADERS = {
@@ -171,8 +189,18 @@ export async function handleUi(
 
   if (!path.startsWith("/ui/api/")) return sendJson(res, 404, { error: "not found" }, headers);
 
+  const ip = clientKey(req);
+  const wait = ctx.authLimiter?.retryAfterSec(ip) ?? 0;
+  if (wait > 0) {
+    ctx.audit.recordSecurity({ action: "auth.rate_limited", surface: "ui", ip, ok: false });
+    return sendJson(res, 429, { error: "too many failed attempts" }, { ...headers, "Retry-After": String(wait) });
+  }
   const user = ctx.tokens.verify(bearerToken(req.headers.authorization));
-  if (!user) return sendJson(res, 401, { error: "unauthorized" }, { ...headers, "WWW-Authenticate": 'Bearer realm="lazygate"' });
+  if (!user) {
+    ctx.authLimiter?.fail(ip);
+    ctx.audit.recordSecurity({ action: "auth.failed", surface: "ui", ip, ok: false, target: path.slice(0, 120) });
+    return sendJson(res, 401, { error: "unauthorized" }, { ...headers, "WWW-Authenticate": 'Bearer realm="lazygate"' });
+  }
 
   try {
     let body: unknown;
@@ -190,7 +218,20 @@ export async function handleUi(
     }
     sendJson(res, 200, result, headers);
   } catch (err) {
-    if (err instanceof HttpError) return sendJson(res, err.status, { error: err.message }, headers);
+    if (err instanceof HttpError) {
+      if (err.status === 403) {
+        ctx.audit.recordSecurity({
+          user: user.id,
+          action: "auth.denied",
+          surface: "ui",
+          ip,
+          ok: false,
+          target: `${req.method ?? "GET"} ${path.slice(0, 120)}`,
+          error: err.message.slice(0, 200),
+        });
+      }
+      return sendJson(res, err.status, { error: err.message }, headers);
+    }
     console.error(`[lazygate] ui request failed: ${(err as Error).message}`);
     sendJson(res, 500, { error: "internal error" }, headers);
   }
@@ -388,6 +429,20 @@ async function route(
     if (method === "POST" && seg.length === 1) return createSkill(ctx, user, asObject(body));
     if (method === "PUT" && a && seg.length === 2) return updateSkill(ctx, user, a, asObject(body));
     if (method === "DELETE" && a && seg.length === 2) return deleteSkill(ctx, user, a);
+    // Accept the skill's current body as the new baseline after an admin reviewed the change.
+    if (method === "POST" && a && b === "ack-hash" && seg.length === 3) {
+      ctx.registry.skillRouter.reloadFromDisk();
+      if (!ctx.registry.skillRouter.getConfig(a)) throw new HttpError(404, "No such skill");
+      let body: string;
+      try {
+        body = ctx.registry.skillRouter.load(a, { maxBytes: 0 });
+      } catch (e) {
+        throw new HttpError(400, (e as Error).message);
+      }
+      ctx.registry.skillHashes.acknowledge(a, body);
+      ctx.audit.recordAdmin({ user: user.id, action: "skill.ack-hash", target: a });
+      return { acknowledged: true, name: a };
+    }
   }
 
   throw new HttpError(404, "not found");
@@ -504,6 +559,12 @@ function catalogSkills(ctx: UiContext, user: UserIdentity): unknown {
       if (c.disabled && !user.admin) return [];
       const instructionsPath = c.path.replace(/SKILL\.md$/, "INSTRUCTIONS.md");
       const available = existsSync(instructionsPath) || existsSync(c.path);
+      let changed = false;
+      try {
+        changed = ctx.registry.skillHashes.peek(name, skills.load(name, { maxBytes: 0 })).changed;
+      } catch {
+        /* unreadable skill: not "changed" */
+      }
       return [
         {
           name,
@@ -513,6 +574,8 @@ function catalogSkills(ctx: UiContext, user: UserIdentity): unknown {
           plugin: c.plugin ?? null,
           migratedFrom: c.migratedFrom ?? null,
           available,
+          /** Body hash differs from the first one seen (review before trusting). */
+          changed,
           disabled: Boolean(c.disabled),
           groups: c.groups ?? [],
           installed: ctx.profiles.isSkillInstalled(user.id, name),
@@ -669,7 +732,11 @@ function createServer(ctx: UiContext, user: UserIdentity, body: Record<string, u
     assertUiCommand(command);
     entry.command = command;
     if (Array.isArray(body.args)) entry.args = body.args.map((x) => String(x));
-    if (body.env && typeof body.env === "object") entry.env = stringMap(body.env, "env") ?? {};
+    if (body.env && typeof body.env === "object") {
+      const env = stringMap(body.env, "env") ?? {};
+      assertUiEnvSafe(env);
+      entry.env = env;
+    }
   }
   if (Array.isArray(body.groups)) {
     const g = stringList(body.groups);
@@ -757,6 +824,7 @@ function patchServer(ctx: UiContext, user: UserIdentity, name: string, patch: Re
   }
   if ("env" in patch) {
     const env = stringMap(patch.env, "env");
+    assertUiEnvSafe(env);
     if (env) entry.env = env;
     else delete entry.env;
   }
@@ -776,8 +844,13 @@ function patchServer(ctx: UiContext, user: UserIdentity, name: string, patch: Re
     else entry.oauth = patch.oauth;
   }
   if ("inheritEnv" in patch) {
-    if (patch.inheritEnv === null || patch.inheritEnv === undefined) delete entry.inheritEnv;
-    else entry.inheritEnv = patch.inheritEnv;
+    // Changing what the child inherits from the gateway's environment is a host-level decision.
+    const next = patch.inheritEnv === null || patch.inheritEnv === undefined ? undefined : patch.inheritEnv;
+    if (JSON.stringify(next ?? null) !== JSON.stringify(entry.inheritEnv ?? null) && allowedCommands()) {
+      throw new HttpError(403, "inheritEnv can only be changed on the host (edit servers.json), not from the UI");
+    }
+    if (next === undefined) delete entry.inheritEnv;
+    else entry.inheritEnv = next;
   }
   if ("toolTimeoutMs" in patch) {
     if (typeof patch.toolTimeoutMs === "number" && patch.toolTimeoutMs > 0) entry.toolTimeoutMs = patch.toolTimeoutMs;
