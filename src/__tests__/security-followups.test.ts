@@ -51,6 +51,18 @@ function listen(handler: (req: IncomingMessage, res: ServerResponse) => void) {
   });
 }
 
+function listenDualStack(handler: (req: IncomingMessage, res: ServerResponse) => void) {
+  const srv = createServer(handler);
+  return new Promise<{ port: number; close: () => Promise<void> }>((resolve) => {
+    srv.listen(0, () =>
+      resolve({
+        port: (srv.address() as AddressInfo).port,
+        close: () => new Promise((r) => srv.close(() => r())),
+      })
+    );
+  });
+}
+
 // ── M3 ────────────────────────────────────────────────────────────────────────
 
 describe("M3: AuthFailureLimiter", () => {
@@ -255,7 +267,7 @@ describe("M5: private targets are opt-in; the connection is pinned to the valida
 
   it("pinnedFetch connects to the resolved address and keeps the original Host header", async () => {
     let seenHost: string | undefined;
-    const srv = await listen((req, res) => {
+    const srv = await listenDualStack((req, res) => {
       seenHost = req.headers.host;
       res.writeHead(200, { "content-type": "text/plain" });
       res.end("pinned-ok");

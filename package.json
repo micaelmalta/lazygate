@@ -34,12 +34,17 @@
     },
     "dependencies": {
         "@modelcontextprotocol/sdk": "^1.32.2",
+        "jsonpath-plus": "^11.2.2",
+        "parse5": "^8.1.0",
         "quickjs-emscripten": "^0.32.0",
+        "turndown": "^7.2.4",
+        "turndown-plugin-gfm": "^1.0.2",
         "zod": "^4.6.7"
     },
     "devDependencies": {
         "@types/jest": "^30.0.0",
         "@types/node": "^26.6.5",
+        "@types/turndown": "^5.0.6",
         "jest": "^30.5.2",
         "ts-jest": "^29.4.15",
         "tsx": "^4.23.15",

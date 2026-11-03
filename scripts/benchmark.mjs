@@ -27,6 +27,8 @@
 //   lazygate benchmark --mcp-only | --skills-only
 //   lazygate benchmark --rounds 3
 //   lazygate benchmark --estimate   # local chars÷4 preview, no API
+//   lazygate benchmark --responses  # local JSON/HTML optimizer benchmark, no API
+//   lazygate benchmark --responses-live --cases benchmark-cases.json
 
 import { execFile, spawn } from "child_process";
 import { promisify } from "util";
@@ -119,11 +121,20 @@ const mcpOnly = has("--mcp-only");
 const skillsOnly = has("--skills-only");
 const estimateOnly = has("--estimate");
 const tasksOnly = has("--tasks");
+const responsesOnly = has("--responses");
+const liveResponsesOnly = has("--responses-live");
+const responseIterations = Number.parseInt(get("--iterations") ?? "30", 10);
+const liveResponseIterations = Number.parseInt(get("--iterations") ?? "5", 10);
+const responseCasesArg = get("--cases");
 // --tasks runs Claude with permission checks bypassed. By default it only sees the tickets fixture;
 // the user's real catalog (and its destructive tools) is loaded only with an explicit flag.
 const includeCatalog = has("--include-catalog");
 if (tasksOnly && (mcpOnly || skillsOnly)) {
   console.error("--tasks cannot be combined with --mcp-only / --skills-only.");
+  process.exit(1);
+}
+if (liveResponsesOnly && (tasksOnly || responsesOnly || mcpOnly || skillsOnly)) {
+  console.error("--responses-live cannot be combined with --tasks, --responses, --mcp-only, or --skills-only.");
   process.exit(1);
 }
 if (mcpOnly && skillsOnly) {
@@ -144,6 +155,72 @@ const estTokens = (chars) => Math.round(chars / 4);
 // ─── Paths ─────────────────────────────────────────────────────────────────
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+
+if (responsesOnly) {
+  if (!Number.isInteger(responseIterations) || responseIterations < 1 || responseIterations > 1000) {
+    console.error("--iterations must be an integer from 1 to 1000.");
+    process.exit(1);
+  }
+  const optimizerPath = resolve(__dirname, "../dist/response-optimizer.js");
+  if (!existsSync(optimizerPath)) {
+    console.error("✗ dist/response-optimizer.js not found. Run `npm run build` first.");
+    process.exit(1);
+  }
+  const { estimateTokens, optimizeToolResult } = await import(pathToFileURL(optimizerPath).href);
+  const context = { serverName: "benchmark", toolName: "response", source: "call_tool" };
+  const jsonResult = {
+    content: [],
+    structuredContent: {
+      issues: Array.from({ length: 500 }, (_, id) => ({
+        id,
+        title: `Issue ${id}`,
+        state: id % 2 ? "open" : "closed",
+        body: "A long description that is not needed by this projection. ".repeat(8),
+        metadata: { owner: `team-${id % 12}`, labels: [], optional: null },
+      })),
+    },
+  };
+  const nav = Array.from({ length: 180 }, (_, id) => `<a href="/section/${id}">Navigation section ${id}</a>`).join(" ");
+  const htmlResult = {
+    content: [{
+      type: "text",
+      text: `<html><head><style>${".hidden { display:none }".repeat(80)}</style><script>${"var tracker = 1;".repeat(120)}</script></head><body><nav>${nav}</nav><main><h1>Guide</h1><p>${"Core instructions and reference content. ".repeat(24)}</p><pre><code>Authorization: Bearer KEY</code></pre></main><footer>${"Footer navigation. ".repeat(30)}</footer></body></html>`,
+    }],
+  };
+  const smallJson = { content: [], structuredContent: { id: 17, state: "open", labels: ["bug"] } };
+  const cases = [
+    { name: "small-json-off", result: smallJson, policy: { mode: "off" } },
+    { name: "large-json-project", result: jsonResult, policy: { mode: "project", fields: ["issues.id", "issues.title", "issues.state"] } },
+    { name: "html-markdown", result: htmlResult, policy: { mode: "html_markdown" } },
+    { name: "html-reader", result: htmlResult, policy: { mode: "html_reader" } },
+  ];
+  const percentile = (values, p) => values.slice().sort((a, b) => a - b)[Math.min(values.length - 1, Math.ceil(values.length * p) - 1)];
+  const measurements = [];
+  for (const benchmark of cases) {
+    const samples = [];
+    let metrics;
+    for (let i = 0; i < responseIterations + 3; i++) {
+      const start = performance.now();
+      const optimized = await optimizeToolResult(benchmark.result, benchmark.policy, context);
+      const elapsed = performance.now() - start;
+      if (i >= 3) samples.push(elapsed);
+      metrics = optimized.metrics;
+    }
+    measurements.push({
+      workload: benchmark.name,
+      iterations: responseIterations,
+      originalTokens: estimateTokens(benchmark.result),
+      optimizedTokens: metrics.optimizedTokens,
+      savedTokens: metrics.savedTokens,
+      reductionPercent: metrics.reductionPercent,
+      medianMs: Number(percentile(samples, 0.5).toFixed(3)),
+      p95Ms: Number(percentile(samples, 0.95).toFixed(3)),
+      complete: metrics.complete,
+    });
+  }
+  console.log(JSON.stringify({ method: "local deterministic fixtures; token estimates use serialized characters / 4", measurements }, null, 2));
+  process.exit(0);
+}
 
 function resolveUnderConfig(file, explicit) {
   if (explicit) return resolve(explicit);
@@ -174,13 +251,277 @@ for (const [name, cfg] of Object.entries(allServers)) {
   if (serverSubset && !serverSubset.has(name)) continue;
   if (cfg.command) {
     servers[name] = cfg;
-  } else if (cfg.url && hasAuthHeader(cfg)) {
+  } else if (cfg.url && (hasAuthHeader(cfg) || liveResponsesOnly)) {
     servers[name] = cfg;
   } else if (cfg.url || cfg.type === "http") {
     skippedServers.push(`${name} (needs interactive OAuth)`);
   } else {
     skippedServers.push(`${name} (no command)`);
   }
+}
+
+if (liveResponsesOnly) {
+  if (!responseCasesArg) {
+    console.error("--responses-live requires --cases <json-file>.");
+    process.exit(1);
+  }
+  if (!Number.isInteger(liveResponseIterations) || liveResponseIterations < 1 || liveResponseIterations > 100) {
+    console.error("--iterations must be an integer from 1 to 100 for --responses-live.");
+    process.exit(1);
+  }
+
+  const casesPath = resolve(responseCasesArg);
+  if (!existsSync(casesPath)) {
+    console.error(`Benchmark cases file not found: ${casesPath}`);
+    process.exit(1);
+  }
+
+  const casesFile = JSON.parse(readFileSync(casesPath, "utf-8"));
+  const benchmarkCases = Array.isArray(casesFile) ? casesFile : casesFile.cases;
+  if (!Array.isArray(benchmarkCases) || benchmarkCases.length === 0) {
+    console.error("Benchmark cases must be a non-empty JSON array or an object with a non-empty `cases` array.");
+    process.exit(1);
+  }
+
+  const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
+  const { StdioClientTransport } = await import("@modelcontextprotocol/sdk/client/stdio.js");
+  const { StreamableHTTPClientTransport } = await import("@modelcontextprotocol/sdk/client/streamableHttp.js");
+  const optimizerPath = resolve(__dirname, "../dist/response-optimizer.js");
+  if (!existsSync(optimizerPath)) {
+    console.error("✗ dist/response-optimizer.js not found. Run `npm run build` first.");
+    process.exit(1);
+  }
+  const { estimateTokens, optimizeToolResult } = await import(pathToFileURL(optimizerPath).href);
+  const allowedModes = new Set(["off", "prune", "project", "jsonpath", "schema", "html_markdown", "html_reader"]);
+  const percentile = (values, p) => {
+    const sorted = values.slice().sort((a, b) => a - b);
+    return sorted[Math.min(sorted.length - 1, Math.ceil(sorted.length * p) - 1)];
+  };
+  const stats = (values) => {
+    if (!values.length) return { median: 0, p95: 0, mean: 0, stdDev: 0 };
+    const average = values.reduce((sum, value) => sum + value, 0) / values.length;
+    const variance = values.reduce((sum, value) => sum + (value - average) ** 2, 0) / values.length;
+    return {
+      median: percentile(values, 0.5),
+      p95: percentile(values, 0.95),
+      mean: average,
+      stdDev: Math.sqrt(variance),
+    };
+  };
+  const round = (value, digits = 3) => Number(value.toFixed(digits));
+  const stable = (value) => {
+    if (Array.isArray(value)) return `[${value.map(stable).join(",")}]`;
+    if (value && typeof value === "object") {
+      return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stable(value[key])}`).join(",")}}`;
+    }
+    return JSON.stringify(value);
+  };
+  const jsonPathValues = async (path, json) => {
+    const { JSONPath } = await import("jsonpath-plus");
+    return JSONPath({ path, json, wrap: true });
+  };
+  const checkPreservation = async (original, optimized, benchmarkCase) => {
+    const checks = [];
+    for (const path of benchmarkCase.preservePaths ?? []) {
+      const [before, after] = await Promise.all([
+        jsonPathValues(path, original),
+        jsonPathValues(path, optimized),
+      ]);
+      checks.push(before.length > 0 && stable(before) === stable(after));
+    }
+    const originalText = JSON.stringify(original);
+    const optimizedText = JSON.stringify(optimized);
+    for (const text of benchmarkCase.preserveText ?? []) {
+      checks.push(typeof text === "string" && text.length > 0 && originalText.includes(text) && optimizedText.includes(text));
+    }
+    return checks.length ? checks.every(Boolean) : null;
+  };
+  const connectToServer = async (name, cfg) => {
+    let transport;
+    if (cfg.command) {
+      const env = { ...process.env };
+      for (const [key, value] of Object.entries(cfg.env ?? {})) env[key] = expandVars(value);
+      transport = new StdioClientTransport({
+        command: cfg.command,
+        args: cfg.args ?? [],
+        env,
+        stderr: "inherit",
+      });
+    } else if (cfg.url && (cfg.type === "http" || hasAuthHeader(cfg))) {
+      const headers = {};
+      for (const [key, value] of Object.entries(cfg.headers ?? {})) headers[key] = expandVars(value);
+      transport = new StreamableHTTPClientTransport(new URL(cfg.url), {
+        requestInit: { headers },
+      });
+    } else {
+      throw new Error(`server ${name} is not a runnable stdio or authenticated Streamable HTTP server`);
+    }
+    const client = new Client({ name: "lazygate-benchmark", version: "1.0.0" });
+    await client.connect(transport);
+    return client;
+  };
+
+  const report = [];
+  let failed = false;
+  for (const [caseIndex, benchmarkCase] of benchmarkCases.entries()) {
+    const caseName = benchmarkCase?.name ?? `${benchmarkCase?.server ?? "unknown"}.${benchmarkCase?.tool ?? "unknown"}`;
+    if (!benchmarkCase || benchmarkCase.readOnly !== true) {
+      console.error(`Case ${caseName} must set readOnly: true; live benchmarks only run explicitly read-only cases.`);
+      process.exit(1);
+    }
+    if (typeof benchmarkCase.server !== "string" || typeof benchmarkCase.tool !== "string") {
+      console.error(`Case ${caseName} must name a configured server and tool.`);
+      process.exit(1);
+    }
+    if (!Array.isArray(benchmarkCase.preservePaths ?? []) || !Array.isArray(benchmarkCase.preserveText ?? [])) {
+      console.error(`Case ${caseName} preservePaths and preserveText must be arrays when provided.`);
+      process.exit(1);
+    }
+    if ((benchmarkCase.preservePaths?.length ?? 0) + (benchmarkCase.preserveText?.length ?? 0) === 0) {
+      console.error(`Case ${caseName} must declare preservePaths or preserveText for correctness measurement.`);
+      process.exit(1);
+    }
+
+    const cfg = servers[benchmarkCase.server];
+    if (!cfg) {
+      console.error(`Case ${caseName} names server ${benchmarkCase.server}, which is not in the selected runnable server config.`);
+      process.exit(1);
+    }
+    const policies = benchmarkCase.policies;
+    if (!Array.isArray(policies) || policies.length === 0) {
+      console.error(`Case ${caseName} must provide a non-empty policies array with an off baseline and an optimizer mode.`);
+      process.exit(1);
+    }
+    const labels = new Set();
+    for (const policy of policies) {
+      if (!policy || !allowedModes.has(policy.mode ?? "off")) {
+        console.error(`Case ${caseName} contains an invalid optimizer mode.`);
+        process.exit(1);
+      }
+      const label = policy.name ?? `${policy.mode ?? "off"}-${labels.size + 1}`;
+      if (labels.has(label)) {
+        console.error(`Case ${caseName} policy names must be unique.`);
+        process.exit(1);
+      }
+      labels.add(label);
+    }
+    if (!policies.some((policy) => (policy.mode ?? "off") === "off") || !policies.some((policy) => (policy.mode ?? "off") !== "off")) {
+      console.error(`Case ${caseName} must compare mode "off" with at least one optimizer mode.`);
+      process.exit(1);
+    }
+
+    const context = { serverName: benchmarkCase.server, toolName: benchmarkCase.tool, source: "call_tool" };
+    const measurements = new Map(policies.map((policy, index) => [policy.name ?? `${policy.mode ?? "off"}-${index + 1}`, []]));
+    let client;
+    let setupMs = 0;
+    try {
+      const setupStarted = performance.now();
+      client = await connectToServer(benchmarkCase.server, cfg);
+      let cursor;
+      let exposedTools = [];
+      do {
+        const page = await client.listTools(cursor ? { cursor } : {});
+        exposedTools = exposedTools.concat(page.tools);
+        cursor = page.nextCursor;
+      } while (cursor);
+      setupMs = performance.now() - setupStarted;
+      if (!exposedTools.some((tool) => tool.name === benchmarkCase.tool)) {
+        throw new Error(`tool ${benchmarkCase.tool} is not exposed by server ${benchmarkCase.server}`);
+      }
+      for (let iteration = 0; iteration < liveResponseIterations; iteration++) {
+        const callStarted = performance.now();
+        const original = await client.callTool({
+          name: benchmarkCase.tool,
+          arguments: benchmarkCase.args ?? {},
+        });
+        const upstreamMs = performance.now() - callStarted;
+        const originalTokens = estimateTokens(original);
+
+        for (let policyIndex = 0; policyIndex < policies.length; policyIndex++) {
+          const policySpec = policies[policyIndex];
+          const label = policySpec.name ?? `${policySpec.mode ?? "off"}-${policyIndex + 1}`;
+          const { name: _label, ...policy } = policySpec;
+          const transformStarted = performance.now();
+          const optimized = await optimizeToolResult(original, policy, context);
+          const transformMs = performance.now() - transformStarted;
+          const correctness = await checkPreservation(original, optimized.result, benchmarkCase);
+          if (correctness === false) failed = true;
+          measurements.get(label).push({
+            originalTokens,
+            optimizedTokens: estimateTokens(optimized.result),
+            savedTokens: Math.max(0, originalTokens - estimateTokens(optimized.result)),
+            reductionPercent: originalTokens ? Math.max(0, (originalTokens - estimateTokens(optimized.result)) / originalTokens * 100) : 0,
+            upstreamMs,
+            transformMs,
+            totalMs: upstreamMs + transformMs,
+            complete: optimized.metrics.complete,
+            correctness,
+            isError: Boolean(original.isError),
+          });
+        }
+      }
+    } catch (error) {
+      failed = true;
+      const message = String(error?.message ?? "benchmark error").replace(/https?:\/\/\S+/g, "[URL]");
+      console.error(`Case ${caseName} failed: ${message}`);
+    } finally {
+      await client?.close().catch(() => {});
+    }
+
+    if (!measurements.size) continue;
+    for (const [policy, samples] of measurements) {
+      if (samples.length === 0) continue;
+      const upstream = stats(samples.map((sample) => sample.upstreamMs));
+      const transform = stats(samples.map((sample) => sample.transformMs));
+      const total = stats(samples.map((sample) => sample.totalMs));
+      const tokensBefore = stats(samples.map((sample) => sample.originalTokens));
+      const tokensAfter = stats(samples.map((sample) => sample.optimizedTokens));
+      const savings = stats(samples.map((sample) => sample.savedTokens));
+      const reductions = stats(samples.map((sample) => sample.reductionPercent));
+      const correctnessSamples = samples.filter((sample) => sample.correctness !== null);
+      report.push({
+        case: caseName,
+        server: benchmarkCase.server,
+        tool: benchmarkCase.tool,
+        setupMs: round(setupMs),
+        policy,
+        sampleCount: samples.length,
+        tokenEstimate: "serialized JSON characters / 4",
+        originalTokens: { median: round(tokensBefore.median), p95: round(tokensBefore.p95) },
+        optimizedTokens: { median: round(tokensAfter.median), p95: round(tokensAfter.p95) },
+        savedTokens: { median: round(savings.median), p95: round(savings.p95) },
+        reductionPercent: round(reductions.median, 1),
+        upstreamLatencyMs: {
+          median: round(upstream.median), p95: round(upstream.p95), stdDev: round(upstream.stdDev),
+        },
+        optimizationLatencyMs: {
+          median: round(transform.median), p95: round(transform.p95), stdDev: round(transform.stdDev),
+        },
+        endToEndToolLatencyMs: {
+          median: round(total.median), p95: round(total.p95), stdDev: round(total.stdDev),
+        },
+        completeSamples: samples.filter((sample) => sample.complete).length,
+        correctness: correctnessSamples.length
+          ? { passed: correctnessSamples.filter((sample) => sample.correctness).length, checked: correctnessSamples.length }
+          : "not checked",
+        upstreamErrors: samples.filter((sample) => sample.isError).length,
+      });
+    }
+    if (caseIndex < benchmarkCases.length - 1) process.stderr.write(`Completed ${caseName}\n`);
+  }
+
+  console.log(JSON.stringify({
+    method: "live MCP calls; optimizer policies applied to each captured response; no model calls",
+    iterations: liveResponseIterations,
+    limitations: [
+      "Token counts are estimates from serialized JSON characters divided by four.",
+      "Latency includes the upstream tool call and local response transformation, not model inference or full agent task success.",
+      "Each case must be a read-only tool call and provide preservation checks.",
+    ],
+    measurements: report,
+  }, null, 2));
+  if (failed) process.exit(1);
+  process.exit(0);
 }
 
 // ─── Skills ────────────────────────────────────────────────────────────────

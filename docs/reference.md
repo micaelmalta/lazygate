@@ -105,6 +105,64 @@ the clash; deactivate the other server first, or set `namespaceTools: true` (per
 
 **Errors** from lazygate and from proxied calls are returned with `isError: true`.
 
+## Response optimization
+
+Response transformations are opt-in and are disabled by default. Add a top-level
+`responseOptimization` section to `servers.json`; policy changes reload with the server registry.
+Set `enabled` to `true` to apply the global `defaultMode` and per-tool policies. A tool key uses
+`server.tool`; `lazygate.run_chain` selects the policy for the final value returned by a script.
+
+```json
+{
+  "responseOptimization": {
+    "enabled": true,
+    "defaultMode": "off",
+    "maxOutputTokens": 4000,
+    "tools": {
+      "github.search_issues": {
+        "mode": "project",
+        "fields": ["id", "title", "state", "assignee.login"]
+      },
+      "fetch.get_page": { "mode": "html_markdown" },
+      "docs.get_documentation": { "mode": "html_reader" },
+      "jira.search_issues": {
+        "mode": "prune",
+        "removeNulls": true,
+        "removeEmptyObjects": true
+      }
+    }
+  }
+}
+```
+
+Supported modes are `off`, `prune`, `project`, `jsonpath`, `schema`, `html_markdown`, and
+`html_reader`. Projection paths use dot notation or quoted/numeric bracket notation and continue
+through arrays. JSONPath uses `jsonpath-plus` with bounded data filters; function calls and prototype
+access are rejected. `prune` removes only the empty values
+enabled by its flags and configured `removeFields`; it preserves `false`, `0`, and duplicate array
+items. `schema` returns `_count`, an inferred `_schema`, and a bounded `_sample`.
+
+`html_markdown` converts semantic content while keeping navigation and page chrome. `html_reader`
+extracts a main or article area and removes navigation, sidebars, headers, and footers. Both strip
+scripts, styles, comments, tracking pixels, hidden content, and unsafe link schemes. The optimizer
+does not fetch URLs, execute page code, or alter intermediate `run_chain` results.
+
+`maxOutputTokens` and the per-tool `maxTokens` are approximate limits based on four characters per
+token. Oversized text is cut at paragraph or line boundaries where possible; structured values are
+cut at record or property boundaries. A partial result carries `_meta.lazygate.responseOptimization`
+with `complete: false`; `run_chain` also includes a summary in its returned text when needed. Projection, JSONPath, schema,
+reader mode, and pruning that removes values are marked incomplete because they intentionally omit
+source information. Metrics include original and optimized token estimates, savings, duration, and
+failure status; they are emitted to stderr unless the broker caller supplies a metrics sink.
+
+Input and processing safeguards are configurable with `maxInputBytes`, `maxOutputBytes`,
+`maxNestingDepth`, `maxHtmlNodes`, and `maxTransformMs`. JSONPath queries are limited to 512
+characters, 10,000 matches, and the configured input limits. Parsing failures return the original
+result when there is no hard output limit. Tool errors pass through unchanged unless a hard output
+limit requires an explicit incomplete-result or budget error. To roll back,
+set `enabled` to `false` or remove the `responseOptimization` section; optimization is off when no
+section is present.
+
 ---
 
 ## HTTP servers and OAuth
@@ -375,6 +433,7 @@ lazygate benchmark --rounds 3                           # average over rounds
 lazygate benchmark --tasks                              # multi-step fixture: direct vs call_tool vs run_chain
 lazygate benchmark --tasks --rounds 3                   # same, averaged over 3 runs per strategy
 lazygate benchmark --tasks --include-catalog            # also load your real catalog (see warning below)
+lazygate benchmark --responses-live --cases cases.json --iterations 5 # live response optimization
 ```
 
 `--tasks` runs Claude with permission checks off, so by default it only loads the tickets fixture
@@ -391,6 +450,43 @@ range:
   the idle benchmark). Classic MCP: all those tool schemas sit in context.
 - **call_tool** / **run_chain** — one Lazygate process wrapping that same catalog; only meta-tools
   are advertised, and the task uses the tickets fixture.
+
+### Live response benchmark
+
+`--responses-live` invokes configured MCP tools and measures optimization on the responses they
+actually return. The cases file explicitly selects every tool call; the benchmark does not load or
+run the rest of the catalog. Since it calls the tool repeatedly, use only read-only operations.
+`readOnly: true` is a declaration in the file, not an automatic safety check.
+
+Each case must list an `off` policy and at least one optimizer policy, plus correctness checks:
+
+```json
+{
+  "cases": [
+    {
+      "name": "issue-search",
+      "server": "your-configured-github-server",
+      "tool": "search_issues",
+      "args": { "query": "repo:owner/repo is:issue is:open" },
+      "readOnly": true,
+      "preservePaths": ["$.structuredContent.issues[*].id"],
+      "policies": [
+        { "name": "off", "mode": "off" },
+        { "name": "issue-fields", "mode": "project", "fields": ["issues.id", "issues.title"] }
+      ]
+    }
+  ]
+}
+```
+
+Adapt the server, tool, arguments, and paths to the MCP server's actual response shape. `preservePaths`
+checks that selected JSONPath values stay identical; `preserveText` checks that each listed text
+fragment remains in the response. Every sample must pass these checks for the policy to preserve
+correctness. The output includes estimated response token counts and median, p95, and standard
+deviation for upstream tool latency, transformation latency, and their sum. Token counts use
+serialized JSON characters divided by four. This mode makes no model calls and does not measure
+model round trips or full task success. `--responses` remains the deterministic, synthetic local
+optimizer smoke benchmark.
 
 ### What it measures
 
