@@ -6,6 +6,7 @@ import { createBroker, summarizeDescription } from "../broker.js";
 import { ToolRouter, type ServerConfig } from "../router.js";
 import { SkillRouter } from "../skill-router.js";
 import type { ProcessManager, MCPTool } from "../process-manager.js";
+import { parseResponseOptimizationConfig } from "../response-optimizer.js";
 
 const server = (o: Partial<ServerConfig> = {}): ServerConfig => ({
   description: "Test server",
@@ -311,6 +312,57 @@ describe("createBroker", () => {
       expect(text(r)).toBe("called");
       expect(mk.manager.callTool).toHaveBeenCalledWith("github", "github_tool", { a: 1 });
       expect(broker.listTools().tools.map((t) => t.name)).not.toContain("github_tool");
+    });
+
+    it("applies a configured JSON projection to successful call_tool results and records metrics", async () => {
+      const onOptimizationMetrics = jest.fn();
+      const responseOptimization = parseResponseOptimizationConfig({
+        responseOptimization: {
+          enabled: true,
+          defaultMode: "off",
+          tools: { "github.github_tool": { mode: "project", fields: ["id", "title"] } },
+        },
+      }).config;
+      broker = createBroker({
+        router,
+        manager: mk.manager as unknown as ProcessManager,
+        skillRouter: null,
+        responseOptimization,
+        onOptimizationMetrics,
+      });
+      mk.manager.activate.mockImplementationOnce(async (name: string) => {
+        const tools: MCPTool[] = [
+          {
+            name: `${name}_tool`,
+            description: "d",
+            inputSchema: {},
+            serverName: name,
+            annotations: { readOnlyHint: true },
+          },
+        ];
+        mk.active.set(name, tools);
+        return tools;
+      });
+      mk.manager.callTool.mockResolvedValueOnce({
+        content: [],
+        structuredContent: { id: 7, title: "Issue", state: "open", token: "sensitive" },
+      } as never);
+
+      const result = await broker.callTool("call_tool", { server: "github", tool: "github_tool", args: {} });
+
+      expect(result.structuredContent).toEqual({ id: 7, title: "Issue" });
+      expect(result._meta).toMatchObject({
+        lazygate: {
+          tool: "github_tool",
+          server: "github",
+          annotations: ["read-only"],
+          responseOptimization: { mode: "project", complete: false },
+        },
+      });
+      expect(onOptimizationMetrics).toHaveBeenCalledWith(
+        { serverName: "github", toolName: "github_tool", source: "call_tool" },
+        expect.objectContaining({ changed: true, complete: false })
+      );
     });
 
     it("call_tool defaults args to {} and surfaces proxy errors", async () => {

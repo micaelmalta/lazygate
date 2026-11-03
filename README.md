@@ -68,7 +68,15 @@ Measure it on your own setup:
 ```bash
 lazygate benchmark --estimate    # free local preview, no model calls
 lazygate benchmark --tasks       # the multi-step task above (needs a logged-in `claude`)
+lazygate benchmark --responses-live --cases benchmark-cases.json --iterations 5
 ```
+
+`--responses-live` calls the named MCP tools in the cases file and applies each listed optimizer
+policy to the same live response. Mark every case `"readOnly": true`, provide at least one `off`
+policy and one optimizer policy, and add `preservePaths` or `preserveText` checks. It reports
+estimated response tokens and median, p95, and standard deviation for tool and transformation
+latency. It makes no model calls; its latency and correctness numbers do not represent full agent
+task success. See [the benchmark case format](docs/reference.md#live-response-benchmark).
 
 ## Install
 
