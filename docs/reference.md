@@ -433,6 +433,7 @@ lazygate benchmark --rounds 3                           # average over rounds
 lazygate benchmark --tasks                              # multi-step fixture: direct vs call_tool vs run_chain
 lazygate benchmark --tasks --rounds 3                   # same, averaged over 3 runs per strategy
 lazygate benchmark --tasks --include-catalog            # also load your real catalog (see warning below)
+lazygate benchmark --responses-live --cases cases.json --iterations 5 # live response optimization
 ```
 
 `--tasks` runs Claude with permission checks off, so by default it only loads the tickets fixture
@@ -449,6 +450,43 @@ range:
   the idle benchmark). Classic MCP: all those tool schemas sit in context.
 - **call_tool** / **run_chain** — one Lazygate process wrapping that same catalog; only meta-tools
   are advertised, and the task uses the tickets fixture.
+
+### Live response benchmark
+
+`--responses-live` invokes configured MCP tools and measures optimization on the responses they
+actually return. The cases file explicitly selects every tool call; the benchmark does not load or
+run the rest of the catalog. Since it calls the tool repeatedly, use only read-only operations.
+`readOnly: true` is a declaration in the file, not an automatic safety check.
+
+Each case must list an `off` policy and at least one optimizer policy, plus correctness checks:
+
+```json
+{
+  "cases": [
+    {
+      "name": "issue-search",
+      "server": "your-configured-github-server",
+      "tool": "search_issues",
+      "args": { "query": "repo:owner/repo is:issue is:open" },
+      "readOnly": true,
+      "preservePaths": ["$.structuredContent.issues[*].id"],
+      "policies": [
+        { "name": "off", "mode": "off" },
+        { "name": "issue-fields", "mode": "project", "fields": ["issues.id", "issues.title"] }
+      ]
+    }
+  ]
+}
+```
+
+Adapt the server, tool, arguments, and paths to the MCP server's actual response shape. `preservePaths`
+checks that selected JSONPath values stay identical; `preserveText` checks that each listed text
+fragment remains in the response. Every sample must pass these checks for the policy to preserve
+correctness. The output includes estimated response token counts and median, p95, and standard
+deviation for upstream tool latency, transformation latency, and their sum. Token counts use
+serialized JSON characters divided by four. This mode makes no model calls and does not measure
+model round trips or full task success. `--responses` remains the deterministic, synthetic local
+optimizer smoke benchmark.
 
 ### What it measures
 
