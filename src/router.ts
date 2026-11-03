@@ -95,6 +95,13 @@ export interface ServerConfig {
    * Default off (omit / false).
    */
   namespaceTools?: boolean;
+  /**
+   * Tool chain: which of this server's tools `run_chain` scripts may call.
+   * - omit / false (default): no script access; use call_tool
+   * - true: every tool on the server
+   * - string[]: allowlist of upstream (bare) tool names
+   */
+  toolChain?: boolean | string[];
 }
 
 /** Effective credential scope. HTTP servers default to per-user; stdio defaults to shared. */

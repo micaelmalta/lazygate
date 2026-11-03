@@ -10,6 +10,30 @@ import { scoreEntry, tokenize } from "../scoring.js";
 import { ToolRouter, effectiveAuthScope, sharedScopeMultiGroup } from "../router.js";
 import { SkillRouter } from "../skill-router.js";
 
+describe("parseServersConfig toolChain", () => {
+  it("accepts true, an allowlist array, or omission", () => {
+    const { entries, errors } = parseServersConfig({
+      servers: {
+        all: { command: "node", toolChain: true },
+        some: { command: "node", toolChain: ["search", "get_issue"] },
+        none: { command: "node" },
+      },
+    });
+    expect(errors).toEqual([]);
+    expect(entries.all.toolChain).toBe(true);
+    expect(entries.some.toolChain).toEqual(["search", "get_issue"]);
+    expect(entries.none.toolChain).toBeUndefined();
+  });
+
+  it("rejects a non-boolean, non-array toolChain and names the entry", () => {
+    const { entries, errors } = parseServersConfig({
+      servers: { bad: { command: "node", toolChain: "yes" } },
+    });
+    expect(entries.bad).toBeUndefined();
+    expect(errors.join(" ")).toMatch(/bad.*toolChain/);
+  });
+});
+
 describe("parseServersConfig", () => {
   it("applies defaults and keeps valid entries", () => {
     const { entries, errors } = parseServersConfig({ servers: { a: { command: "node" } } });

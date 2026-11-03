@@ -1,6 +1,6 @@
 # lazygate reference
 
-Details that don't fit in the [README](../README.md): configuration fields, OAuth, routing, migration
+Details that don't fit in the [README](../README.md) or [How it works](how-it-works.md): configuration fields, OAuth, routing, migration
 and benchmarking.
 
 - [Configuration](#configuration)
@@ -79,6 +79,7 @@ half-written file keeps the previous config.
 | `autoActivate` | `false` (default): spawned on `activate_server` or auto-activation. `true`: spawned when lazygate starts, in the background after it has connected, so a slow server never delays startup. Use `true` for servers you reach every session; keep heavy ones (`docker build`, `npm install` on first launch) `false` |
 | `expose` | which tools merge into the broker's `tools/list` after activate: omit / `"none"` (default) — none, use `describe_tool` / `call_tool`; `"all"` — every schema (legacy); string array — allowlist of tool names (bare upstream names) |
 | `namespaceTools` | when `true`, expose and accept tools as `server__tool` so identical upstream names across servers do not collide. Default `false`. Gateway-wide: `lazygate serve --namespace-tools` (per-server `true`/`false` overrides) |
+| `toolChain` | lets `run_chain` scripts call this server's tools. `true` allows every tool; an array allows only those bare tool names. Omitted = no script access (use `call_tool`). See [Tool chain](#tool-chain) |
 | `auth`, `groups` | gateway mode only — credential sources and access policy; see [gateway.md](gateway.md) |
 | `local` | gateway mode: hide from remote users / refuse activate (needs the caller's machine) |
 | `migratedFrom`, `disabledPlugins` | set by `migrate`; `revert` relies on them |
@@ -236,8 +237,64 @@ advertised tool list stays stable and list_changed does not churn schemas. Use `
 allowlist only when you need upstream tools in `tools/list` and accept the cache cost.
 
 **Clients that ignore `tools/list_changed`** never pick up newly exposed schemas even when `expose`
-is set. Prefer `call_tool` / `describe_tool` so those clients still work. There are **11** meta-tools
-in `META_TOOLS` (9 listed in stdio; gateway also advertises `connect_server` / `disconnect_server`).
+is set. Prefer `call_tool` / `describe_tool` so those clients still work. There are **12** meta-tools
+in `META_TOOLS` (10 listed in stdio; gateway also advertises `connect_server` / `disconnect_server`).
+
+---
+
+## Tool chain
+
+Tool chain runs a multi-step workflow in a script, so intermediate results never reach the model.
+The model calls `run_chain` once; the script calls opted-in tools as `servers.<name>.<tool>(args)`
+and returns a value. Only the script's `console.log` lines and return value go back to the model.
+
+Use it for chains (list, filter, then fetch details). Use `call_tool` for single calls and for any
+tool with side effects that you want Cursor or the client to approve one at a time.
+
+**Opt in per server** in `servers.json`:
+
+```json
+"jira": { "command": "...", "toolChain": ["search", "get_issue"] }
+```
+
+`toolChain: true` allows every tool on the server. A server without `toolChain` has no binding in
+scripts. Tools that are not allowlisted are not bound, so a script that calls them gets a
+"not a function" error and nothing reaches upstream.
+
+**Discovery.** `describe_tool` with only `server` returns TypeScript stubs for that server's
+tool-chain tools, a compact alternative to full JSON Schemas:
+
+```ts
+servers.jira.search(args: { jql: string; maxResults?: number }): Promise<unknown> // Search issues
+```
+
+**Results.** A tool result becomes an object (from `structuredContent`, or parsed JSON text).
+A tool that returns `isError` becomes `{ error: "..." }` and does not throw, so a script can handle
+it and continue. Each run is a fresh scope; nothing carries over between runs.
+
+**Lazy activation.** A tool-chain server is activated the first time a script calls it, not when the
+script starts. Every script call goes through the same checks as `call_tool` (visibility, allowlist,
+then activation), one at a time for each call.
+
+**Limits (per run).** Each limit fails the run with a message the model can act on:
+
+| Limit | Default |
+|---|---|
+| Script memory | 64 MiB |
+| Stack | 512 KiB |
+| Wall-clock deadline | 60 s |
+| Nested tool calls | 64 |
+| Concurrent calls | 4 (`Promise.all` is capped at this) |
+| `console.log` output | 64 KiB (truncated after) |
+| Values crossing the boundary (args, results, return) | 1 MiB |
+| `run_chain` source | 64 KiB |
+
+**Security model.** The sandbox is QuickJS compiled to WebAssembly (`quickjs-emscripten`). The
+script has no `require`, `process`, `fetch`, filesystem or imports; its only reach is the
+`servers.*` bindings and `console.log`. Every nested call is a normal tool call: the gateway audits
+each one (with `via: "run_chain"`), and redacts credential values from logs and results.
+
+**Gateway.** Set Tool chain per server in the admin UI (off, all tools, or an allowlist).
 
 ---
 
@@ -309,7 +366,20 @@ lazygate benchmark --skills-only                        # skills only
 lazygate benchmark --servers fetch-mcp,jira
 lazygate benchmark --skills loi,writer,rlm
 lazygate benchmark --rounds 3                           # average over rounds
+lazygate benchmark --tasks                              # multi-step fixture: direct vs call_tool vs run_chain
+lazygate benchmark --tasks --rounds 3                   # same, averaged over 3 runs per strategy
 ```
+
+`--tasks` runs the tickets fixture three ways and only prints token deltas when each side of a
+pair answered correctly. With `--rounds N`, each strategy runs N times; input tokens, turns and
+duration are the mean of the correct runs, and each row shows `correct k/N` and the min–max input
+range:
+
+- **direct** — Claude connects to every *runnable* server in your Lazygate `servers.json` plus the
+  tickets fixture (OAuth-only HTTP servers are skipped, same as the idle benchmark). Classic MCP:
+  all those tool schemas sit in context.
+- **call_tool** / **run_chain** — one Lazygate process wrapping that same catalog; only meta-tools
+  are advertised, and the task uses the tickets fixture.
 
 ### What it measures
 

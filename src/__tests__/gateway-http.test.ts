@@ -80,7 +80,7 @@ beforeAll(async () => {
     join(dir, "servers.json"),
     JSON.stringify({
       servers: {
-        jira: server("jira", { scope: "user", env: { TEST_TOKEN: "${cred:token}" } }),
+        jira: server("jira", { scope: "user", env: { TEST_TOKEN: "${cred:token}" } }, { toolChain: true }),
         shared: server("shared", { scope: "server", env: { TEST_TOKEN: "${secret:shared/token}" } }),
         fallbacky: server("fallbacky", { scope: "user", fallback: "server", env: { TEST_TOKEN: "${cred:token}" } }),
         sre: server("sre", undefined, { groups: ["sre"] }),
@@ -250,6 +250,35 @@ describe("audit log", () => {
     expect(log).toContain('"user":"alice"');
     expect(log).toContain('"server":"jira"');
     expect(log).not.toContain("audit-secret-value-1");
+  });
+});
+
+describe("tool chain through the gateway", () => {
+  it("audits each script tool call with via=run_chain, without credential values", async () => {
+    const secret = "codemode-audit-secret-7";
+    const { client } = await connect(aliceToken, { "X-Lazygate-Cred-jira-token": secret });
+    const r = await call(client, "run_chain", {
+      code: "const a = await servers.jira.jira_probe({}); return a;",
+    });
+    expect(r.isError).toBeFalsy();
+    const log = readFileSync(join(dir, "audit.log"), "utf-8");
+    const nested = log
+      .split("\n")
+      .filter((l) => l.includes('"via":"run_chain"'))
+      .map((l) => JSON.parse(l) as { tool: string; server: string; user: string; ok: boolean });
+    expect(nested.some((e) => e.tool === "jira_probe" && e.server === "jira" && e.user === "alice" && e.ok)).toBe(true);
+    expect(log).not.toContain(secret);
+  });
+
+  it("redacts a credential a script prints or returns", async () => {
+    const secret = "codemode-redact-secret-9";
+    const { client } = await connect(aliceToken, { "X-Lazygate-Cred-jira-token": secret });
+    const r = await call(client, "run_chain", {
+      code: "console.log('leaking'); const v = await servers.jira.jira_echo({}); return v;",
+    });
+    const body = text(r);
+    expect(body).not.toContain(secret);
+    expect(body).toContain("[redacted]");
   });
 });
 

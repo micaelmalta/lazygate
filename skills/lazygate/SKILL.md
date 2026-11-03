@@ -8,8 +8,8 @@ description: >-
 ---
 
 # Lazygate
-  
-lazygate is an MCP proxy. Cursor/Claude see **11 meta-tools** (9 in stdio; gateway also lists `connect_server` / `disconnect_server`). Real servers and skills load on demand. Activated tools stay off `tools/list` by default — use `describe_tool` / `call_tool`.
+
+lazygate is an MCP proxy. Cursor/Claude see **12 meta-tools** (10 in stdio; gateway also lists `connect_server` / `disconnect_server`). Real servers and skills load on demand. Activated tools stay off `tools/list` by default — use `describe_tool` / `call_tool`, or `run_chain` for chains.
 
 Clients that ignore `notifications/tools/list_changed` will not see newly exposed schemas in `tools/list`; use `call_tool` / `describe_tool` instead. Changing `tools/list` also invalidates prompt cache for everything after the tools block — keep `expose: "none"` and prefer `call_tool`.
 
@@ -19,8 +19,9 @@ Clients that ignore `notifications/tools/list_changed` will not see newly expose
 |---|---|
 | `discover_tools` | Rank servers for a task (`query`) |
 | `activate_server` | Start a server by `server_name` (schemas not merged into `tools/list` unless `expose` is set) |
-| `describe_tool` | One tool schema on demand (`server`, `tool`) |
-| `call_tool` | Invoke without exposing schemas (`server`, `tool`, `args`) |
+| `describe_tool` | One tool schema on demand (`server`, `tool`). Omit `tool` for TypeScript stubs of a server's tool-chain tools |
+| `run_chain` | Run a JavaScript body (`code`) that calls tool-chain tools as `servers.<name>.<tool>(args)`. Use `await` and `return`; no imports, fetch or fs. Only logs and the return value come back |
+| `call_tool` | Invoke without exposing schemas (`server`, `tool`, `args`). Use for single or side-effecting calls |
 | `deactivate_server` | Stop a server |
 | `list_active_servers` | What is running in this session |
 | `discover_skill` | Rank installed skills (`query`). No dedicated list — a non-matching query returns available skills |
@@ -33,6 +34,7 @@ Namespace in Cursor is typically `user-lazygate`.
 ## Default workflow
 
 1. **Servers:** `discover_tools` → `activate_server` → `describe_tool` (if needed) → `call_tool`. Prefer `call_tool` over expecting upstream tools in `tools/list` (especially if the client ignores `tools/list_changed`).
+1a. **Chains:** when a task needs several tool calls where the intermediate results are large or only feed the next call (list, filter, then fetch), use `describe_tool` with only `server` for the stubs, then one `run_chain` with the whole chain. Use `call_tool` for a single call or any destructive call, so each one is approved on its own. Servers only accept scripts when `toolChain` is set on them.
 2. **Skills:** `discover_skill` → `load_skill` → obey the loaded body for the rest of the task. If the skill declares `prompt.arguments`, pass them as `args` on `load_skill` (same as MCP `prompts/get`).
 3. Prefer lazygate over configuring the same upstream MCP directly in Cursor when the gateway already catalogs it.
 

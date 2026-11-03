@@ -21,7 +21,7 @@ Tests that touch OAuth mock `os.homedir()` — never let a test write to the rea
 
 ## Architecture
 
-lazygate (formerly context-broker) is an MCP server that itself acts as a proxy. It exposes **11 meta-tools** (`META_TOOLS`; 9 listed in stdio, plus gateway-only `connect_server` / `disconnect_server`) instead of loading all real MCP server schemas upfront. Real servers and skills are loaded on demand (`describe_tool` / `call_tool` by default; `expose` in `servers.json` can merge schemas into `tools/list`). Clients that ignore `notifications/tools/list_changed` should use `call_tool` / `describe_tool`.
+lazygate (formerly context-broker) is an MCP server that itself acts as a proxy. It exposes **12 meta-tools** (`META_TOOLS`; 10 listed in stdio, plus gateway-only `connect_server` / `disconnect_server`) instead of loading all real MCP server schemas upfront. Real servers and skills are loaded on demand (`describe_tool` / `call_tool` by default; `expose` in `servers.json` can merge schemas into `tools/list`). Clients that ignore `notifications/tools/list_changed` should use `call_tool` / `describe_tool`.
 
 ### Source files (`src/`)
 
@@ -29,7 +29,10 @@ lazygate (formerly context-broker) is an MCP server that itself acts as a proxy.
 |---|---|
 | `index.ts` | Entry point. Subcommand dispatch (`migrate`/`revert`/`benchmark`), config loading, wires the MCP SDK server, connects stdio, *then* auto-activates `autoActivate` servers in the background |
 | `broker.ts` | `createBroker({router, manager, skillRouter})` → `listTools()` / `callTool()`. All meta-tool handling and proxying; transport-independent so it is unit-tested |
-| `meta-tools.ts` | 11 meta-tool definitions (`META_TOOLS`) and zod argument schemas; gateway-only tools filtered in stdio |
+| `meta-tools.ts` | 12 meta-tool definitions (`META_TOOLS`, incl. `run_chain`) and zod argument schemas; gateway-only tools filtered in stdio |
+| `tool-chain/sandbox.ts` | `runCode()` — runs a `run_chain` script in a fresh QuickJS (WebAssembly) context via `quickjs-emscripten`. Only `servers.*` bindings and `console.log` reach the host; resource limits (memory, stack, deadline, call count, concurrency, log and value size) |
+| `tool-chain/stubs.ts` | JSON Schema → compact TypeScript signatures for a server's tool-chain tools (`describe_tool` without `tool`) |
+| `tool-chain/results.ts` | Converts an upstream MCP result to the value a script sees; `isError` becomes `{ error }` |
 | `router.ts` | `ToolRouter` + `ServerConfig` type; ranks servers against a query; `reloadServersFromDisk()` |
 | `skill-router.ts` | `SkillRouter` — same for file-based skills; `reloadFromDisk()`, `load()` |
 | `scoring.ts` | Shared word-based scorer (keywords +2, description words +1, learned tool words up to +2, light stemming) |
@@ -53,7 +56,7 @@ lazygate (formerly context-broker) is an MCP server that itself acts as a proxy.
 
 ### Request flow
 
-1. Claude calls a meta-tool (`discover_tools`, `activate_server`, `describe_tool`, `call_tool`, `deactivate_server`, `list_active_servers`, `discover_skill`, `load_skill`, `read_skill_file`; gateway also has `connect_server` / `disconnect_server`)
+1. Claude calls a meta-tool (`discover_tools`, `activate_server`, `describe_tool`, `run_chain`, `call_tool`, `deactivate_server`, `list_active_servers`, `discover_skill`, `load_skill`, `read_skill_file`; gateway also has `connect_server` / `disconnect_server`)
 2. `broker.ts` validates the arguments (zod) and handles it — scoring via `ToolRouter`/`SkillRouter`, or delegating to `ProcessManager`
 3. `ProcessManager` spawns the child (or opens the HTTP session) if not already active, does the MCP initialize handshake, caches the tool list, rejects tool-name collisions, and calls `onToolsChanged` → `index.ts` sends `notifications/tools/list_changed`
 4. Prefer `call_tool(server, tool, args)` so activated schemas need not appear in `tools/list` (default `expose: "none"`). Direct `CallTool` for a non-meta name is still proxied when the tool was exposed or auto-activated
@@ -62,7 +65,7 @@ lazygate (formerly context-broker) is an MCP server that itself acts as a proxy.
 
 ### Config files
 
-- `~/.config/lazygate/servers.json` — server registry (`{ servers: { name: { description, keywords, command, args, env, inheritEnv, autoActivate, expose, namespaceTools, toolTimeoutMs, migratedFrom, disabledPlugins } } }`; HTTP servers use `type`, `url`, `headers`, `oauth`; `expose` is `"none"` (default) | `"all"` | tool-name allowlist; `namespaceTools: true` exposes tools as `server__tool`)
+- `~/.config/lazygate/servers.json` — server registry (`{ servers: { name: { description, keywords, command, args, env, inheritEnv, autoActivate, expose, namespaceTools, toolChain, toolTimeoutMs, migratedFrom, disabledPlugins } } }`; HTTP servers use `type`, `url`, `headers`, `oauth`; `expose` is `"none"` (default) | `"all"` | tool-name allowlist; `namespaceTools: true` exposes tools as `server__tool`; `toolChain` is `true` | tool-name allowlist and lets `run_chain` scripts call the server)
 - `~/.config/lazygate/skills.json` — skill registry (`{ skills: { name: { description, keywords, path, migratedFrom | plugin } } }`)
 - `config/*.json` in the repo — **examples only**, never loaded implicitly
 
@@ -71,6 +74,8 @@ Config resolution: `--config` / `--skills` flag → `~/.config/lazygate/<file>`;
 ### Scripts (`scripts/`)
 
 Plain `.mjs` files, no build step (except `migrate.mjs`, which imports `dist/migrate-helpers.js`, and `benchmark.mjs`, which imports `dist/meta-tools.js`).
+
+`benchmark.mjs --tasks` runs one multi-step fixture task (`src/__tests__/fixtures/tickets-server.mjs`) three ways — **direct** (Claude → every runnable server from your Lazygate catalog + tickets, no proxy), lazygate `call_tool`, and lazygate `run_chain` — and checks each answer against the fixture's known result. OAuth-only HTTP servers are skipped. Needs a logged-in `claude` CLI.
 
 - `lib/shared.mjs` — atomic writes + backups, `find` replacement, frontmatter parsing, `deriveEntry`, `splitSkillMd` / `mergeInstructions`, Cursor `${env:VAR}` conversion. Copied next to `session-sync.mjs` on install.
 - `migrate.mjs` — reads servers from `~/.claude.json` / `~/.cursor/mcp.json` / `~/.config/opencode/opencode.json` (+ plugin `.mcp.json` files, labelled `plugin`), converts to broker format with a `migratedFrom` marker, extracts secrets (env and headers) to the shell file, registers skills/commands **in place** (no file moves), splits `SKILL.md`, adds the `SessionStart` hook, and registers the broker in the source client (`~/.claude.json`, Cursor `mcpServers`, OpenCode `mcp`). Every file it modifies is backed up (`.bak-<timestamp>`) and written atomically.
