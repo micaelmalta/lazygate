@@ -71,10 +71,11 @@ describe("createBroker", () => {
     expect(names).not.toContain("connect_server");
     expect(names).not.toContain("disconnect_server");
     expect(names).toContain("read_skill_file");
-    expect(names).toHaveLength(9);
+    expect(names).toContain("run_chain");
+    expect(names).toHaveLength(10);
 
     await broker.callTool("activate_server", { server_name: "github" });
-    expect(broker.listTools().tools).toHaveLength(9);
+    expect(broker.listTools().tools).toHaveLength(10);
     expect(broker.listTools().tools.map((t) => t.name)).not.toContain("github_tool");
   });
 
@@ -140,7 +141,7 @@ describe("createBroker", () => {
     const names = withGateway.listTools().tools.map((t) => t.name);
     expect(names).toContain("connect_server");
     expect(names).toContain("disconnect_server");
-    expect(names).toHaveLength(11);
+    expect(names).toHaveLength(12);
   });
 
   describe("argument validation", () => {
@@ -292,7 +293,11 @@ describe("createBroker", () => {
       const missing = await broker.callTool("describe_tool", { server: "github", tool: "nope" });
       expect(missing.isError).toBe(true);
       expect(text(missing)).toMatch(/not found/);
-      const bad = await broker.callTool("describe_tool", { server: "github" });
+      // Without `tool`, describe_tool returns tool-chain stubs; a server without toolChain says so.
+      const noStubs = await broker.callTool("describe_tool", { server: "github" });
+      expect(noStubs.isError).toBe(true);
+      expect(text(noStubs)).toMatch(/not enabled for tool chain/);
+      const bad = await broker.callTool("describe_tool", {});
       expect(bad.isError).toBe(true);
       expect(text(bad)).toMatch(/Invalid arguments/);
     });

@@ -426,6 +426,7 @@ function describeServer(name: string, c: ServerConfig, secretPaths?: Set<string>
     disabled: Boolean(c.disabled),
     local: Boolean(c.local),
     groups: c.groups ?? [],
+    toolChain: c.toolChain === true ? "all" : Array.isArray(c.toolChain) ? c.toolChain : "off",
     sharedScopeMultiGroup: sharedScopeMultiGroup(c),
     secretRefs: secretRefsFor(name, c, stored),
     auth: c.auth
@@ -656,6 +657,8 @@ function createServer(ctx: UiContext, user: UserIdentity, body: Record<string, u
     keywords: stringList(body.keywords),
     autoActivate: body.autoActivate === true,
   };
+  if (body.toolChain === "all" || body.toolChain === true) entry.toolChain = true;
+  else if (Array.isArray(body.toolChain) && stringList(body.toolChain).length) entry.toolChain = stringList(body.toolChain);
   if (typeof body.url === "string" && body.url.trim()) {
     entry.type = "http";
     entry.url = body.url.trim();
@@ -779,6 +782,15 @@ function patchServer(ctx: UiContext, user: UserIdentity, name: string, patch: Re
   if ("toolTimeoutMs" in patch) {
     if (typeof patch.toolTimeoutMs === "number" && patch.toolTimeoutMs > 0) entry.toolTimeoutMs = patch.toolTimeoutMs;
     else delete entry.toolTimeoutMs;
+  }
+  if ("toolChain" in patch) {
+    // "all" = every tool; an array = allowlist of tool names; anything else = off.
+    if (patch.toolChain === "all" || patch.toolChain === true) entry.toolChain = true;
+    else if (Array.isArray(patch.toolChain)) {
+      const names = stringList(patch.toolChain);
+      if (names.length) entry.toolChain = names;
+      else delete entry.toolChain;
+    } else delete entry.toolChain;
   }
   if ("auth" in patch) {
     if (patch.auth === null) {
