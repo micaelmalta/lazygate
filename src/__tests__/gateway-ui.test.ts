@@ -196,6 +196,10 @@ describe("static assets", () => {
     expect(js).toContain("Manage skills");
     expect(js).toContain("USER_TABS");
     expect(js).toContain("ADMIN_TABS");
+    expect(js).toContain("dashboardView");
+    expect(js).toContain('["dashboard", "Dashboard"');
+    expect(js).toContain("hashchange");
+    expect(js).toContain("writeHash");
     expect(js).toContain("manage-mcps");
     expect(js).toContain("manage-skills");
     expect(js).toContain("adminCatalog");
@@ -466,6 +470,26 @@ describe("status and activity", () => {
 
     const sneaky = await ui("GET", "/ui/api/audit?all=1", alice);
     expect(sneaky.json.events.every((e: any) => e.user === "alice")).toBe(true);
+  });
+
+  it("summarizes usage and estimated tokens on the dashboard", async () => {
+    const client = await connect(alice);
+    await call(client, "list_active_servers", {});
+    const mine = await ui("GET", "/ui/api/dashboard", alice);
+    expect(mine.status).toBe(200);
+    expect(mine.json.scope).toBe("self");
+    expect(mine.json.usage.calls).toBeGreaterThan(0);
+    expect(mine.json.usage.optimizedTokens).toBeGreaterThan(0);
+    expect(mine.json.usage.savedTokens).toBeGreaterThanOrEqual(0);
+    expect(mine.json.usage.byTool.length).toBeGreaterThan(0);
+
+    const all = await ui("GET", "/ui/api/dashboard?all=1", admin);
+    expect(all.json.scope).toBe("all");
+    expect(all.json.usage.calls).toBeGreaterThanOrEqual(mine.json.usage.calls);
+    expect(all.json.usage.byUser.some((u: any) => u.key === "alice")).toBe(true);
+
+    const sneaky = await ui("GET", "/ui/api/dashboard?all=1", alice);
+    expect(sneaky.json.scope).toBe("self");
   });
 });
 
