@@ -7,6 +7,7 @@ import { parseServersConfig, reportConfigErrors } from "./config.js";
 import { scoreEntry } from "./scoring.js";
 import { ToolIndex, toolText } from "./tool-index.js";
 import { LOG_PREFIX } from "./version.js";
+import { parseResponseOptimizationConfig, type ResponseOptimizationConfig } from "./response-optimizer.js";
 
 function fileMtimeMs(path: string): number {
   try {
@@ -139,12 +140,24 @@ export class ToolRouter {
   private configMtime = -1;
 
   private readonly toolIndex?: ToolIndex;
+  private responseOptimization: ResponseOptimizationConfig;
 
-  constructor(servers: Record<string, ServerConfig>, configPath?: string, toolIndex?: ToolIndex) {
+  constructor(
+    servers: Record<string, ServerConfig>,
+    configPath?: string,
+    toolIndex?: ToolIndex,
+    responseOptimization?: ResponseOptimizationConfig
+  ) {
     this.servers = servers;
     this.configPath = configPath;
     this.toolIndex = toolIndex;
+    this.responseOptimization = responseOptimization ?? parseResponseOptimizationConfig({}).config;
     if (configPath) this.configMtime = fileMtimeMs(configPath);
+  }
+
+  /** Current response optimization policy, refreshed together with server definitions. */
+  getResponseOptimization(): ResponseOptimizationConfig {
+    return this.responseOptimization;
   }
 
   /**
@@ -161,8 +174,11 @@ export class ToolRouter {
     try {
       const raw = JSON.parse(readFileSync(this.configPath, "utf-8"));
       const { entries, errors } = parseServersConfig(raw, this.configPath);
+      const optimization = parseResponseOptimizationConfig(raw, this.configPath);
       reportConfigErrors(errors);
+      reportConfigErrors(optimization.errors);
       this.servers = entries;
+      if (optimization.errors.length === 0) this.responseOptimization = optimization.config;
       this.configMtime = mtime;
       return true;
     } catch (err) {

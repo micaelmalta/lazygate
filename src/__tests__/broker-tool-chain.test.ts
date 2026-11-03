@@ -5,6 +5,8 @@ import { jest, describe, it, expect, beforeEach } from "@jest/globals";
 import { createBroker, type BrokerAccess } from "../broker.js";
 import { ToolRouter, type ServerConfig } from "../router.js";
 import type { ProcessManager, MCPTool } from "../process-manager.js";
+import { parseResponseOptimizationConfig } from "../response-optimizer.js";
+import { estimateTokens } from "../response-optimizer.js";
 
 const server = (o: Partial<ServerConfig> = {}): ServerConfig => ({
   description: "Test server",
@@ -86,6 +88,69 @@ describe("run_chain", () => {
     expect(text(r)).toContain("Logs:\nstarting");
     expect(text(r)).toContain('Return value: "search"');
     expect(text(r)).toContain("Completed; 1 nested call.");
+  });
+
+  it("optimizes only the final run_chain value, leaving nested results complete for the script", async () => {
+    const responseOptimization = parseResponseOptimizationConfig({
+      responseOptimization: {
+        enabled: true,
+        defaultMode: "off",
+        tools: {
+          "jira.search": { mode: "project", fields: ["id"] },
+          "lazygate.run_chain": { mode: "project", fields: ["count"] },
+        },
+      },
+    }).config;
+    const onOptimizationMetrics = jest.fn();
+    const broker = createBroker({
+      router,
+      manager: mk.manager as unknown as ProcessManager,
+      skillRouter: null,
+      responseOptimization,
+      onOptimizationMetrics,
+    });
+    mk.upstreamResult.mockResolvedValueOnce({
+      content: [],
+      structuredContent: { id: 4, secret: "full nested value" },
+    } as never);
+
+    const result = await broker.callTool("run_chain", {
+      code: "const item = await servers.jira.search({}); return { count: item.secret };",
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(text(result)).toContain('Return value: {\n  "count": "full nested value"\n}');
+    expect(result._meta).toMatchObject({
+      lazygate: { responseOptimization: { mode: "project", complete: false } },
+    });
+    expect(onOptimizationMetrics).toHaveBeenCalledWith(
+      { serverName: "lazygate", toolName: "run_chain", source: "run_chain" },
+      expect.objectContaining({ changed: true, complete: false })
+    );
+  });
+
+  it("enforces the output budget against the final formatted run_chain response", async () => {
+    const responseOptimization = parseResponseOptimizationConfig({
+      responseOptimization: {
+        enabled: true,
+        defaultMode: "off",
+        maxOutputTokens: 120,
+      },
+    }).config;
+    const broker = createBroker({
+      router,
+      manager: mk.manager as unknown as ProcessManager,
+      skillRouter: null,
+      responseOptimization,
+    });
+
+    const result = await broker.callTool("run_chain", {
+      code: `return Array.from({ length: 12 }, (_, id) => ({ id, name: "x" }));`,
+    });
+
+    expect(result.isError || text(result).includes("Output incomplete")).toBe(true);
+    if (!result.isError) expect(estimateTokens(result)).toBeLessThanOrEqual(120);
+    expect(text(result)).not.toContain('"id": 11');
   });
 
   it("activates the server lazily on its first call", async () => {

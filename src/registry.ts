@@ -8,6 +8,7 @@ import { SkillRouter } from "./skill-router.js";
 import { ToolIndex } from "./tool-index.js";
 import { SkillHashStore } from "./skill-hashes.js";
 import { parseServersConfig, parseSkillsConfig, reportConfigErrors } from "./config.js";
+import { parseResponseOptimizationConfig, type ResponseOptimizationConfig } from "./response-optimizer.js";
 import { configDir } from "./paths.js";
 import { LOG_PREFIX } from "./version.js";
 
@@ -18,6 +19,7 @@ export interface Registry {
   /** Per-skill content hashes (skills-hashes.json in the config dir). */
   skillHashes: SkillHashStore;
   serverConfigs: Record<string, ServerConfig>;
+  responseOptimization: ResponseOptimizationConfig;
   /** Absolute path used for servers.json reads/writes (may not exist yet). */
   configPath: string;
   /** Absolute path used for skills.json reads/writes (may not exist yet). */
@@ -50,10 +52,15 @@ function loadJson(path: string): unknown {
 export function loadRegistry(argv: string[], dir: string = configDir()): Registry {
   const configPath = resolveWritableConfigPath(argv, "--config", "servers.json", dir);
   let serverConfigs: Record<string, ServerConfig> = {};
+  let responseOptimization = parseResponseOptimizationConfig({}).config;
   if (existsSync(configPath)) {
-    const { entries, errors } = parseServersConfig(loadJson(configPath), configPath);
+    const raw = loadJson(configPath);
+    const { entries, errors } = parseServersConfig(raw, configPath);
     serverConfigs = entries;
     reportConfigErrors(errors);
+    const optimized = parseResponseOptimizationConfig(raw, configPath);
+    responseOptimization = optimized.config;
+    reportConfigErrors(optimized.errors);
     console.error(`${LOG_PREFIX} Config: ${configPath} (${Object.keys(entries).length} servers)`);
   } else {
     console.error(
@@ -64,7 +71,7 @@ export function loadRegistry(argv: string[], dir: string = configDir()): Registr
   }
 
   const toolIndex = new ToolIndex(resolve(dir, "tool-index.json"));
-  const router = new ToolRouter(serverConfigs, configPath, toolIndex);
+  const router = new ToolRouter(serverConfigs, configPath, toolIndex, responseOptimization);
 
   const skillsConfigPath = resolveWritableConfigPath(argv, "--skills", "skills.json", dir);
   let skillEntries: Record<string, import("./skill-router.js").SkillConfig> = {};
@@ -84,5 +91,15 @@ export function loadRegistry(argv: string[], dir: string = configDir()): Registr
 
   const skillHashes = new SkillHashStore(resolve(dir, "skills-hashes.json"));
 
-  return { router, skillRouter, toolIndex, skillHashes, serverConfigs, configPath, skillsConfigPath, configDir: dir };
+  return {
+    router,
+    skillRouter,
+    toolIndex,
+    skillHashes,
+    serverConfigs,
+    responseOptimization,
+    configPath,
+    skillsConfigPath,
+    configDir: dir,
+  };
 }
