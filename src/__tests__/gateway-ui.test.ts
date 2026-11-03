@@ -198,6 +198,9 @@ describe("static assets", () => {
     expect(js).toContain("ADMIN_TABS");
     expect(js).toContain("dashboardView");
     expect(js).toContain('["dashboard", "Dashboard"');
+    expect(js).toContain("admin-dashboard");
+    expect(js).toContain('dashboardView(r, false)');
+    expect(js).toContain('dashboardView(r, true)');
     expect(js).toContain("hashchange");
     expect(js).toContain("writeHash");
     expect(js).toContain("manage-mcps");
@@ -475,6 +478,7 @@ describe("status and activity", () => {
   it("summarizes usage and estimated tokens on the dashboard", async () => {
     const client = await connect(alice);
     await call(client, "list_active_servers", {});
+    // Homepage dashboard is always self-scoped — even for admins without all=1.
     const mine = await ui("GET", "/ui/api/dashboard", alice);
     expect(mine.status).toBe(200);
     expect(mine.json.scope).toBe("self");
@@ -483,6 +487,10 @@ describe("status and activity", () => {
     expect(mine.json.usage.savedTokens).toBeGreaterThanOrEqual(0);
     expect(mine.json.usage.byTool.length).toBeGreaterThan(0);
 
+    const adminSelf = await ui("GET", "/ui/api/dashboard", admin);
+    expect(adminSelf.json.scope).toBe("self");
+
+    // Admin Usage page uses all=1 for the gateway-wide view.
     const all = await ui("GET", "/ui/api/dashboard?all=1", admin);
     expect(all.json.scope).toBe("all");
     expect(all.json.usage.calls).toBeGreaterThanOrEqual(mine.json.usage.calls);
