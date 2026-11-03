@@ -27,7 +27,8 @@ lazygate (formerly context-broker) is an MCP server that itself acts as a proxy.
 
 | File | Role |
 |---|---|
-| `index.ts` | Entry point. Subcommand dispatch (`migrate`/`revert`/`benchmark`), config loading, wires the MCP SDK server, connects stdio, *then* auto-activates `autoActivate` servers in the background |
+| `index.ts` | Entry point. Loads the package-root `.env`, subcommand dispatch (`migrate`/`revert`/`benchmark`), config loading, wires the MCP SDK server, connects stdio, *then* auto-activates `autoActivate` servers in the background |
+| `env-file.ts` | `loadEnvFile` — dotenv file → `process.env` (existing variables win; missing file is fine) |
 | `broker.ts` | `createBroker({router, manager, skillRouter})` → `listTools()` / `callTool()`. All meta-tool handling and proxying; transport-independent so it is unit-tested |
 | `meta-tools.ts` | 12 meta-tool definitions (`META_TOOLS`, incl. `run_chain`) and zod argument schemas; gateway-only tools filtered in stdio |
 | `tool-chain/sandbox.ts` | `runCode()` — runs a `run_chain` script in a fresh QuickJS (WebAssembly) context via `quickjs-emscripten`. Only `servers.*` bindings and `console.log` reach the host; resource limits (memory, stack, deadline, call count, concurrency, log and value size) |
