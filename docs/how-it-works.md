@@ -216,6 +216,29 @@ All 12 runs were correct. Optimization saved 7.6% against `call_tool` with no ex
 server, `call_tool` costs 2.2% more than `direct` (the meta-tool schemas outweigh one server's
 tools); the schema savings in the table above appear only once there are many servers.
 
+The same command with `--include-catalog` (`direct` carries 15 runnable catalog servers plus the
+fixture):
+
+| Strategy | Input tokens (range) | Turns | Time | Correct |
+|---|---:|---:|---:|---:|
+| `direct` | 480,536 (480,524–480,548) | 10 | 5.9 s | 2/3 |
+| `call_tool` | 228,202 (228,182–228,239) | 10 | 6.1 s | 3/3 |
+| `call_tool+opt` | 216,728 (210,901–228,343) | 10 | 6.3 s | 3/3 |
+| `run_chain` | 208,546 (208,533–208,570) | 3 | 4.1 s | 3/3 |
+
+Against `direct` that is −52.5% for `call_tool`, −54.9% for `call_tool+opt` and −56.6% for
+`run_chain`; the schema savings only appear with the full catalog. Two things to read carefully:
+
+- **`call_tool+opt` varied.** Its mean saves 5.0% against `call_tool`, but its range is wide:
+  one run cost 228,343 tokens, the same as plain `call_tool`, so optimization saved nothing that
+  round (most likely the model did not pass `fields`), while the other runs saved about 7.6%.
+  Savings from `fields` depend on the agent asking for them.
+- **`direct` got one answer wrong** (2/3 correct), and its mean covers the correct runs only. With
+  three rounds that is an observation, not a measured error rate.
+
+Both runs use one fixture task and three rounds, so they show the shape of the savings, not a
+general performance claim.
+
 Each run is a single cold-cache turn, so cost figures overstate steady-state savings. Codex keeps a
 large fixed system prompt and does not surface tool schemas the same way, so MCP savings show up
 more clearly with the Claude runner. What each strategy measures: [Benchmark](reference.md#benchmark).
