@@ -23,7 +23,12 @@ import { composePrompt, type SecretLookup } from "./prompt-compose.js";
 import { bareToolName, parseNamespacedTool } from "./tool-names.js";
 import { LOG_PREFIX } from "./version.js";
 import { runCode, serverStubs, toScriptResult, type CodeBinding } from "./tool-chain/index.js";
-import { ResultHandleStore, textWithinBudget, type CreatedResultHandle } from "./result-handles.js";
+import {
+  ResultHandleStore,
+  textWithinBudget,
+  type CreatedResultHandle,
+  type ResultHandleOrigin,
+} from "./result-handles.js";
 import { loadTokenizer } from "./tokenizers.js";
 import {
   estimateTokens,
@@ -86,6 +91,8 @@ export interface BrokerDeps {
   tokenizer?: Tokenizer;
   /** Receives per-tool timing and estimated-token measurements when optimization is enabled. */
   onOptimizationMetrics?: (context: OptimizationContext, metrics: OptimizationMetrics) => void;
+  /** Called when get_result reads a handle, with the tool whose response it holds. */
+  onResultHandleRead?: (origin: ResultHandleOrigin) => void;
 }
 
 /** Reject if the promise does not settle within `ms` (nested calls in scripts use the run budget). */
@@ -342,6 +349,7 @@ export function createBroker({
   responseOptimization,
   tokenizer: injectedTokenizer,
   onOptimizationMetrics,
+  onResultHandleRead,
 }: BrokerDeps) {
   // Each broker instance belongs to one stdio client or gateway session; result handles never
   // cross that boundary or survive a process restart.
@@ -413,10 +421,13 @@ export function createBroker({
     metrics: OptimizationMetrics | undefined,
     policy: { maxTokens?: number; maxOutputBytes?: number },
     source: HandleSource | undefined,
-    tokenizer: Tokenizer | undefined
+    tokenizer: Tokenizer | undefined,
+    origin: ResultHandleOrigin
   ): { result: ToolResult; metrics: OptimizationMetrics | undefined } => {
     if (!metrics || metrics.complete !== false || response.isError || !source) return { result: response, metrics };
-    const handle = source.kind === "json" ? resultHandles.create(source.value) : resultHandles.createText(source.text);
+    const handle = source.kind === "json"
+      ? resultHandles.create(source.value, origin)
+      : resultHandles.createText(source.text, origin);
     if (!handle) return { result: response, metrics };
     const remeasure = (candidate: ToolResult): OptimizationMetrics => {
       const optimizedTokens = estimateTokens(candidate, tokenizer);
@@ -747,7 +758,8 @@ export function createBroker({
                 optimized.metrics,
                 optimized.policy ?? {},
                 handleSourceForResult(raw),
-                optimized.tokenizer
+                optimized.tokenizer,
+                { serverName: a.server, toolName: a.tool }
               )
             : { result: optimized.result, metrics: undefined };
           const res = offered.result;
@@ -778,27 +790,57 @@ export function createBroker({
         const tokenizer = await resolveTokenizer();
         const kind = resultHandles.kind(a.handle);
         if (!kind) return fail("Result handle is unknown or expired. Call the original tool again to create a new handle.");
+        if (kind === "text" && a.fields) return fail("This handle holds text; pass offset instead of fields.");
+        if (kind === "json" && a.offset !== undefined) {
+          return fail("This handle holds structured data; pass fields instead of offset.");
+        }
+        const origin = resultHandles.origin(a.handle);
+        if (origin) {
+          try {
+            onResultHandleRead?.(origin);
+          } catch {
+            // Usage tracking is advisory.
+          }
+        }
         try {
           if (kind === "text") {
-            if (a.fields) return fail("This handle holds text; pass offset instead of fields.");
             const slice = resultHandles.readText(a.handle, a.offset ?? 0)!;
-            const chunk = textWithinBudget(slice.text, a.maxTokens, (value) => estimateTokens(value, tokenizer));
-            const end = slice.offset + chunk.length;
-            const nextOffset = end < slice.totalLength ? end : null;
-            const lines = [chunk];
-            if (nextOffset !== null) {
-              lines.push(`[lazygate: more text. Continue with get_result {"handle":"${a.handle}","offset":${nextOffset}}]`);
-            }
-            return {
-              content: [{ type: "text", text: lines.join("\n\n") }],
+            const estimate = (value: unknown): number => estimateTokens(value, tokenizer);
+            const page = (chunk: string, nextOffset: number | null): ToolResult => ({
+              content: [
+                {
+                  type: "text",
+                  text: nextOffset === null
+                    ? chunk
+                    : `${chunk}\n\n[lazygate: more text. Continue with get_result {"handle":"${a.handle}","offset":${nextOffset}}]`,
+                },
+              ],
               _meta: {
                 lazygate: {
                   resultHandle: { offset: slice.offset, nextOffset, totalLength: slice.totalLength },
                 },
               },
-            };
+            });
+            // maxTokens bounds the whole response: the continuation note and _meta count too.
+            const overhead = estimate(page("", slice.totalLength));
+            if (overhead >= a.maxTokens) {
+              return fail(`maxTokens ${a.maxTokens} is too small to page this text; use at least ${overhead + 1}.`);
+            }
+            let budget = a.maxTokens - overhead;
+            let response = page(slice.text, null);
+            for (let attempt = 0; attempt < 8; attempt++) {
+              const chunk = textWithinBudget(slice.text, budget, estimate);
+              const end = slice.offset + chunk.length;
+              response = page(chunk, end < slice.totalLength ? end : null);
+              const excess = estimate(response) - a.maxTokens;
+              if (excess <= 0 || budget <= 1) break;
+              budget = Math.max(1, budget - excess);
+            }
+            if (estimate(response) > a.maxTokens) {
+              return fail(`maxTokens ${a.maxTokens} is too small to page this text; use at least ${overhead + 2}.`);
+            }
+            return response;
           }
-          if (a.offset !== undefined) return fail("This handle holds structured data; pass fields instead of offset.");
           const selected = a.fields ? resultHandles.select(a.handle, a.fields) : resultHandles.get(a.handle);
           if (selected === undefined) return fail("Result handle is unknown or expired. Call the original tool again to create a new handle.");
           const bounded = await optimizeToolResult(
@@ -1088,7 +1130,10 @@ export function createBroker({
           };
         }
         if (optimizationEnabled) {
-          const offered = offerResultHandle(response, metrics, policy, handleSourceForValue(run.value), tokenizer);
+          const offered = offerResultHandle(response, metrics, policy, handleSourceForValue(run.value), tokenizer, {
+            serverName: "lazygate",
+            toolName: "run_chain",
+          });
           response = offered.result;
           metrics = offered.metrics ?? metrics;
         }

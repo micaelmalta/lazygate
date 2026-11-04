@@ -36,7 +36,29 @@ describe("built-in tokenizers", () => {
 
     const large = "y".repeat(EXACT_COUNT_MAX_CHARS * 2);
     expect(tokenizer.countTokens(large)).toBe(large.length);
-    expect(encode.mock.calls[1]![0].length).toBeLessThan(large.length);
+    for (const [sample] of encode.mock.calls.slice(1)) expect(sample.length).toBeLessThan(large.length);
+  });
+
+  it("samples across the whole input, not just its start", () => {
+    // One token per "a", four characters per token for "b": a leading sample alone would see only "a".
+    const encode = (text: string) => (text.match(/a/g)?.length ?? 0) + Math.ceil((text.match(/b/g)?.length ?? 0) / 4);
+    const tokenizer = countingTokenizer("test", encode);
+    const half = EXACT_COUNT_MAX_CHARS;
+    const mixed = "a".repeat(half) + "b".repeat(half);
+    const exact = encode(mixed);
+    const sampled = tokenizer.countTokens(mixed);
+    expect(Math.abs(sampled - exact) / exact).toBeLessThan(0.05);
+  });
+
+  it("keys the memo by digest so cached entries do not hold response text", () => {
+    const encode = jest.fn((text: string) => text.length);
+    const tokenizer = countingTokenizer("test", encode);
+    const text = "z".repeat(10_000);
+    tokenizer.countTokens(text);
+    tokenizer.countTokens("z".repeat(10_000));
+    expect(encode).toHaveBeenCalledTimes(1);
+    tokenizer.countTokens(text + "!");
+    expect(encode).toHaveBeenCalledTimes(2);
   });
 
   it("validates the --tokenizer flag", () => {

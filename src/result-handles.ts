@@ -23,12 +23,19 @@ export interface CreatedResultHandle {
   expiresAt: number;
 }
 
+/** The tool whose response a handle holds, so reads can be attributed to it in usage data. */
+export interface ResultHandleOrigin {
+  serverName: string;
+  toolName: string;
+}
+
 interface StoredResult {
   kind: ResultHandleKind;
   /** JSON text for "json" entries, the raw text for "text" entries. */
   data: string;
   bytes: number;
   expiresAt: number;
+  origin?: ResultHandleOrigin;
 }
 
 export interface TextSlice {
@@ -67,7 +74,7 @@ export class ResultHandleStore {
   }
 
   /** Store a JSON-compatible value and return an opaque handle, or null when it is too large. */
-  create(value: unknown): CreatedResultHandle | null {
+  create(value: unknown, origin?: ResultHandleOrigin): CreatedResultHandle | null {
     let json: string | undefined;
     try {
       json = JSON.stringify(value);
@@ -75,19 +82,26 @@ export class ResultHandleStore {
       return null;
     }
     if (json === undefined) return null;
-    return this.store("json", json);
+    return this.store("json", json, origin);
   }
 
   /** Store a text result (HTML, Markdown, plain text) for offset-based reads. */
-  createText(text: string): CreatedResultHandle | null {
+  createText(text: string, origin?: ResultHandleOrigin): CreatedResultHandle | null {
     if (typeof text !== "string" || text.length === 0) return null;
-    return this.store("text", text);
+    return this.store("text", text, origin);
   }
 
   /** The kind of a live handle, or undefined for an unknown or expired one. */
   kind(handle: string): ResultHandleKind | undefined {
     this.removeExpired();
     return this.entries.get(handle)?.kind;
+  }
+
+  /** The tool a live handle came from, when it was recorded. */
+  origin(handle: string): ResultHandleOrigin | undefined {
+    this.removeExpired();
+    const origin = this.entries.get(handle)?.origin;
+    return origin ? { ...origin } : undefined;
   }
 
   /** Return a fresh copy of a stored value (text entries return the string), or undefined. */
@@ -113,7 +127,7 @@ export class ResultHandleStore {
     return { text: entry.data.slice(start), offset: start, totalLength: entry.data.length };
   }
 
-  private store(kind: ResultHandleKind, data: string): CreatedResultHandle | null {
+  private store(kind: ResultHandleKind, data: string, origin?: ResultHandleOrigin): CreatedResultHandle | null {
     this.removeExpired();
     const bytes = Buffer.byteLength(data, "utf8");
     if (bytes > this.maxEntryBytes || bytes > this.maxBytes) return null;
@@ -125,7 +139,7 @@ export class ResultHandleStore {
     } while (this.entries.has(handle));
 
     const expiresAt = this.now() + this.ttlMs;
-    this.entries.set(handle, { kind, data, bytes, expiresAt });
+    this.entries.set(handle, { kind, data, bytes, expiresAt, ...(origin ? { origin: { ...origin } } : {}) });
     this.bytes += bytes;
     return { handle, kind, expiresAt };
   }

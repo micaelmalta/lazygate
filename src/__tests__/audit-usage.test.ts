@@ -68,6 +68,37 @@ describe("usage-based optimization recommendations", () => {
     const s = summarizeUsage(calls(5, { server: "jira", target: "search", originalTokens: 6000 }));
     expect(s.recommendations).toHaveLength(1);
   });
+
+  it("flags tools whose reduced responses are usually read back with get_result", () => {
+    const reduced = (target: string, selected: string) =>
+      calls(6, {
+        server: "c", target, optimizationMode: "adaptive", optimizationSelectedMode: selected,
+        originalTokens: 9000, savedTokens: 8000, optimizationComplete: false, resultHandleOffered: true,
+      });
+    const reads = (source: string, count: number) =>
+      calls(count, { tool: "get_result", server: "c", resultHandleSource: source, originalTokens: 2000 });
+    const events = [
+      ...reduced("summarized", "schema"),
+      ...reads("c.summarized", 4),
+      ...reduced("trimmed", "prune"),
+      ...reads("c.trimmed", 2),
+      ...reduced("fine", "prune"),
+      ...reads("c.fine", 1),
+    ];
+    const byTool = Object.fromEntries(recommendOptimizationPolicies(events).map((r) => [r.tool, r]));
+    expect(byTool["c.summarized"]).toMatchObject({
+      action: "review_policy",
+      reason: "frequent_result_reads",
+      calls: 6,
+      suggestedPolicy: { mode: "adaptive", allowSummary: false },
+    });
+    expect(byTool["c.trimmed"]).toMatchObject({ reason: "frequent_result_reads" });
+    expect(byTool["c.trimmed"]!.suggestedPolicy).toBeUndefined();
+    expect(byTool["c.fine"]?.reason).not.toBe("frequent_result_reads");
+
+    const summary = summarizeUsage(events);
+    expect(summary).toMatchObject({ resultHandleOffers: 18, resultHandleReads: 7, resultHandleReadRate: 39 });
+  });
 });
 
 describe("usage summary", () => {

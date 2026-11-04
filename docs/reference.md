@@ -142,10 +142,17 @@ no candidate meets the threshold, the response is left unchanged apart from any 
 budget.
 
 Adaptive needs no per-tool setup. Without `candidates` (including `defaultMode: "adaptive"`) it
-compares an automatic set: `prune` of nulls and empty strings, arrays and objects, and
-`html_markdown`. It adds `schema` for responses of at least `schemaMinInputTokens` (default `8000`),
-where a summary plus a result handle beats returning or truncating the payload. A tool can still
-list explicit candidates:
+compares an automatic set that changes the representation but not the information: `prune` of
+nulls and empty strings, arrays and objects, and `html_markdown`. The lossy `schema` summary
+(field shapes plus a few samples) is never chosen automatically, because the smallest response is
+not the most useful one when the agent needs every row: the agent would have to call `get_result`,
+and the extra turn can cost more than the tokens saved. A tool whose callers usually want an
+overview can opt in with `"allowSummary": true`, which adds `schema` for responses of at least
+`schemaMinInputTokens` (default `8000`); listing `schema` in `candidates` does the same explicitly.
+
+Candidates are ranked by serialized size; only the original and the winner go through the
+configured tokenizer, which also confirms the winner still meets `minSavingsPercent`. Output
+budgets apply once, to the selected result. A tool can still list explicit candidates:
 
 ```json
 {
@@ -186,7 +193,10 @@ at least five successful calls: review a policy that falls back on 20% or more o
 transform time exceeds half the call time; turn off a policy that saves under 5%, or adaptive
 optimization that almost never selects a candidate; pin a mode that adaptive selects on 80% or more
 of calls; add a projection when agents pass `fields` on at least half the calls; and enable
-`adaptive` for tools whose median response is 2,000 tokens or more with no policy. Each suggestion
+`adaptive` for tools whose median response is 2,000 tokens or more with no policy. Before any of
+those, it flags tools where agents call `get_result` after 30% or more of the responses that
+offered a handle: the reduction is removing data they need. The dashboard's "Result reads" figure
+is the same rate across all tools. Each suggestion
 names the `server.tool` key and, where possible, a policy to paste into `responseOptimization.tools`.
 They are prompts for review, not automatic changes.
 

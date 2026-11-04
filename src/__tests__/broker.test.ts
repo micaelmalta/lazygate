@@ -6,7 +6,7 @@ import { createBroker, summarizeDescription } from "../broker.js";
 import { ToolRouter, type ServerConfig } from "../router.js";
 import { SkillRouter } from "../skill-router.js";
 import type { ProcessManager, MCPTool } from "../process-manager.js";
-import { parseResponseOptimizationConfig } from "../response-optimizer.js";
+import { estimateTokens, parseResponseOptimizationConfig } from "../response-optimizer.js";
 
 const server = (o: Partial<ServerConfig> = {}): ServerConfig => ({
   description: "Test server",
@@ -553,6 +553,105 @@ describe("createBroker", () => {
       const fieldsOnText = await broker.callTool("get_result", { handle: handle.handle, fields: ["a"] });
       expect(fieldsOnText.isError).toBe(true);
       expect(text(fieldsOnText)).toMatch(/pass offset instead of fields/);
+    });
+
+    it("keeps each text page, continuation note included, within maxTokens", async () => {
+      const responseOptimization = parseResponseOptimizationConfig({
+        responseOptimization: { enabled: true, defaultMode: "off", maxOutputTokens: 600 },
+      }).config;
+      broker = createBroker({
+        router,
+        manager: mk.manager as unknown as ProcessManager,
+        skillRouter: null,
+        responseOptimization,
+      });
+      const fullText = Array.from({ length: 300 }, (_, i) => `"quoted" line ${i}\twith escapes`).join("\n");
+      mk.manager.callTool.mockResolvedValueOnce({ content: [{ type: "text", text: fullText }] } as never);
+      const result = await broker.callTool("call_tool", { server: "github", tool: "github_tool", args: {} });
+      const handle = (result._meta as any).lazygate.responseOptimization.resultHandle.handle;
+
+      for (const maxTokens of [120, 200, 400]) {
+        let offset = 0;
+        let rebuilt = "";
+        for (let page = 0; page < 500; page++) {
+          const chunk = await broker.callTool("get_result", { handle, offset, maxTokens });
+          expect(chunk.isError).toBeFalsy();
+          expect(estimateTokens(chunk)).toBeLessThanOrEqual(maxTokens);
+          rebuilt += text(chunk).split("\n\n[lazygate: more text.")[0];
+          const next = (chunk._meta as any).lazygate.resultHandle.nextOffset;
+          if (next === null) break;
+          offset = next;
+        }
+        expect(rebuilt).toBe(fullText);
+      }
+
+      const tooSmall = await broker.callTool("get_result", { handle, offset: 0, maxTokens: 10 });
+      expect(tooSmall.isError).toBe(true);
+      expect(text(tooSmall)).toMatch(/maxTokens 10 is too small to page this text; use at least \d+/);
+    });
+
+    it("lets the agent recover a field its projection left out, and reports the read", async () => {
+      const onResultHandleRead = jest.fn();
+      broker = createBroker({
+        router,
+        manager: mk.manager as unknown as ProcessManager,
+        skillRouter: null,
+        onResultHandleRead,
+      });
+      const incidents = Array.from({ length: 12 }, (_, i) => ({
+        id: `INC-${i}`,
+        severity: ["sev1", "sev2", "sev3"][i % 3],
+        summary: `Incident ${i}`,
+      }));
+      mk.manager.callTool.mockResolvedValueOnce({ content: [], structuredContent: { incidents } } as never);
+
+      // The agent first asks for ids only, then realizes it needs severity for the distribution.
+      const projected = await broker.callTool("call_tool", {
+        server: "github",
+        tool: "github_tool",
+        args: {},
+        fields: ["incidents.id"],
+      });
+      expect(JSON.stringify(projected.structuredContent)).not.toContain("severity");
+      const handle = (projected._meta as any).lazygate.responseOptimization.resultHandle.handle;
+
+      const severities = await broker.callTool("get_result", { handle, fields: ["incidents.severity"] });
+      const counts: Record<string, number> = {};
+      for (const { severity } of (severities.structuredContent as { incidents: { severity: string }[] }).incidents) {
+        counts[severity] = (counts[severity] ?? 0) + 1;
+      }
+      expect(counts).toEqual({ sev1: 4, sev2: 4, sev3: 4 });
+      expect(onResultHandleRead).toHaveBeenCalledWith({ serverName: "github", toolName: "github_tool" });
+    });
+
+    it("keeps every row under the default adaptive policy instead of summarizing", async () => {
+      const responseOptimization = parseResponseOptimizationConfig({
+        responseOptimization: { enabled: true, defaultMode: "adaptive" },
+      }).config;
+      broker = createBroker({
+        router,
+        manager: mk.manager as unknown as ProcessManager,
+        skillRouter: null,
+        responseOptimization,
+      });
+      const incidents = Array.from({ length: 400 }, (_, i) => ({
+        id: `INC-${i}`,
+        severity: ["sev1", "sev2", "sev3"][i % 3],
+        owner: null,
+        assignees: [],
+        labels: [],
+        resolution: "",
+        custom: {},
+        summary: `Incident ${i} ${"detail ".repeat(10)}`,
+      }));
+      mk.manager.callTool.mockResolvedValueOnce({ content: [], structuredContent: { incidents } } as never);
+
+      const result = await broker.callTool("call_tool", { server: "github", tool: "github_tool", args: {} });
+      const delivered = (result.structuredContent as { incidents: { severity: string }[] }).incidents;
+      expect(delivered).toHaveLength(400);
+      expect(delivered.filter((row) => row.severity === "sev1")).toHaveLength(134);
+      expect(JSON.stringify(result.structuredContent)).not.toContain("owner");
+      expect(result._meta).toMatchObject({ lazygate: { responseOptimization: { selectedMode: "prune" } } });
     });
 
     it("drops the handle instead of failing when its pointer would exceed the output budget", async () => {

@@ -47,6 +47,10 @@ export interface AuditEvent {
   optimizationComplete?: boolean;
   /** "fields" when the agent asked call_tool for specific fields (field names are not logged). */
   optimizationIntent?: string;
+  /** True when the response carried a get_result handle for the omitted data. */
+  resultHandleOffered?: boolean;
+  /** On get_result rows: the `server.tool` whose response the handle held. */
+  resultHandleSource?: string;
 }
 
 /** A suggested `responseOptimization.tools` change derived from recent audit rows. */
@@ -59,6 +63,7 @@ export interface PolicyRecommendation {
     | "stable_adaptive_selection"
     | "agents_request_fields"
     | "frequent_fallbacks"
+    | "frequent_result_reads"
     | "overhead_high"
     | "adaptive_never_selected"
     | "no_savings";
@@ -74,6 +79,8 @@ const FALLBACK_RATE_LIMIT = 20;
 const OVERHEAD_SHARE_LIMIT = 0.5;
 const STABLE_SELECTION_SHARE = 0.8;
 const MIN_USEFUL_REDUCTION_PERCENT = 5;
+/** Share of handle-bearing responses followed by get_result above which the reduction costs turns. */
+const RESULT_READ_RATE_LIMIT = 30;
 
 const AUTOMATIC_PRUNE = { mode: "prune", removeNulls: true, removeEmptyObjects: true, removeEmptyArrays: true, removeEmptyStrings: true };
 
@@ -107,22 +114,34 @@ export function recommendOptimizationPolicies(events: AuditedEvent[], limit = 20
     modes: Map<string, number>;
     selected: Map<string, number>;
     intentCalls: number;
+    handleOffers: number;
+    handleReads: number;
   }
   const byTool = new Map<string, ToolStats>();
-  for (const e of events) {
-    if (!isUsageEvent(e) || !e.server || !e.target || e.ok === false) continue;
-    const key = `${e.server}.${e.target}`;
+  const stats = (key: string): ToolStats => {
     let s = byTool.get(key);
     if (!s) {
       s = {
         calls: 0, originalTokens: [], msTotal: 0, policyCalls: 0, policyOriginal: 0, policySaved: 0,
         policyDurationMs: 0, policyMs: 0, fallbacks: 0, modes: new Map(), selected: new Map(), intentCalls: 0,
+        handleOffers: 0, handleReads: 0,
       };
       byTool.set(key, s);
     }
+    return s;
+  };
+  for (const e of events) {
+    if (!isUsageEvent(e) || e.ok === false) continue;
+    if (e.tool === "get_result") {
+      if (e.resultHandleSource) stats(e.resultHandleSource).handleReads += 1;
+      continue;
+    }
+    if (!e.server || !e.target) continue;
+    const s = stats(`${e.server}.${e.target}`);
     s.calls += 1;
     s.originalTokens.push(e.originalTokens ?? 0);
     s.msTotal += e.ms ?? 0;
+    if (e.resultHandleOffered) s.handleOffers += 1;
     if (e.optimizationIntent) {
       s.intentCalls += 1;
       continue;
@@ -142,6 +161,23 @@ export function recommendOptimizationPolicies(events: AuditedEvent[], limit = 20
   for (const [tool, s] of byTool) {
     if (s.calls < RECOMMENDATION_MIN_CALLS) continue;
     const base = { tool, calls: s.calls };
+    const topSelectedOverall = mostCommon(s.selected);
+    if (s.handleOffers >= RECOMMENDATION_MIN_CALLS) {
+      const readRate = Math.round((Math.min(s.handleReads, s.handleOffers) / s.handleOffers) * 100);
+      if (readRate >= RESULT_READ_RATE_LIMIT) {
+        const summarized = topSelectedOverall?.[0] === "schema";
+        out.push({
+          ...base, action: "review_policy", reason: "frequent_result_reads",
+          ...(summarized ? { suggestedPolicy: { mode: "adaptive", allowSummary: false } } : {}),
+          detail:
+            `Agents called get_result after ${readRate}% of ${s.handleOffers} reduced responses, so the reduction costs an extra turn. ` +
+            (summarized
+              ? "Adaptive mostly picked the schema summary; turn allowSummary off."
+              : "Raise maxTokens or project the fields agents read back."),
+        });
+        continue;
+      }
+    }
     if (s.policyCalls >= RECOMMENDATION_MIN_CALLS) {
       const fallbackRate = Math.round((s.fallbacks / s.policyCalls) * 100);
       const avgOptimizationMs = s.policyDurationMs / s.policyCalls;
@@ -248,6 +284,11 @@ export interface UsageSummary {
   optimizationDurationMs: number;
   averageOptimizationDurationMs: number;
   optimizationSelectedModes: Record<string, number>;
+  /** Responses that carried a get_result handle, and get_result reads of those handles. */
+  resultHandleOffers: number;
+  resultHandleReads: number;
+  /** Reads as a percentage of offers: how often a reduction cost the agent another turn. */
+  resultHandleReadRate: number;
   from: string | null;
   to: string | null;
   byServer: UsageBucket[];
@@ -328,6 +369,8 @@ export function summarizeUsage(events: AuditedEvent[], top = 10): UsageSummary {
   let optimizationFallbacks = 0;
   let optimizationIncompleteCalls = 0;
   let optimizationDurationMs = 0;
+  let resultHandleOffers = 0;
+  let resultHandleReads = 0;
   const selectedModes = new Map<string, number>();
   const byServer = new Map<string, UsageBucket>();
   const byTool = new Map<string, UsageBucket>();
@@ -341,6 +384,8 @@ export function summarizeUsage(events: AuditedEvent[], top = 10): UsageSummary {
     originalTokens += e.originalTokens ?? 0;
     optimizedTokens += e.optimizedTokens ?? 0;
     savedTokens += e.savedTokens ?? 0;
+    if (e.resultHandleOffered) resultHandleOffers += 1;
+    if (e.tool === "get_result" && e.resultHandleSource && e.ok !== false) resultHandleReads += 1;
     if (e.optimizationMode) {
       optimizationCalls += 1;
       if (e.optimizationFallback) optimizationFallbacks += 1;
@@ -375,6 +420,11 @@ export function summarizeUsage(events: AuditedEvent[], top = 10): UsageSummary {
     optimizationDurationMs,
     averageOptimizationDurationMs: optimizationCalls ? optimizationDurationMs / optimizationCalls : 0,
     optimizationSelectedModes: Object.fromEntries(selectedModes),
+    resultHandleOffers,
+    resultHandleReads,
+    resultHandleReadRate: resultHandleOffers
+      ? Math.round((Math.min(resultHandleReads, resultHandleOffers) / resultHandleOffers) * 100)
+      : 0,
     from,
     to,
     byServer: ranked(byServer, top),

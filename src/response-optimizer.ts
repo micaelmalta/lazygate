@@ -48,7 +48,13 @@ export interface OptimizationPolicy {
   minInputTokens?: number;
   /** Minimum estimated reduction required to select a candidate (default 10%). */
   minSavingsPercent?: number;
-  /** Automatic candidates add `schema` at or above this estimated input size (default 8000). */
+  /**
+   * Let the automatic candidate set include `schema`, which replaces the data with a field summary
+   * and samples (the full value stays behind a result handle). Off by default: the smallest
+   * response is not the most useful one when the agent needs every row.
+   */
+  allowSummary?: boolean;
+  /** With allowSummary, automatic candidates add `schema` at or above this estimated input size (default 8000). */
   schemaMinInputTokens?: number;
 }
 
@@ -168,6 +174,7 @@ const policySchema = z
     candidates: z.array(candidateSchema).min(1).max(4).optional(),
     minInputTokens: z.number().int().min(1).max(1_000_000).optional(),
     minSavingsPercent: z.number().min(0).max(100).optional(),
+    allowSummary: z.boolean().optional(),
     schemaMinInputTokens: z.number().int().min(1).max(1_000_000).optional(),
   })
   .strict()
@@ -892,18 +899,20 @@ const DEFAULT_SCHEMA_MIN_INPUT_TOKENS = 8000;
 
 /**
  * Candidates used when an adaptive policy lists none (for example `defaultMode: "adaptive"`).
- * Empty-value pruning and HTML conversion keep the content; `schema` is added only for responses
- * large enough that a summary plus a result handle beats returning or truncating the payload.
+ * Empty-value pruning and HTML conversion change the representation, not the information. The
+ * lossy `schema` summary joins only when the policy sets `allowSummary` and the response is large.
  */
 export function automaticCandidates(
   originalTokens: number,
-  schemaMinInputTokens = DEFAULT_SCHEMA_MIN_INPUT_TOKENS
+  options: { allowSummary?: boolean; schemaMinInputTokens?: number } = {}
 ): OptimizationCandidate[] {
   const candidates: OptimizationCandidate[] = [
     { mode: "prune", removeNulls: true, removeEmptyObjects: true, removeEmptyArrays: true, removeEmptyStrings: true },
     { mode: "html_markdown" },
   ];
-  if (originalTokens >= schemaMinInputTokens) candidates.push({ mode: "schema" });
+  if (options.allowSummary && originalTokens >= (options.schemaMinInputTokens ?? DEFAULT_SCHEMA_MIN_INPUT_TOKENS)) {
+    candidates.push({ mode: "schema" });
+  }
   return candidates;
 }
 
@@ -915,21 +924,27 @@ async function optimizeAdaptively<T extends OptimizableToolResult>(
   tokenEstimator: TokenEstimator
 ): Promise<OptimizedToolResult<T>> {
   const estimate = tokenEstimator.estimate;
+  // Rank candidates by serialized length and run the configured tokenizer only on the original and
+  // the winner: model tokenizers cost ~190 ms/MB, and candidates differ by far more than the error.
+  const rank = tokenEstimator.hasCustom ? createTokenEstimator() : tokenEstimator;
   const started = performance.now();
   const originalTokens = estimate(original);
+  const originalRank = rank === tokenEstimator ? originalTokens : rank.estimate(original);
   const candidates = (
-    policy.candidates?.length ? policy.candidates : automaticCandidates(originalTokens, policy.schemaMinInputTokens)
+    policy.candidates?.length ? policy.candidates : automaticCandidates(originalTokens, policy)
   ).slice(0, MAX_ADAPTIVE_CANDIDATES);
   const minInputTokens = policy.minInputTokens ?? 128;
   const minSavingsPercent = policy.minSavingsPercent ?? 10;
   const transformLimitMs = policy.maxTransformMs ?? DEFAULT_CONFIG.maxTransformMs;
-  let best: { result: T; mode: OptimizationCandidateMode; metrics: OptimizationMetrics } | undefined;
+  const savingsPercent = (before: number, after: number): number => (before ? ((before - after) / before) * 100 : 0);
+  let best: { result: T; mode: OptimizationCandidateMode; metrics: OptimizationMetrics; size: number } | undefined;
   let lastFailure: string | undefined;
 
   if (!original.isError && originalTokens >= minInputTokens) {
     for (const candidate of candidates) {
       const remainingMs = transformLimitMs - (performance.now() - started);
       if (remainingMs <= 1) break;
+      // Output budgets apply once, to the winner; truncating every candidate would hide which is smaller.
       const candidateResult = await optimizeToolResultWithEstimator(
         original,
         {
@@ -939,47 +954,51 @@ async function optimizeAdaptively<T extends OptimizableToolResult>(
           candidates: undefined,
           minInputTokens: undefined,
           minSavingsPercent: undefined,
+          maxTokens: undefined,
+          maxOutputBytes: undefined,
           includeMetadata: false,
           suppressMetadata: true,
           maxTransformMs: Math.max(1, Math.floor(remainingMs)),
         },
         context,
         undefined,
-        tokenEstimator
+        rank
       );
       if (candidateResult.metrics.failure) lastFailure = candidateResult.metrics.failure;
       if (candidateResult.result.isError || candidateResult.metrics.failure || !candidateResult.metrics.changed) continue;
-      const savingsPercent = originalTokens
-        ? ((originalTokens - estimate(candidateResult.result)) / originalTokens) * 100
-        : 0;
-      if (savingsPercent <= 0 || savingsPercent < minSavingsPercent) continue;
-      if (
-        !best ||
-        estimate(candidateResult.result) < estimate(best.result) ||
-        (estimate(candidateResult.result) === estimate(best.result) &&
-          candidateResult.metrics.durationMs < best.metrics.durationMs)
-      ) {
-        best = { result: candidateResult.result, mode: candidate.mode, metrics: candidateResult.metrics };
+      const size = candidateResult.metrics.optimizedTokens;
+      const saved = savingsPercent(originalRank, size);
+      if (saved <= 0 || saved < minSavingsPercent) continue;
+      if (!best || size < best.size || (size === best.size && candidateResult.metrics.durationMs < best.metrics.durationMs)) {
+        best = { result: candidateResult.result, mode: candidate.mode, metrics: candidateResult.metrics, size };
       }
     }
   }
+  if (best && rank !== tokenEstimator) {
+    const saved = savingsPercent(originalTokens, estimate(best.result));
+    if (saved <= 0 || saved < minSavingsPercent) best = undefined;
+  }
 
   // Even when no candidate wins, retain the normal hard output budget behavior.
-  const base = best
-    ? { result: best.result, metrics: best.metrics }
-    : await optimizeToolResultWithEstimator(
-        original,
-        { ...policy, mode: "off", candidates: undefined, minInputTokens: undefined, minSavingsPercent: undefined, includeMetadata: false },
-        context,
-        undefined,
-        tokenEstimator
-      );
+  const base = await optimizeToolResultWithEstimator(
+    best ? best.result : original,
+    { ...policy, mode: "off", candidates: undefined, minInputTokens: undefined, minSavingsPercent: undefined, includeMetadata: false },
+    context,
+    undefined,
+    tokenEstimator
+  );
   let result = base.result;
+  const baseSaved = Math.max(0, originalTokens - base.metrics.optimizedTokens);
   let metrics: OptimizationMetrics = {
     ...base.metrics,
     mode: "adaptive",
     selectedMode: best?.mode ?? "off",
     tokenizer: tokenEstimator.label(),
+    originalTokens,
+    savedTokens: baseSaved,
+    reductionPercent: originalTokens ? Math.round((baseSaved / originalTokens) * 100) : 0,
+    changed: Boolean(best) || base.metrics.changed,
+    complete: (best?.metrics.complete ?? true) && base.metrics.complete,
     durationMs: performance.now() - started,
     ...(!best && lastFailure && !base.metrics.failure ? { failure: lastFailure } : {}),
   };

@@ -28,6 +28,7 @@ import { composePrompt, promptArgumentsForList } from "../prompt-compose.js";
 import { skillProvenance } from "../broker.js";
 import { estimateTokens, type OptimizationMetrics, type Tokenizer } from "../response-optimizer.js";
 import { loadTokenizer } from "../tokenizers.js";
+import type { ResultHandleOrigin } from "../result-handles.js";
 import type { Registry } from "../registry.js";
 import { APP_NAME } from "../paths.js";
 import { VERSION, LOG_PREFIX } from "../version.js";
@@ -57,7 +58,18 @@ import { gatewayStartupWarnings } from "./warnings.js";
 import { isSharedIndexable } from "./tool-index-warm.js";
 
 /** Per-request bag so optimization metrics can be audited without attaching them to the client result. */
-const callMetrics = new AsyncLocalStorage<{ last?: OptimizationMetrics }>();
+interface CallMetricsBag {
+  last?: OptimizationMetrics;
+  handleOrigin?: ResultHandleOrigin;
+}
+const callMetrics = new AsyncLocalStorage<CallMetricsBag>();
+
+/** True when a call_tool / run_chain response carries a get_result handle. */
+function offersResultHandle(result: ToolResult): boolean {
+  const lazygate = (result._meta as { lazygate?: { responseOptimization?: { resultHandle?: unknown } } } | undefined)
+    ?.lazygate;
+  return Boolean(lazygate?.responseOptimization?.resultHandle);
+}
 
 export interface GatewayOptions {
   registry: Registry;
@@ -404,13 +416,17 @@ export async function startGateway(opts: GatewayOptions): Promise<Gateway> {
         const bag = callMetrics.getStore();
         if (bag) bag.last = metrics;
       },
+      onResultHandleRead: (origin) => {
+        const bag = callMetrics.getStore();
+        if (bag) bag.handleOrigin = origin;
+      },
     });
 
     server.setRequestHandler(ListToolsRequestSchema, async () => broker.listTools());
     server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const { name, arguments: args } = request.params;
       const started = Date.now();
-      const metricsBag: { last?: OptimizationMetrics } = {};
+      const metricsBag: CallMetricsBag = {};
       let result: ToolResult;
       try {
         result = await callMetrics.run(metricsBag, () =>
@@ -438,11 +454,12 @@ export async function startGateway(opts: GatewayOptions): Promise<Gateway> {
         );
       const originalTokens = measured?.originalTokens ?? optimizedTokens;
       const savedTokens = measured?.savedTokens ?? Math.max(0, originalTokens - optimizedTokens);
+      const handleOrigin = metricsBag.handleOrigin;
       audit.record({
         user: user.id,
         session: session.id,
         tool: name,
-        server: innerServer || target || undefined,
+        server: innerServer || target || handleOrigin?.serverName || undefined,
         target: innerTool,
         ok: !result.isError,
         ms: Date.now() - started,
@@ -458,6 +475,8 @@ export async function startGateway(opts: GatewayOptions): Promise<Gateway> {
         optimizationFallback: measured ? Boolean(measured.failure) : undefined,
         optimizationComplete: measured?.complete,
         optimizationIntent: measured?.intent,
+        resultHandleOffered: offersResultHandle(result) || undefined,
+        resultHandleSource: handleOrigin ? `${handleOrigin.serverName}.${handleOrigin.toolName.slice(0, 200)}` : undefined,
       });
       return result;
     });

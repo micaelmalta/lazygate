@@ -1487,6 +1487,7 @@ export const UI_JS = String.raw`(function () {
       statsEl.appendChild(stat("Fallback rate", u.optimizationCalls ? u.optimizationFallbackRate + "%" : "—", u.optimizationFallbacks ? "warn" : null));
       statsEl.appendChild(stat("Incomplete rate", u.optimizationCalls ? u.optimizationIncompleteRate + "%" : "—", u.optimizationIncompleteCalls ? "warn" : null));
       statsEl.appendChild(stat("Optimizer avg", u.optimizationCalls ? fmtCount(Math.round(u.averageOptimizationDurationMs)) + " ms" : "—"));
+      statsEl.appendChild(stat("Result reads", u.resultHandleOffers ? u.resultHandleReadRate + "%" : "—", u.resultHandleReadRate >= 30 ? "warn" : null));
       statsEl.appendChild(stat("Live sessions", fmtCount(d.liveSessions)));
 
       var from = u.from ? ago(u.from) : null;

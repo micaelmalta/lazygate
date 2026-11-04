@@ -418,22 +418,54 @@ describe("adaptive response optimization", () => {
     expect((converted.result.content[0] as { text: string }).text).toContain("# Guide");
   });
 
-  it("adds schema to the automatic candidates only for large responses", async () => {
+  it("never summarizes automatically unless the policy allows it", async () => {
     const rows = Array.from({ length: 40 }, (_, i) => ({ id: i, title: `Row ${i}`, body: "z".repeat(60) }));
     const original = { content: [], structuredContent: rows };
-    expect(automaticCandidates(10_000).map((c) => c.mode)).toEqual(["prune", "html_markdown", "schema"]);
-    expect(automaticCandidates(100).map((c) => c.mode)).toEqual(["prune", "html_markdown"]);
+    expect(automaticCandidates(10_000).map((c) => c.mode)).toEqual(["prune", "html_markdown"]);
+    expect(automaticCandidates(10_000, { allowSummary: true }).map((c) => c.mode)).toEqual(["prune", "html_markdown", "schema"]);
+    expect(automaticCandidates(100, { allowSummary: true }).map((c) => c.mode)).toEqual(["prune", "html_markdown"]);
 
-    const small = await optimizeToolResult(original, { mode: "adaptive", minInputTokens: 1 }, context);
-    expect(small.metrics.selectedMode).toBe("off");
-
-    const large = await optimizeToolResult(
+    const conservative = await optimizeToolResult(
       original,
       { mode: "adaptive", minInputTokens: 1, schemaMinInputTokens: 100 },
       context
     );
-    expect(large.metrics.selectedMode).toBe("schema");
-    expect(large.result.structuredContent).toMatchObject({ _count: 40 });
+    expect(conservative.metrics).toMatchObject({ selectedMode: "off", complete: true });
+    expect(conservative.result.structuredContent).toEqual(rows);
+
+    const summarized = await optimizeToolResult(
+      original,
+      { mode: "adaptive", minInputTokens: 1, allowSummary: true, schemaMinInputTokens: 100 },
+      context
+    );
+    expect(summarized.metrics).toMatchObject({ selectedMode: "schema", complete: false });
+    expect(summarized.result.structuredContent).toMatchObject({ _count: 40 });
+  });
+
+  it("ranks candidates by size and runs a custom tokenizer only on the original and the winner", async () => {
+    const counted: number[] = [];
+    const tokenizer = {
+      name: "counting",
+      countTokens(text: string) {
+        counted.push(text.length);
+        return Math.ceil(text.length / 3);
+      },
+    };
+    const rows = Array.from({ length: 30 }, (_, i) => ({ id: i, note: null, tags: [], body: "y".repeat(40) }));
+    const optimized = await optimizeToolResult(
+      { content: [], structuredContent: rows },
+      { mode: "adaptive", minInputTokens: 1, candidates: [{ mode: "prune", removeNulls: true, removeEmptyArrays: true }, { mode: "schema" }, { mode: "html_markdown" }] },
+      context,
+      undefined,
+      tokenizer
+    );
+    expect(optimized.metrics).toMatchObject({ selectedMode: "schema", tokenizer: "counting" });
+    const original = JSON.stringify({ content: [], structuredContent: rows }).length;
+    const distinctInputs = new Set(counted);
+    expect(distinctInputs.has(original)).toBe(true);
+    // The pruned candidate lost to schema on size and never reached the tokenizer.
+    const pruned = JSON.stringify({ content: [], structuredContent: rows.map(({ id, body }) => ({ id, body })) }).length;
+    expect(distinctInputs.has(pruned)).toBe(false);
   });
 
   it("skips adaptive candidates below the configured minimum input size", async () => {
