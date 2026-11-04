@@ -33,6 +33,221 @@ export interface AuditEvent {
   optimizedTokens?: number;
   /** originalTokens − optimizedTokens (0 when optimization did not shrink the payload). */
   savedTokens?: number;
+  /** Optimization policy mode, absent when the call was not measured by the optimizer. */
+  optimizationMode?: string;
+  /** Candidate selected by adaptive optimization; "off" means no candidate qualified. */
+  optimizationSelectedMode?: string;
+  /** Token counter label used by the optimizer for its estimates and budgets. */
+  optimizationTokenizer?: string;
+  /** Time spent transforming or enforcing an output budget, separate from total call time. */
+  optimizationDurationMs?: number;
+  /** True when a configured transformation failed and the original response was retained. */
+  optimizationFallback?: boolean;
+  /** Whether the optimized response retained all source information. */
+  optimizationComplete?: boolean;
+  /** "fields" when the agent asked call_tool for specific fields (field names are not logged). */
+  optimizationIntent?: string;
+  /** True when the response carried a get_result handle for the omitted data. */
+  resultHandleOffered?: boolean;
+  /** On get_result rows: the `server.tool` whose response the handle held. */
+  resultHandleSource?: string;
+}
+
+/** A suggested `responseOptimization.tools` change derived from recent audit rows. */
+export interface PolicyRecommendation {
+  /** Policy key in servers.json (`server.tool`). */
+  tool: string;
+  action: "enable_adaptive" | "pin_mode" | "add_projection" | "review_policy" | "disable";
+  reason:
+    | "large_unoptimized_responses"
+    | "stable_adaptive_selection"
+    | "agents_request_fields"
+    | "frequent_fallbacks"
+    | "frequent_result_reads"
+    | "overhead_high"
+    | "adaptive_never_selected"
+    | "no_savings";
+  detail: string;
+  calls: number;
+  suggestedPolicy?: Record<string, unknown>;
+}
+
+/** Fewer calls than this per tool are not enough evidence for a recommendation. */
+export const RECOMMENDATION_MIN_CALLS = 5;
+const LARGE_RESPONSE_TOKENS = 2000;
+const FALLBACK_RATE_LIMIT = 20;
+const OVERHEAD_SHARE_LIMIT = 0.5;
+const STABLE_SELECTION_SHARE = 0.8;
+const MIN_USEFUL_REDUCTION_PERCENT = 5;
+/**
+ * Share of handle-bearing responses followed by get_result above which the reduction costs more
+ * than it saves. Counts tool calls: the gateway cannot see whether a read shared a model turn.
+ */
+const RESULT_READ_RATE_LIMIT = 30;
+
+const AUTOMATIC_PRUNE = { mode: "prune", removeNulls: true, removeEmptyObjects: true, removeEmptyArrays: true, removeEmptyStrings: true };
+
+function median(values: number[]): number {
+  if (!values.length) return 0;
+  const sorted = values.slice().sort((a, b) => a - b);
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[middle]! : (sorted[middle - 1]! + sorted[middle]!) / 2;
+}
+
+function mostCommon(counts: Map<string, number>): [string, number] | undefined {
+  return [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0];
+}
+
+/**
+ * Turn proxied-call audit rows into at most one policy suggestion per upstream tool. Problems with
+ * an existing policy (fallbacks, overhead, no savings) outrank tuning (pinning, projection), which
+ * outranks enabling optimization for large unoptimized responses.
+ */
+export function recommendOptimizationPolicies(events: AuditedEvent[], limit = 20): PolicyRecommendation[] {
+  interface ToolStats {
+    calls: number;
+    originalTokens: number[];
+    msTotal: number;
+    policyCalls: number;
+    policyOriginal: number;
+    policySaved: number;
+    policyDurationMs: number;
+    policyMs: number;
+    fallbacks: number;
+    modes: Map<string, number>;
+    selected: Map<string, number>;
+    intentCalls: number;
+    handleOffers: number;
+    handleReads: number;
+  }
+  const byTool = new Map<string, ToolStats>();
+  const stats = (key: string): ToolStats => {
+    let s = byTool.get(key);
+    if (!s) {
+      s = {
+        calls: 0, originalTokens: [], msTotal: 0, policyCalls: 0, policyOriginal: 0, policySaved: 0,
+        policyDurationMs: 0, policyMs: 0, fallbacks: 0, modes: new Map(), selected: new Map(), intentCalls: 0,
+        handleOffers: 0, handleReads: 0,
+      };
+      byTool.set(key, s);
+    }
+    return s;
+  };
+  for (const e of events) {
+    if (!isUsageEvent(e) || e.ok === false) continue;
+    if (e.tool === "get_result") {
+      if (e.resultHandleSource) stats(e.resultHandleSource).handleReads += 1;
+      continue;
+    }
+    if (!e.server || !e.target) continue;
+    const s = stats(`${e.server}.${e.target}`);
+    s.calls += 1;
+    s.originalTokens.push(e.originalTokens ?? 0);
+    s.msTotal += e.ms ?? 0;
+    if (e.resultHandleOffered) s.handleOffers += 1;
+    if (e.optimizationIntent) {
+      s.intentCalls += 1;
+      continue;
+    }
+    if (!e.optimizationMode || e.optimizationMode === "off") continue;
+    s.policyCalls += 1;
+    s.policyOriginal += e.originalTokens ?? 0;
+    s.policySaved += e.savedTokens ?? 0;
+    s.policyDurationMs += e.optimizationDurationMs ?? 0;
+    s.policyMs += e.ms ?? 0;
+    if (e.optimizationFallback) s.fallbacks += 1;
+    s.modes.set(e.optimizationMode, (s.modes.get(e.optimizationMode) ?? 0) + 1);
+    if (e.optimizationSelectedMode) s.selected.set(e.optimizationSelectedMode, (s.selected.get(e.optimizationSelectedMode) ?? 0) + 1);
+  }
+
+  const out: PolicyRecommendation[] = [];
+  for (const [tool, s] of byTool) {
+    if (s.calls < RECOMMENDATION_MIN_CALLS) continue;
+    const base = { tool, calls: s.calls };
+    const topSelectedOverall = mostCommon(s.selected);
+    if (s.handleOffers >= RECOMMENDATION_MIN_CALLS) {
+      const readRate = Math.round((Math.min(s.handleReads, s.handleOffers) / s.handleOffers) * 100);
+      if (readRate >= RESULT_READ_RATE_LIMIT) {
+        const summarized = topSelectedOverall?.[0] === "schema";
+        out.push({
+          ...base, action: "review_policy", reason: "frequent_result_reads",
+          ...(summarized ? { suggestedPolicy: { mode: "adaptive", allowSummary: false } } : {}),
+          detail:
+            `Agents called get_result after ${readRate}% of ${s.handleOffers} reduced responses, so the reduction costs extra tool calls (and often model turns). ` +
+            (summarized
+              ? "Adaptive mostly picked the schema summary; turn allowSummary off."
+              : "Raise maxTokens or project the fields agents read back."),
+        });
+        continue;
+      }
+    }
+    if (s.policyCalls >= RECOMMENDATION_MIN_CALLS) {
+      const fallbackRate = Math.round((s.fallbacks / s.policyCalls) * 100);
+      const avgOptimizationMs = s.policyDurationMs / s.policyCalls;
+      const avgCallMs = s.policyMs / s.policyCalls;
+      const mode = mostCommon(s.modes)![0];
+      const reduction = s.policyOriginal ? (s.policySaved / s.policyOriginal) * 100 : 0;
+      const topSelected = mostCommon(s.selected);
+      if (fallbackRate >= FALLBACK_RATE_LIMIT) {
+        out.push({
+          ...base, action: "review_policy", reason: "frequent_fallbacks",
+          detail: `${fallbackRate}% of ${s.policyCalls} optimized calls fell back to the original response (input limits or transform errors).`,
+        });
+        continue;
+      }
+      if (avgOptimizationMs >= 5 && avgOptimizationMs > avgCallMs * OVERHEAD_SHARE_LIMIT) {
+        out.push({
+          ...base, action: "review_policy", reason: "overhead_high",
+          detail: `Optimization averages ${Math.round(avgOptimizationMs)} ms against ${Math.round(avgCallMs)} ms per call.`,
+        });
+        continue;
+      }
+      if (mode === "adaptive" && topSelected?.[0] === "off" && topSelected[1] / s.policyCalls >= 0.9) {
+        out.push({
+          ...base, action: "disable", reason: "adaptive_never_selected", suggestedPolicy: { mode: "off" },
+          detail: `Adaptive optimization kept the original response on ${topSelected[1]} of ${s.policyCalls} calls.`,
+        });
+        continue;
+      }
+      if (mode !== "adaptive" && reduction < MIN_USEFUL_REDUCTION_PERCENT) {
+        out.push({
+          ...base, action: "disable", reason: "no_savings", suggestedPolicy: { mode: "off" },
+          detail: `The ${mode} policy saved ${reduction.toFixed(1)}% of tokens over ${s.policyCalls} calls.`,
+        });
+        continue;
+      }
+      if (
+        mode === "adaptive" && topSelected && topSelected[0] !== "off" &&
+        topSelected[1] / s.policyCalls >= STABLE_SELECTION_SHARE
+      ) {
+        const pinned = topSelected[0];
+        out.push({
+          ...base, action: "pin_mode", reason: "stable_adaptive_selection",
+          suggestedPolicy: pinned === "prune" ? AUTOMATIC_PRUNE : { mode: pinned },
+          detail:
+            `Adaptive selected ${pinned} on ${topSelected[1]} of ${s.policyCalls} calls; pinning it skips candidate evaluation` +
+            (pinned === "project" || pinned === "jsonpath" ? " (copy that candidate's options)." : "."),
+        });
+        continue;
+      }
+    }
+    if (s.intentCalls >= RECOMMENDATION_MIN_CALLS && s.intentCalls * 2 >= s.calls) {
+      out.push({
+        ...base, action: "add_projection", reason: "agents_request_fields",
+        suggestedPolicy: { mode: "project", fields: ["<fields agents request>"] },
+        detail: `Agents passed call_tool fields on ${s.intentCalls} of ${s.calls} calls; a project policy applies the same projection to every call.`,
+      });
+      continue;
+    }
+    const medianTokens = median(s.originalTokens);
+    if (s.policyCalls === 0 && medianTokens >= LARGE_RESPONSE_TOKENS) {
+      out.push({
+        ...base, action: "enable_adaptive", reason: "large_unoptimized_responses", suggestedPolicy: { mode: "adaptive" },
+        detail: `Median response is ~${Math.round(medianTokens).toLocaleString("en-US")} tokens and no optimization policy applied.`,
+      });
+    }
+  }
+  return out.sort((a, b) => b.calls - a.calls || a.tool.localeCompare(b.tool)).slice(0, limit);
 }
 
 export type AuditedEvent = AuditEvent & { ts: string };
@@ -45,6 +260,14 @@ export interface UsageBucket {
   originalTokens: number;
   optimizedTokens: number;
   savedTokens: number;
+  optimizationCalls: number;
+  optimizationFallbacks: number;
+  optimizationFallbackRate: number;
+  optimizationIncompleteCalls: number;
+  optimizationIncompleteRate: number;
+  optimizationDurationMs: number;
+  averageOptimizationDurationMs: number;
+  optimizationSelectedModes: Record<string, number>;
 }
 
 export interface UsageSummary {
@@ -56,11 +279,26 @@ export interface UsageSummary {
   optimizedTokens: number;
   savedTokens: number;
   reductionPercent: number;
+  optimizationCalls: number;
+  optimizationFallbacks: number;
+  optimizationFallbackRate: number;
+  optimizationIncompleteCalls: number;
+  optimizationIncompleteRate: number;
+  optimizationDurationMs: number;
+  averageOptimizationDurationMs: number;
+  optimizationSelectedModes: Record<string, number>;
+  /** Responses that carried a get_result handle, and get_result reads of those handles. */
+  resultHandleOffers: number;
+  resultHandleReads: number;
+  /** Reads as a percentage of offers: how often a reduction cost the agent another tool call. */
+  resultHandleReadRate: number;
   from: string | null;
   to: string | null;
   byServer: UsageBucket[];
   byTool: UsageBucket[];
   byUser: UsageBucket[];
+  /** Policy suggestions from the same audit window (see recommendOptimizationPolicies). */
+  recommendations: PolicyRecommendation[];
 }
 
 /** True for MCP session tool traffic (excludes UI admin mutations and auth noise). */
@@ -77,7 +315,23 @@ function bump(
 ): void {
   let b = map.get(key);
   if (!b) {
-    b = { key, calls: 0, ok: 0, error: 0, originalTokens: 0, optimizedTokens: 0, savedTokens: 0 };
+    b = {
+      key,
+      calls: 0,
+      ok: 0,
+      error: 0,
+      originalTokens: 0,
+      optimizedTokens: 0,
+      savedTokens: 0,
+      optimizationCalls: 0,
+      optimizationFallbacks: 0,
+      optimizationFallbackRate: 0,
+      optimizationIncompleteCalls: 0,
+      optimizationIncompleteRate: 0,
+      optimizationDurationMs: 0,
+      averageOptimizationDurationMs: 0,
+      optimizationSelectedModes: {},
+    };
     map.set(key, b);
   }
   b.calls += 1;
@@ -86,6 +340,18 @@ function bump(
   b.originalTokens += e.originalTokens ?? 0;
   b.optimizedTokens += e.optimizedTokens ?? 0;
   b.savedTokens += e.savedTokens ?? 0;
+  if (e.optimizationMode) {
+    b.optimizationCalls += 1;
+    if (e.optimizationFallback) b.optimizationFallbacks += 1;
+    if (e.optimizationComplete === false) b.optimizationIncompleteCalls += 1;
+    b.optimizationDurationMs += e.optimizationDurationMs ?? 0;
+    b.optimizationFallbackRate = Math.round((b.optimizationFallbacks / b.optimizationCalls) * 100);
+    b.optimizationIncompleteRate = Math.round((b.optimizationIncompleteCalls / b.optimizationCalls) * 100);
+    b.averageOptimizationDurationMs = b.optimizationDurationMs / b.optimizationCalls;
+    if (e.optimizationMode === "adaptive" && e.optimizationSelectedMode) {
+      b.optimizationSelectedModes[e.optimizationSelectedMode] = (b.optimizationSelectedModes[e.optimizationSelectedMode] ?? 0) + 1;
+    }
+  }
 }
 
 function ranked(map: Map<string, UsageBucket>, limit: number): UsageBucket[] {
@@ -102,6 +368,13 @@ export function summarizeUsage(events: AuditedEvent[], top = 10): UsageSummary {
   let originalTokens = 0;
   let optimizedTokens = 0;
   let savedTokens = 0;
+  let optimizationCalls = 0;
+  let optimizationFallbacks = 0;
+  let optimizationIncompleteCalls = 0;
+  let optimizationDurationMs = 0;
+  let resultHandleOffers = 0;
+  let resultHandleReads = 0;
+  const selectedModes = new Map<string, number>();
   const byServer = new Map<string, UsageBucket>();
   const byTool = new Map<string, UsageBucket>();
   const byUser = new Map<string, UsageBucket>();
@@ -114,6 +387,17 @@ export function summarizeUsage(events: AuditedEvent[], top = 10): UsageSummary {
     originalTokens += e.originalTokens ?? 0;
     optimizedTokens += e.optimizedTokens ?? 0;
     savedTokens += e.savedTokens ?? 0;
+    if (e.resultHandleOffered) resultHandleOffers += 1;
+    if (e.tool === "get_result" && e.resultHandleSource && e.ok !== false) resultHandleReads += 1;
+    if (e.optimizationMode) {
+      optimizationCalls += 1;
+      if (e.optimizationFallback) optimizationFallbacks += 1;
+      if (e.optimizationComplete === false) optimizationIncompleteCalls += 1;
+      optimizationDurationMs += e.optimizationDurationMs ?? 0;
+      if (e.optimizationMode === "adaptive" && e.optimizationSelectedMode) {
+        selectedModes.set(e.optimizationSelectedMode, (selectedModes.get(e.optimizationSelectedMode) ?? 0) + 1);
+      }
+    }
     if (e.server) bump(byServer, e.server, e);
     const toolKey = e.server && e.target ? `${e.server}/${e.target}` : e.tool || "(unknown)";
     bump(byTool, toolKey, e);
@@ -131,11 +415,25 @@ export function summarizeUsage(events: AuditedEvent[], top = 10): UsageSummary {
     optimizedTokens,
     savedTokens,
     reductionPercent: originalTokens ? Math.round((savedTokens / originalTokens) * 100) : 0,
+    optimizationCalls,
+    optimizationFallbacks,
+    optimizationFallbackRate: optimizationCalls ? Math.round((optimizationFallbacks / optimizationCalls) * 100) : 0,
+    optimizationIncompleteCalls,
+    optimizationIncompleteRate: optimizationCalls ? Math.round((optimizationIncompleteCalls / optimizationCalls) * 100) : 0,
+    optimizationDurationMs,
+    averageOptimizationDurationMs: optimizationCalls ? optimizationDurationMs / optimizationCalls : 0,
+    optimizationSelectedModes: Object.fromEntries(selectedModes),
+    resultHandleOffers,
+    resultHandleReads,
+    resultHandleReadRate: resultHandleOffers
+      ? Math.round((Math.min(resultHandleReads, resultHandleOffers) / resultHandleOffers) * 100)
+      : 0,
     from,
     to,
     byServer: ranked(byServer, top),
     byTool: ranked(byTool, top),
     byUser: ranked(byUser, top),
+    recommendations: recommendOptimizationPolicies(usage),
   };
 }
 

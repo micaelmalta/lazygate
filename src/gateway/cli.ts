@@ -13,6 +13,7 @@ import { AuditLog } from "./audit.js";
 import { startGateway } from "./server.js";
 import { hardenGatewayDirs } from "./hardening.js";
 import { parseStdioCommandAllowlist } from "../stdio-policy.js";
+import { loadTokenizer, parseTokenizerFlag } from "../tokenizers.js";
 
 function flag(args: string[], name: string): string | undefined {
   const i = args.indexOf(name);
@@ -85,6 +86,7 @@ async function serve(args: string[]): Promise<void> {
     publicUrl: flag(args, "--public-url"),
     stdioCommandAllowlist,
     namespaceTools: has(args, "--namespace-tools"),
+    tokenizer: await loadTokenizer(parseTokenizerFlag(flag(args, "--tokenizer"))),
   });
 
   console.error(`${LOG_PREFIX} HTTP gateway listening on ${gateway.url}`);

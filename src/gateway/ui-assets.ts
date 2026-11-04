@@ -1429,6 +1429,7 @@ export const UI_JS = String.raw`(function () {
     var toolsOut = h("div");
     var usersOut = h("div");
     var usersCard = null;
+    var recsOut = h("div");
     var rangeEl = h("p", { class: "muted" });
 
     function stop() {
@@ -1450,6 +1451,12 @@ export const UI_JS = String.raw`(function () {
         h("div", { class: "l" }, label));
     }
 
+    function modeCounts(counts) {
+      return Object.keys(counts || {}).sort().map(function (mode) {
+        return mode + " " + fmtCount(counts[mode]);
+      }).join(", ") || "—";
+    }
+
     function bucketRows(list) {
       return (list || []).map(function (b) {
         return [
@@ -1457,7 +1464,12 @@ export const UI_JS = String.raw`(function () {
           String(b.calls),
           fmtCount(b.optimizedTokens),
           fmtCount(b.savedTokens),
-          b.originalTokens ? Math.round((b.savedTokens / b.originalTokens) * 100) + "%" : "—"
+          b.originalTokens ? Math.round((b.savedTokens / b.originalTokens) * 100) + "%" : "—",
+          fmtCount(b.optimizationCalls),
+          modeCounts(b.optimizationSelectedModes),
+          b.optimizationCalls ? fmtCount(b.optimizationFallbacks) + " (" + b.optimizationFallbackRate + "%)" : "—",
+          b.optimizationCalls ? fmtCount(b.optimizationIncompleteCalls) + " (" + b.optimizationIncompleteRate + "%)" : "—",
+          b.optimizationCalls ? fmtCount(Math.round(b.averageOptimizationDurationMs)) + " ms" : "—"
         ];
       });
     }
@@ -1470,6 +1482,12 @@ export const UI_JS = String.raw`(function () {
       statsEl.appendChild(stat("Tokens used", fmtCount(u.optimizedTokens)));
       statsEl.appendChild(stat("Tokens saved", fmtCount(u.savedTokens), u.savedTokens ? "good" : null));
       statsEl.appendChild(stat("Reduction", (u.reductionPercent || 0) + "%", u.reductionPercent ? "good" : null));
+      statsEl.appendChild(stat("Optimizer calls", fmtCount(u.optimizationCalls)));
+      statsEl.appendChild(stat("Adaptive selections", modeCounts(u.optimizationSelectedModes)));
+      statsEl.appendChild(stat("Fallback rate", u.optimizationCalls ? u.optimizationFallbackRate + "%" : "—", u.optimizationFallbacks ? "warn" : null));
+      statsEl.appendChild(stat("Incomplete rate", u.optimizationCalls ? u.optimizationIncompleteRate + "%" : "—", u.optimizationIncompleteCalls ? "warn" : null));
+      statsEl.appendChild(stat("Optimizer avg", u.optimizationCalls ? fmtCount(Math.round(u.averageOptimizationDurationMs)) + " ms" : "—"));
+      statsEl.appendChild(stat("Result reads", u.resultHandleOffers ? u.resultHandleReadRate + "%" : "—", u.resultHandleReadRate >= 30 ? "warn" : null));
       statsEl.appendChild(stat("Live sessions", fmtCount(d.liveSessions)));
 
       var from = u.from ? ago(u.from) : null;
@@ -1477,17 +1495,27 @@ export const UI_JS = String.raw`(function () {
       rangeEl.textContent = u.calls
         ? ("Based on the last " + u.calls + " MCP calls" + (from && to ? " (" + from + " → " + to + ")" : "") +
           (everyone ? " · everyone" : " · you") +
-          ". Token figures are estimates (≈4 chars/token); savings appear when response optimization shrinks a payload.")
+          ". Token figures use the configured estimator (default ≈4 chars/token); optimization time measures transformation and output-budget work. Fallbacks retain the original response; incomplete results omit source information.")
         : "No MCP tool calls in the recent audit window yet.";
 
       clear(serversOut);
-      serversOut.appendChild(table(["Server", "Calls", "Used", "Saved", "↓"], bucketRows(u.byServer), "No server traffic yet."));
+      serversOut.appendChild(table(["Server", "Calls", "Used", "Saved", "↓", "Optimizer calls", "Adaptive selections", "Fallbacks", "Incomplete", "Avg time"], bucketRows(u.byServer), "No server traffic yet."));
       clear(toolsOut);
-      toolsOut.appendChild(table(["Tool", "Calls", "Used", "Saved", "↓"], bucketRows(u.byTool), "No tool traffic yet."));
+      toolsOut.appendChild(table(["Tool", "Calls", "Used", "Saved", "↓", "Optimizer calls", "Adaptive selections", "Fallbacks", "Incomplete", "Avg time"], bucketRows(u.byTool), "No tool traffic yet."));
       if (usersCard) {
         clear(usersOut);
-        usersOut.appendChild(table(["User", "Calls", "Used", "Saved", "↓"], bucketRows(u.byUser), "No user traffic yet."));
+        usersOut.appendChild(table(["User", "Calls", "Used", "Saved", "↓", "Optimizer calls", "Adaptive selections", "Fallbacks", "Incomplete", "Avg time"], bucketRows(u.byUser), "No user traffic yet."));
       }
+      clear(recsOut);
+      recsOut.appendChild(table(["Tool", "Suggestion", "Why", "Calls", "Policy"], (u.recommendations || []).map(function (r) {
+        return [
+          h("code", null, r.tool),
+          r.action.replace(/_/g, " "),
+          r.detail,
+          String(r.calls),
+          r.suggestedPolicy ? h("code", null, JSON.stringify(r.suggestedPolicy)) : "—"
+        ];
+      }), "No suggestions yet (each tool needs at least 5 successful calls in this window)."));
       status.textContent = "Updated " + new Date().toLocaleTimeString();
     }
 
@@ -1511,6 +1539,10 @@ export const UI_JS = String.raw`(function () {
         rangeEl));
       root.appendChild(h("div", { class: "card" }, h("h2", null, "Top servers"), serversOut));
       root.appendChild(h("div", { class: "card" }, h("h2", null, "Top tools"), toolsOut));
+      root.appendChild(h("div", { class: "card" },
+        h("h2", null, "Optimization suggestions"),
+        h("p", { class: "muted" }, "Derived from the audit window above. Add a suggested policy under responseOptimization.tools in servers.json; review it before applying."),
+        recsOut));
       if (everyone) {
         usersCard = h("div", { class: "card" }, h("h2", null, "Top users"), usersOut);
         root.appendChild(usersCard);
@@ -1595,11 +1627,14 @@ export const UI_JS = String.raw`(function () {
           (e.server && e.target ? e.server + " \u00b7 " + e.target : e.server || e.target || ""),
           e.session ? h("code", { title: e.session }, String(e.session).slice(0, 8)) : "",
           result,
-          String(e.ms || 0)
+          String(e.ms || 0),
+          e.optimizationMode
+            ? (e.optimizationSelectedMode ? e.optimizationMode + " → " + e.optimizationSelectedMode : e.optimizationMode)
+            : ""
         ];
       });
       clear(out);
-      out.appendChild(table(["When", "User", "Action", "Target", "Session", "Result", "ms"], rows, "Nothing yet."));
+      out.appendChild(table(["When", "User", "Action", "Target", "Session", "Result", "ms", "Optimization"], rows, "Nothing yet."));
     }
 
     function ensureUi() {

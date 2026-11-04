@@ -123,7 +123,6 @@ Set `enabled` to `true` to apply the global `defaultMode` and per-tool policies.
         "mode": "project",
         "fields": ["id", "title", "state", "assignee.login"]
       },
-      "fetch.get_page": { "mode": "html_markdown" },
       "docs.get_documentation": { "mode": "html_reader" },
       "jira.search_issues": {
         "mode": "prune",
@@ -135,8 +134,83 @@ Set `enabled` to `true` to apply the global `defaultMode` and per-tool policies.
 }
 ```
 
-Supported modes are `off`, `prune`, `project`, `jsonpath`, `schema`, `html_markdown`, and
-`html_reader`. Projection paths use dot notation or quoted/numeric bracket notation and continue
+Supported modes are `off`, `prune`, `project`, `jsonpath`, `schema`, `html_markdown`,
+`html_reader`, and `adaptive`. Adaptive mode skips responses below `minInputTokens` (default
+`128`), evaluates up to four candidates within the configured `maxTransformMs` limit, and selects
+the smallest output that meets `minSavingsPercent` (default `10`). Ties use the faster candidate. If
+no candidate meets the threshold, the response is left unchanged apart from any configured output
+budget.
+
+Adaptive needs no per-tool setup. Without `candidates` (including `defaultMode: "adaptive"`) it
+compares an automatic set that keeps every row and every non-empty value: `html_markdown`, and
+`prune` of nulls and empty strings, arrays, and objects. Pruning is still lossy: `null`, `[]`, or
+`{}` can mean something different from a missing field, so a pruned result is marked incomplete
+and offers a result handle. Tools that declare an `outputSchema` keep their empty values by
+default; any tool can opt out of pruning with `"keepEmptyValues": true` (or back in with `false`).
+
+The `schema` summary (field shapes plus a few samples) is never chosen automatically, because the
+smallest response is not the most useful one when the agent needs every row: the agent would have
+to call `get_result`, and the extra call can cost more than the tokens saved. A tool whose callers
+usually want an overview can opt in with `"allowSummary": true`, which adds `schema` for responses
+of at least `schemaMinInputTokens` (default `8000`); listing `schema` in `candidates` does the
+same explicitly.
+
+Candidates are ranked by serialized size; only the original and the winner go through the
+configured tokenizer, which also confirms the winner still meets `minSavingsPercent`. Output
+budgets apply once, to the selected result. A tool can still list explicit candidates:
+
+```json
+{
+  "responseOptimization": {
+    "enabled": true,
+    "defaultMode": "adaptive",
+    "maxOutputTokens": 4000
+  }
+}
+```
+
+```json
+{
+  "responseOptimization": {
+    "enabled": true,
+    "tools": {
+      "github.search_issues": {
+        "mode": "adaptive",
+        "minInputTokens": 128,
+        "minSavingsPercent": 10,
+        "candidates": [
+          { "mode": "project", "fields": ["issues.id", "issues.title", "issues.state"] },
+          { "mode": "prune", "removeNulls": true, "removeEmptyObjects": true }
+        ]
+      }
+    }
+  }
+}
+```
+
+Adaptive metrics include `selectedMode` (`off` when no candidate was selected). Gateway audit rows
+and usage summaries retain this value, and the dashboard shows per-mode selection counts. Response
+metadata includes it when metadata is requested or the result is incomplete.
+
+**Policy suggestions.** The gateway dashboard (and `usage.recommendations` in the `/ui` dashboard
+API) suggests at most one change per upstream tool from the recent audit window, once a tool has
+at least five successful calls: review a policy that falls back on 20% or more of calls or whose
+transform time exceeds half the call time; turn off a policy that saves under 5%, or adaptive
+optimization that almost never selects a candidate; pin a mode that adaptive selects on 80% or more
+of calls; add a projection when agents pass `fields` on at least half the calls; and enable
+`adaptive` for tools whose median response is 2,000 tokens or more with no policy. Before any of
+those, it flags tools where agents call `get_result` after 30% or more of the responses that
+offered a handle: the reduction is removing data they need. The dashboard's "Result reads" figure
+is the same rate across all tools. Both count `get_result` tool calls; the gateway cannot see model
+turns, and a read made alongside other calls adds no turn. `lazygate benchmark --tasks` measures
+turns end to end. Each suggestion
+names the `server.tool` key and, where possible, a policy to paste into `responseOptimization.tools`.
+They are prompts for review, not automatic changes.
+
+Candidate modes are
+`prune`, `project`, `jsonpath`, `schema`, `html_markdown`, and `html_reader`; each candidate can
+include the same mode-specific options used by its standalone policy. Projection paths use dot
+notation or quoted/numeric bracket notation and continue
 through arrays. JSONPath uses `jsonpath-plus` with bounded data filters; function calls and prototype
 access are rejected. `prune` removes only the empty values
 enabled by its flags and configured `removeFields`; it preserves `false`, `0`, and duplicate array
@@ -147,9 +221,46 @@ extracts a main or article area and removes navigation, sidebars, headers, and f
 scripts, styles, comments, tracking pixels, hidden content, and unsafe link schemes. The optimizer
 does not fetch URLs, execute page code, or alter intermediate `run_chain` results.
 
-`maxOutputTokens` and the per-tool `maxTokens` are approximate limits based on four characters per
-token. Oversized text is cut at paragraph or line boundaries where possible; structured values are
-cut at record or property boundaries. A partial result carries `_meta.lazygate.responseOptimization`
+**Agent-requested fields.** `call_tool` accepts an optional `fields` list of dot-separated paths
+(for example `["id", "bodyLength"]`). The response is projected to those fields even when
+`enabled` is `false`, because the calling agent asked for it; configured output budgets still apply.
+Metrics and metadata carry `intent: "fields"`, and the full response stays retrievable through a
+result handle.
+
+**Token counting.** `tokenizer` selects the counter for `maxOutputTokens`, the per-tool `maxTokens`,
+adaptive selection, metrics, and gateway audit rows: `chars_per_4` (default), `o200k_base`, or
+`cl100k_base`. The last two are exact public encodings (via `js-tiktoken`, loaded on first use);
+Claude's tokenizer is not public, so they approximate Claude counts more closely than four
+characters per token (JSON typically runs nearer three) without matching them. Inputs over 256 KiB
+are counted from a 64 KiB sample and scaled. `--tokenizer <name>` on `lazygate` (stdio) or
+`lazygate serve` overrides the config. Embedding hosts can instead pass any object implementing the
+exported `Tokenizer` interface (`name` plus `countTokens(serializedJson)`) as `tokenizer` to
+`createBroker` or `startGateway`, or directly to `estimateTokens` / `optimizeToolResult`. If a
+tokenizer throws or returns a non-integer count, the optimizer falls back to four characters per
+token and marks the metric as `<name>_fallback_chars_per_4`. `maxOutputBytes` remains an exact
+serialized-byte limit.
+
+**Result handles.** When `call_tool` or `run_chain` returns an incomplete result (projection,
+schema, reader mode, lossy pruning, or truncation to a budget), the full response is kept behind
+an opaque handle. The handle appears in `_meta.lazygate.responseOptimization.resultHandle` and in a
+one-line note appended to the result text, because many clients do not show `_meta` to the model.
+Call `get_result` with it:
+
+- Structured results (structured content, or a text block holding JSON): pass `fields`
+  (dot-separated paths such as `issues.id`) for just those fields, or omit them for the whole value.
+- Text results (HTML, Markdown, plain text): pass `offset` (default `0`) and continue from the
+  returned `nextOffset` until it is `null`.
+
+`get_result` defaults to a 4,000-token output cap (`maxTokens`, at most 16,000). When a budget is
+larger than 512 tokens, truncation leaves 128 tokens free for the handle note; if the note still
+does not fit, the handle is dropped and the bounded response returned without it. Handles are kept
+in memory for five minutes, are scoped to the broker session, and are discarded when that session
+ends. Each session stores at most 100 results, 2 MiB total, and 1 MiB per result; oversized
+results do not receive a handle. Field paths reject prototype-related keys.
+
+Oversized text is cut at paragraph or line boundaries where possible; structured values are cut at
+record or property boundaries. Truncation measures the serialized response (so escaped newlines and
+quotes count) and leaves room for the incomplete-result metadata. A partial result carries `_meta.lazygate.responseOptimization`
 with `complete: false`; `run_chain` also includes a summary in its returned text when needed. Projection, JSONPath, schema,
 reader mode, and pruning that removes values are marked incomplete because they intentionally omit
 source information. Metrics include original and optimized token estimates, savings, duration, and
@@ -299,8 +410,8 @@ advertised tool list stays stable and list_changed does not churn schemas. Use `
 allowlist only when you need upstream tools in `tools/list` and accept the cache cost.
 
 **Clients that ignore `tools/list_changed`** never pick up newly exposed schemas even when `expose`
-is set. Prefer `call_tool` / `describe_tool` so those clients still work. There are **12** meta-tools
-in `META_TOOLS` (10 listed in stdio; gateway also advertises `connect_server` / `disconnect_server`).
+is set. Prefer `call_tool` / `describe_tool` so those clients still work. There are **13** meta-tools
+in `META_TOOLS` (11 listed in stdio; gateway also advertises `connect_server` / `disconnect_server`).
 
 ---
 
@@ -423,24 +534,25 @@ auth). Runs against `~/.config/lazygate/servers.json` and `skills.json` by defau
 ```bash
 npm run build
 lazygate benchmark                                      # MCP + skills via `claude -p`
-lazygate benchmark --runner codex --model gpt-6-luna    # same via Codex / Custom
+lazygate benchmark --runner codex --model gpt-6-luna    # same via Codex / custom provider
 lazygate benchmark --estimate                           # local chars÷4 preview, no API
 lazygate benchmark --mcp-only                           # servers only
 lazygate benchmark --skills-only                        # skills only
-lazygate benchmark --servers fetch-mcp,jira
+lazygate benchmark --servers github,jira
 lazygate benchmark --skills loi,writer,rlm
 lazygate benchmark --rounds 3                           # average over rounds
-lazygate benchmark --tasks                              # multi-step fixture: direct vs call_tool vs run_chain
+lazygate benchmark --tasks                              # multi-step fixture: direct, call_tool, call_tool+opt, run_chain
 lazygate benchmark --tasks --rounds 3                   # same, averaged over 3 runs per strategy
 lazygate benchmark --tasks --include-catalog            # also load your real catalog (see warning below)
 lazygate benchmark --responses-live --cases cases.json --iterations 5 # live response optimization
+lazygate benchmark --responses-live --cases cases.json --tokenizer o200k_base
 ```
 
 `--tasks` runs Claude with permission checks off, so by default it only loads the tickets fixture
 server. `--include-catalog` adds every runnable server from your Lazygate catalog — any destructive
 tool in them then runs unprompted. Use it only with a catalog you would trust that way.
 
-`--tasks` runs the tickets fixture three ways and only prints token deltas when each side of a
+`--tasks` runs the tickets fixture four ways and only prints token deltas when each side of a
 pair answered correctly. With `--rounds N`, each strategy runs N times; input tokens, turns and
 duration are the mean of the correct runs, and each row shows `correct k/N` and the min–max input
 range:
@@ -450,6 +562,11 @@ range:
   the idle benchmark). Classic MCP: all those tool schemas sit in context.
 - **call_tool** / **run_chain** — one Lazygate process wrapping that same catalog; only meta-tools
   are advertised, and the task uses the tickets fixture.
+- **call_tool+opt** — `call_tool` with response optimization on (`defaultMode: "adaptive"`,
+  `maxOutputTokens: 4000`, no per-tool policy), and the model passes `fields` for `get_ticket`.
+  This is the end-to-end check for response optimization: a real model must still produce the
+  right answer from the optimized responses, and the input-token delta against `call_tool` is what
+  optimization saved over the whole task.
 
 ### Live response benchmark
 
@@ -483,10 +600,18 @@ Adapt the server, tool, arguments, and paths to the MCP server's actual response
 checks that selected JSONPath values stay identical; `preserveText` checks that each listed text
 fragment remains in the response. Every sample must pass these checks for the policy to preserve
 correctness. The output includes estimated response token counts and median, p95, and standard
-deviation for upstream tool latency, transformation latency, and their sum. Token counts use
-serialized JSON characters divided by four. This mode makes no model calls and does not measure
-model round trips or full task success. `--responses` remains the deterministic, synthetic local
-optimizer smoke benchmark.
+deviation for upstream tool latency, transformation latency, and their sum. It also returns policy
+recommendations. A recommendation requires at least three samples, successful upstream calls,
+passing preservation checks, no optimizer fallbacks, positive median token savings, and median
+optimization latency no more than half the median upstream latency. Otherwise it reports `keep_off` or
+`insufficient_evidence` with a reason. Adaptive results include their candidate and selected modes.
+These thresholds are a starting signal for policy review, not a production performance guarantee.
+An `adaptive` policy may omit `candidates` to measure the automatic set (reported as
+`candidateModes: "automatic"`). Token counts use serialized JSON characters divided by four unless
+`--tokenizer o200k_base` / `cl100k_base` is passed or `responseOptimization.tokenizer` is set in the
+selected config; the output's `tokenizer` field names the counter used. This mode makes no model calls and does
+not measure model round trips or full task success. `--responses` remains the deterministic,
+synthetic local optimizer smoke benchmark.
 
 ### What it measures
 

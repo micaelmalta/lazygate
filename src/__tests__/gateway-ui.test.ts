@@ -80,7 +80,12 @@ beforeAll(async () => {
       responseOptimization: {
         enabled: true,
         defaultMode: "off",
-        tools: { "jira.search": { mode: "prune", removeNulls: true } },
+        maxInputBytes: 4,
+        tools: {
+          "jira.search": { mode: "prune", removeNulls: true },
+          "jira.jira_probe": { mode: "prune", maxTokens: 1 },
+          "jira.jira_echo": { mode: "adaptive", candidates: [{ mode: "prune" }], maxTokens: 1 },
+        },
       },
       servers: {
         jira: server("jira", { scope: "user", env: { TEST_TOKEN: "${cred:token}" } }),
@@ -476,8 +481,12 @@ describe("status and activity", () => {
   });
 
   it("summarizes usage and estimated tokens on the dashboard", async () => {
+    await ui("PUT", "/ui/api/connections/jira/token", alice, { value: "alice-adaptive-probe" });
     const client = await connect(alice);
     await call(client, "list_active_servers", {});
+    await call(client, "activate_server", { server_name: "jira" });
+    await call(client, "call_tool", { server: "jira", tool: "jira_probe", args: {} });
+    await call(client, "call_tool", { server: "jira", tool: "jira_echo", args: {} });
     // Homepage dashboard is always self-scoped — even for admins without all=1.
     const mine = await ui("GET", "/ui/api/dashboard", alice);
     expect(mine.status).toBe(200);
@@ -486,6 +495,28 @@ describe("status and activity", () => {
     expect(mine.json.usage.optimizedTokens).toBeGreaterThan(0);
     expect(mine.json.usage.savedTokens).toBeGreaterThanOrEqual(0);
     expect(mine.json.usage.byTool.length).toBeGreaterThan(0);
+    expect(mine.json.usage.optimizationCalls).toBeGreaterThan(0);
+    expect(mine.json.usage.optimizationFallbacks).toBeGreaterThan(0);
+    expect(mine.json.usage.optimizationFallbackRate).toBeGreaterThan(0);
+    expect(mine.json.usage.optimizationIncompleteCalls).toBeGreaterThan(0);
+    expect(mine.json.usage.optimizationIncompleteRate).toBeGreaterThan(0);
+    expect(mine.json.usage.averageOptimizationDurationMs).toEqual(expect.any(Number));
+
+    const optimizationEvent = (await ui("GET", "/ui/api/audit?limit=500", alice)).json.events.find(
+      (e: any) => e.tool === "call_tool" && e.target === "jira_probe" && e.optimizationMode === "prune"
+    );
+    expect(optimizationEvent).toMatchObject({
+      optimizationFallback: true,
+      optimizationComplete: false,
+      optimizationTokenizer: "chars_per_4",
+    });
+    expect(optimizationEvent.optimizationDurationMs).toEqual(expect.any(Number));
+    const adaptiveEvent = (await ui("GET", "/ui/api/audit?limit=500", alice)).json.events.find(
+      (e: any) => e.tool === "call_tool" && e.target === "jira_echo" && e.optimizationMode === "adaptive"
+    );
+    expect(adaptiveEvent.optimizationSelectedMode).toBe("off");
+    expect(mine.json.usage.optimizationSelectedModes).toEqual({ off: 1 });
+    expect(mine.json.usage.byTool.find((tool: any) => tool.key === "jira/jira_echo").optimizationSelectedModes).toEqual({ off: 1 });
 
     const adminSelf = await ui("GET", "/ui/api/dashboard", admin);
     expect(adminSelf.json.scope).toBe("self");
@@ -1029,7 +1060,12 @@ describe("servers (admin)", () => {
     expect(onDisk.responseOptimization).toEqual({
       enabled: true,
       defaultMode: "off",
-      tools: { "jira.search": { mode: "prune", removeNulls: true } },
+      maxInputBytes: 4,
+      tools: {
+        "jira.search": { mode: "prune", removeNulls: true },
+        "jira.jira_probe": { mode: "prune", maxTokens: 1 },
+        "jira.jira_echo": { mode: "adaptive", candidates: [{ mode: "prune" }], maxTokens: 1 },
+      },
     });
     expect(onDisk.servers.plain.groups).toEqual(["sre"]);
     expect(onDisk.servers.plain.auth).toEqual({ scope: "user", fallback: "server", env: { SVC_TOKEN: "${cred:key}" } });

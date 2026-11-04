@@ -178,11 +178,11 @@ npm run build
 lazygate benchmark --estimate                         # free local preview, no model calls
 lazygate benchmark                                    # Claude: MCP schemas and skills
 lazygate benchmark --runner codex --model gpt-6-luna  # skills on Codex
-lazygate benchmark --tasks                            # multi-step task: direct vs call_tool vs run_chain
+lazygate benchmark --tasks                            # multi-step task: direct, call_tool, call_tool+opt, run_chain
 ```
 
 `--tasks` runs one fixture job (`src/__tests__/fixtures/tickets-server.mjs`: count ana's open
-tickets and sum each ticket's `bodyLength`, expected `8 60000`) three ways and only reports token
+tickets and sum each ticket's `bodyLength`, expected `8 60000`) four ways and only reports token
 deltas between strategies that both answered correctly:
 
 | Strategy | What the model sees | Input tokens (range) | Turns | Time |
@@ -196,6 +196,25 @@ all 9 correct. That works out to −58.0% for `call_tool` and −61.6% for `run_
 and −8.7% for `run_chain` against `call_tool`. `direct` is also the noisy one: one of its runs took an
 extra turn (mean 10.3), and every extra turn re-sends all 16 servers' schemas, which likely explains
 the 654,070 outlier.
+
+The table predates a fourth strategy, `call_tool+opt`: `call_tool` with response optimization on
+(`defaultMode: "adaptive"`, no per-tool policy) and the model passing `fields` for `get_ticket`.
+It is the end-to-end check for response optimization: the answer must still be correct, and its
+delta against `call_tool` is what optimization saved across the whole task. A fixture-only run
+(`lazygate benchmark --tasks --rounds 3`, no `--include-catalog`, so `direct` carries just the
+tickets server):
+
+| Strategy | Input tokens (range) | Turns | Time |
+|---|---:|---:|---:|
+| `direct` | 223,270 (223,261–223,287) | 10 | 6.2 s |
+| `call_tool` | 228,085 (228,065–228,105) | 10 | 6.0 s |
+| `call_tool+opt` | 210,774 (210,730–210,812) | 10 | 6.2 s |
+| `run_chain` | 208,408 (208,384–208,429) | 3 | 4.4 s |
+
+All 12 runs were correct. Optimization saved 7.6% against `call_tool` with no extra turns and no
+`get_result` follow-ups, since the requested fields were all the task needed. With a single small
+server, `call_tool` costs 2.2% more than `direct` (the meta-tool schemas outweigh one server's
+tools); the schema savings in the table above appear only once there are many servers.
 
 Each run is a single cold-cache turn, so cost figures overstate steady-state savings. Codex keeps a
 large fixed system prompt and does not surface tool schemas the same way, so MCP savings show up

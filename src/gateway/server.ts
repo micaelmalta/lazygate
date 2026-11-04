@@ -26,7 +26,9 @@ import { META_TOOL_NAMES } from "../meta-tools.js";
 import { formatSkillUri, parseSkillUri } from "../skill-router.js";
 import { composePrompt, promptArgumentsForList } from "../prompt-compose.js";
 import { skillProvenance } from "../broker.js";
-import { estimateTokens, type OptimizationMetrics } from "../response-optimizer.js";
+import { estimateTokens, type OptimizationMetrics, type Tokenizer } from "../response-optimizer.js";
+import { loadTokenizer } from "../tokenizers.js";
+import type { ResultHandleOrigin } from "../result-handles.js";
 import type { Registry } from "../registry.js";
 import { APP_NAME } from "../paths.js";
 import { VERSION, LOG_PREFIX } from "../version.js";
@@ -56,7 +58,18 @@ import { gatewayStartupWarnings } from "./warnings.js";
 import { isSharedIndexable } from "./tool-index-warm.js";
 
 /** Per-request bag so optimization metrics can be audited without attaching them to the client result. */
-const callMetrics = new AsyncLocalStorage<{ last?: OptimizationMetrics }>();
+interface CallMetricsBag {
+  last?: OptimizationMetrics;
+  handleOrigin?: ResultHandleOrigin;
+}
+const callMetrics = new AsyncLocalStorage<CallMetricsBag>();
+
+/** True when a call_tool / run_chain response carries a get_result handle. */
+function offersResultHandle(result: ToolResult): boolean {
+  const lazygate = (result._meta as { lazygate?: { responseOptimization?: { resultHandle?: unknown } } } | undefined)
+    ?.lazygate;
+  return Boolean(lazygate?.responseOptimization?.resultHandle);
+}
 
 export interface GatewayOptions {
   registry: Registry;
@@ -67,6 +80,8 @@ export interface GatewayOptions {
   /** Per-user marketplace install lists. Required for opt-in discovery. */
   profiles: UserProfileStore;
   audit: AuditLog;
+  /** Optional model-aware token counter for response measurements and budgets. */
+  tokenizer?: Tokenizer;
   /** Default 127.0.0.1. Anything else is the caller's responsibility (TLS, firewall). */
   host?: string;
   /** Default 8787; 0 picks a free port. */
@@ -396,9 +411,14 @@ export async function startGateway(opts: GatewayOptions): Promise<Gateway> {
       skillHashes: registry.skillHashes,
       access,
       secrets,
+      tokenizer: opts.tokenizer,
       onOptimizationMetrics: (_ctx, metrics) => {
         const bag = callMetrics.getStore();
         if (bag) bag.last = metrics;
+      },
+      onResultHandleRead: (origin) => {
+        const bag = callMetrics.getStore();
+        if (bag) bag.handleOrigin = origin;
       },
     });
 
@@ -406,7 +426,7 @@ export async function startGateway(opts: GatewayOptions): Promise<Gateway> {
     server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const { name, arguments: args } = request.params;
       const started = Date.now();
-      const metricsBag: { last?: OptimizationMetrics } = {};
+      const metricsBag: CallMetricsBag = {};
       let result: ToolResult;
       try {
         result = await callMetrics.run(metricsBag, () =>
@@ -426,14 +446,20 @@ export async function startGateway(opts: GatewayOptions): Promise<Gateway> {
       const innerServer = isProxyMeta && typeof a.server === "string" ? a.server : undefined;
       const innerTool = isProxyMeta && typeof a.tool === "string" ? a.tool.slice(0, 200) : undefined;
       const measured = metricsBag.last;
-      const optimizedTokens = measured?.optimizedTokens ?? estimateTokens(result);
+      const optimizedTokens =
+        measured?.optimizedTokens ??
+        estimateTokens(
+          result,
+          opts.tokenizer ?? (await loadTokenizer(registry.router.getResponseOptimization().tokenizer))
+        );
       const originalTokens = measured?.originalTokens ?? optimizedTokens;
       const savedTokens = measured?.savedTokens ?? Math.max(0, originalTokens - optimizedTokens);
+      const handleOrigin = metricsBag.handleOrigin;
       audit.record({
         user: user.id,
         session: session.id,
         tool: name,
-        server: innerServer || target || undefined,
+        server: innerServer || target || handleOrigin?.serverName || undefined,
         target: innerTool,
         ok: !result.isError,
         ms: Date.now() - started,
@@ -441,6 +467,16 @@ export async function startGateway(opts: GatewayOptions): Promise<Gateway> {
         originalTokens,
         optimizedTokens,
         savedTokens,
+        optimizationMode: measured?.mode,
+        optimizationSelectedMode: measured?.selectedMode,
+        optimizationTokenizer: measured?.tokenizer,
+        optimizationDurationMs: measured?.durationMs,
+        // Keep the audit record aggregate-safe: the failure detail can include upstream text.
+        optimizationFallback: measured ? Boolean(measured.failure) : undefined,
+        optimizationComplete: measured?.complete,
+        optimizationIntent: measured?.intent,
+        resultHandleOffered: offersResultHandle(result) || undefined,
+        resultHandleSource: handleOrigin ? `${handleOrigin.serverName}.${handleOrigin.toolName.slice(0, 200)}` : undefined,
       });
       return result;
     });

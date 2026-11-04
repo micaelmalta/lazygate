@@ -1,6 +1,6 @@
 // src/meta-tools.ts
-// Meta-tool definitions the broker advertises (11 total), plus their argument schemas.
-// Stdio lists 9; gateway-only connect/disconnect are filtered when access.connect is absent.
+// Meta-tool definitions the broker advertises (13 total), plus their argument schemas.
+// Stdio lists 11; gateway-only connect/disconnect are filtered when access.connect is absent.
 // Prefer describe_tool / call_tool when the client ignores notifications/tools/list_changed.
 
 import { z } from "zod";
@@ -95,8 +95,48 @@ export const META_TOOLS: Tool[] = [
           type: "object",
           description: "Arguments for the tool (object; default {})",
         },
+        fields: {
+          type: "array",
+          minItems: 1,
+          maxItems: 100,
+          items: { type: "string" },
+          description:
+            "Optional: return only these dot-separated JSON fields (e.g. items.id). The full result stays retrievable via get_result.",
+        },
       },
       required: ["server", "tool"],
+    },
+  },
+  {
+    name: "get_result",
+    description:
+      "Retrieve more of an incomplete result returned by call_tool or run_chain. " +
+      "Pass the handle from responseOptimization.resultHandle with dot-separated fields (structured results) " +
+      "or an offset (text results; continue from nextOffset). Handles are private to this session and expire after a short time.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        handle: { type: "string", description: "Opaque handle from responseOptimization.resultHandle" },
+        fields: {
+          type: "array",
+          minItems: 1,
+          maxItems: 100,
+          items: { type: "string", description: "A dot-separated field path, such as issues.id" },
+        },
+        offset: {
+          type: "integer",
+          minimum: 0,
+          description: "Character offset for text handles (default 0)",
+        },
+        maxTokens: {
+          type: "integer",
+          minimum: 1,
+          maximum: 16000,
+          default: 4000,
+          description: "Approximate output token limit (default 4000)",
+        },
+      },
+      required: ["handle"],
     },
   },
   {
@@ -224,4 +264,11 @@ export const CallToolSchema = z.object({
   server: z.string().min(1, "`server` must be a non-empty string"),
   tool: z.string().min(1, "`tool` must be a non-empty string"),
   args: z.record(z.string(), z.unknown()).optional().default({}),
+  fields: z.array(z.string().min(1).max(256)).min(1).max(100).optional(),
+});
+export const GetResultSchema = z.object({
+  handle: z.string().min(1).max(128),
+  fields: z.array(z.string().min(1).max(256)).min(1).max(100).optional(),
+  offset: z.number().int().min(0).max(1_000_000_000).optional(),
+  maxTokens: z.number().int().positive().max(16_000).default(4_000),
 });
