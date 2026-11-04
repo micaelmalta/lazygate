@@ -66,4 +66,64 @@ describe("usage summary", () => {
     expect(s.from).toBe("2026-11-03T12:00:00.000Z");
     expect(s.to).toBe("2026-11-03T12:00:02.000Z");
   });
+
+  it("aggregates optimization overhead, fallback, and incomplete rates without counting legacy rows", () => {
+    const events: AuditedEvent[] = [
+      {
+        ts: "2026-11-03T12:00:02.000Z",
+        user: "alice",
+        session: "s1",
+        tool: "call_tool",
+        server: "jira",
+        target: "search",
+        ok: true,
+        optimizationMode: "adaptive",
+        optimizationSelectedMode: "project",
+        optimizationDurationMs: 8,
+        optimizationFallback: false,
+        optimizationComplete: false,
+      },
+      {
+        ts: "2026-11-03T12:00:01.000Z",
+        user: "alice",
+        session: "s1",
+        tool: "call_tool",
+        server: "jira",
+        target: "get",
+        ok: true,
+        optimizationMode: "adaptive",
+        optimizationSelectedMode: "off",
+        optimizationDurationMs: 12,
+        optimizationFallback: true,
+        optimizationComplete: true,
+      },
+      {
+        ts: "2026-11-03T12:00:00.000Z",
+        user: "alice",
+        session: "s1",
+        tool: "list_active_servers",
+        ok: true,
+      },
+    ];
+
+    const s = summarizeUsage(events);
+    expect(s.optimizationCalls).toBe(2);
+    expect(s.optimizationFallbacks).toBe(1);
+    expect(s.optimizationFallbackRate).toBe(50);
+    expect(s.optimizationIncompleteCalls).toBe(1);
+    expect(s.optimizationIncompleteRate).toBe(50);
+    expect(s.optimizationDurationMs).toBe(20);
+    expect(s.averageOptimizationDurationMs).toBe(10);
+    expect(s.optimizationSelectedModes).toEqual({ project: 1, off: 1 });
+    expect(s.byServer[0]).toMatchObject({
+      optimizationCalls: 2,
+      optimizationFallbacks: 1,
+      optimizationFallbackRate: 50,
+      optimizationIncompleteCalls: 1,
+      optimizationIncompleteRate: 50,
+      optimizationDurationMs: 20,
+      averageOptimizationDurationMs: 10,
+      optimizationSelectedModes: { project: 1, off: 1 },
+    });
+  });
 });

@@ -33,6 +33,18 @@ export interface AuditEvent {
   optimizedTokens?: number;
   /** originalTokens − optimizedTokens (0 when optimization did not shrink the payload). */
   savedTokens?: number;
+  /** Optimization policy mode, absent when the call was not measured by the optimizer. */
+  optimizationMode?: string;
+  /** Candidate selected by adaptive optimization; "off" means no candidate qualified. */
+  optimizationSelectedMode?: string;
+  /** Token counter label used by the optimizer for its estimates and budgets. */
+  optimizationTokenizer?: string;
+  /** Time spent transforming or enforcing an output budget, separate from total call time. */
+  optimizationDurationMs?: number;
+  /** True when a configured transformation failed and the original response was retained. */
+  optimizationFallback?: boolean;
+  /** Whether the optimized response retained all source information. */
+  optimizationComplete?: boolean;
 }
 
 export type AuditedEvent = AuditEvent & { ts: string };
@@ -45,6 +57,14 @@ export interface UsageBucket {
   originalTokens: number;
   optimizedTokens: number;
   savedTokens: number;
+  optimizationCalls: number;
+  optimizationFallbacks: number;
+  optimizationFallbackRate: number;
+  optimizationIncompleteCalls: number;
+  optimizationIncompleteRate: number;
+  optimizationDurationMs: number;
+  averageOptimizationDurationMs: number;
+  optimizationSelectedModes: Record<string, number>;
 }
 
 export interface UsageSummary {
@@ -56,6 +76,14 @@ export interface UsageSummary {
   optimizedTokens: number;
   savedTokens: number;
   reductionPercent: number;
+  optimizationCalls: number;
+  optimizationFallbacks: number;
+  optimizationFallbackRate: number;
+  optimizationIncompleteCalls: number;
+  optimizationIncompleteRate: number;
+  optimizationDurationMs: number;
+  averageOptimizationDurationMs: number;
+  optimizationSelectedModes: Record<string, number>;
   from: string | null;
   to: string | null;
   byServer: UsageBucket[];
@@ -77,7 +105,23 @@ function bump(
 ): void {
   let b = map.get(key);
   if (!b) {
-    b = { key, calls: 0, ok: 0, error: 0, originalTokens: 0, optimizedTokens: 0, savedTokens: 0 };
+    b = {
+      key,
+      calls: 0,
+      ok: 0,
+      error: 0,
+      originalTokens: 0,
+      optimizedTokens: 0,
+      savedTokens: 0,
+      optimizationCalls: 0,
+      optimizationFallbacks: 0,
+      optimizationFallbackRate: 0,
+      optimizationIncompleteCalls: 0,
+      optimizationIncompleteRate: 0,
+      optimizationDurationMs: 0,
+      averageOptimizationDurationMs: 0,
+      optimizationSelectedModes: {},
+    };
     map.set(key, b);
   }
   b.calls += 1;
@@ -86,6 +130,18 @@ function bump(
   b.originalTokens += e.originalTokens ?? 0;
   b.optimizedTokens += e.optimizedTokens ?? 0;
   b.savedTokens += e.savedTokens ?? 0;
+  if (e.optimizationMode) {
+    b.optimizationCalls += 1;
+    if (e.optimizationFallback) b.optimizationFallbacks += 1;
+    if (e.optimizationComplete === false) b.optimizationIncompleteCalls += 1;
+    b.optimizationDurationMs += e.optimizationDurationMs ?? 0;
+    b.optimizationFallbackRate = Math.round((b.optimizationFallbacks / b.optimizationCalls) * 100);
+    b.optimizationIncompleteRate = Math.round((b.optimizationIncompleteCalls / b.optimizationCalls) * 100);
+    b.averageOptimizationDurationMs = b.optimizationDurationMs / b.optimizationCalls;
+    if (e.optimizationMode === "adaptive" && e.optimizationSelectedMode) {
+      b.optimizationSelectedModes[e.optimizationSelectedMode] = (b.optimizationSelectedModes[e.optimizationSelectedMode] ?? 0) + 1;
+    }
+  }
 }
 
 function ranked(map: Map<string, UsageBucket>, limit: number): UsageBucket[] {
@@ -102,6 +158,11 @@ export function summarizeUsage(events: AuditedEvent[], top = 10): UsageSummary {
   let originalTokens = 0;
   let optimizedTokens = 0;
   let savedTokens = 0;
+  let optimizationCalls = 0;
+  let optimizationFallbacks = 0;
+  let optimizationIncompleteCalls = 0;
+  let optimizationDurationMs = 0;
+  const selectedModes = new Map<string, number>();
   const byServer = new Map<string, UsageBucket>();
   const byTool = new Map<string, UsageBucket>();
   const byUser = new Map<string, UsageBucket>();
@@ -114,6 +175,15 @@ export function summarizeUsage(events: AuditedEvent[], top = 10): UsageSummary {
     originalTokens += e.originalTokens ?? 0;
     optimizedTokens += e.optimizedTokens ?? 0;
     savedTokens += e.savedTokens ?? 0;
+    if (e.optimizationMode) {
+      optimizationCalls += 1;
+      if (e.optimizationFallback) optimizationFallbacks += 1;
+      if (e.optimizationComplete === false) optimizationIncompleteCalls += 1;
+      optimizationDurationMs += e.optimizationDurationMs ?? 0;
+      if (e.optimizationMode === "adaptive" && e.optimizationSelectedMode) {
+        selectedModes.set(e.optimizationSelectedMode, (selectedModes.get(e.optimizationSelectedMode) ?? 0) + 1);
+      }
+    }
     if (e.server) bump(byServer, e.server, e);
     const toolKey = e.server && e.target ? `${e.server}/${e.target}` : e.tool || "(unknown)";
     bump(byTool, toolKey, e);
@@ -131,6 +201,14 @@ export function summarizeUsage(events: AuditedEvent[], top = 10): UsageSummary {
     optimizedTokens,
     savedTokens,
     reductionPercent: originalTokens ? Math.round((savedTokens / originalTokens) * 100) : 0,
+    optimizationCalls,
+    optimizationFallbacks,
+    optimizationFallbackRate: optimizationCalls ? Math.round((optimizationFallbacks / optimizationCalls) * 100) : 0,
+    optimizationIncompleteCalls,
+    optimizationIncompleteRate: optimizationCalls ? Math.round((optimizationIncompleteCalls / optimizationCalls) * 100) : 0,
+    optimizationDurationMs,
+    averageOptimizationDurationMs: optimizationCalls ? optimizationDurationMs / optimizationCalls : 0,
+    optimizationSelectedModes: Object.fromEntries(selectedModes),
     from,
     to,
     byServer: ranked(byServer, top),
