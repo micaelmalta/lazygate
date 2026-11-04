@@ -135,8 +135,39 @@ Set `enabled` to `true` to apply the global `defaultMode` and per-tool policies.
 }
 ```
 
-Supported modes are `off`, `prune`, `project`, `jsonpath`, `schema`, `html_markdown`, and
-`html_reader`. Projection paths use dot notation or quoted/numeric bracket notation and continue
+Supported modes are `off`, `prune`, `project`, `jsonpath`, `schema`, `html_markdown`,
+`html_reader`, and `adaptive`. Adaptive mode is configured per tool with one to four explicit
+candidates. It skips responses below `minInputTokens` (default `128`), evaluates candidates within
+the configured `maxTransformMs` limit, and selects the smallest output that meets
+`minSavingsPercent` (default `10`). Ties use the faster candidate. If no candidate meets the
+threshold, the response is left unchanged apart from any configured output budget. Global
+`defaultMode: "adaptive"` is rejected because candidates need a tool-specific policy.
+
+```json
+{
+  "responseOptimization": {
+    "enabled": true,
+    "tools": {
+      "github.search_issues": {
+        "mode": "adaptive",
+        "minInputTokens": 128,
+        "minSavingsPercent": 10,
+        "candidates": [
+          { "mode": "project", "fields": ["issues.id", "issues.title", "issues.state"] },
+          { "mode": "prune", "removeNulls": true, "removeEmptyObjects": true }
+        ]
+      }
+    }
+  }
+}
+```
+
+Adaptive metrics include `selectedMode` (`off` when no candidate was selected). Gateway audit rows
+and usage summaries retain this value, and the dashboard shows per-mode selection counts. Response
+metadata includes it when metadata is requested or the result is incomplete. Candidate modes are
+`prune`, `project`, `jsonpath`, `schema`, `html_markdown`, and `html_reader`; each candidate can
+include the same mode-specific options used by its standalone policy. Projection paths use dot
+notation or quoted/numeric bracket notation and continue
 through arrays. JSONPath uses `jsonpath-plus` with bounded data filters; function calls and prototype
 access are rejected. `prune` removes only the empty values
 enabled by its flags and configured `removeFields`; it preserves `false`, `0`, and duplicate array
@@ -147,9 +178,27 @@ extracts a main or article area and removes navigation, sidebars, headers, and f
 scripts, styles, comments, tracking pixels, hidden content, and unsafe link schemes. The optimizer
 does not fetch URLs, execute page code, or alter intermediate `run_chain` results.
 
-`maxOutputTokens` and the per-tool `maxTokens` are approximate limits based on four characters per
-token. Oversized text is cut at paragraph or line boundaries where possible; structured values are
-cut at record or property boundaries. A partial result carries `_meta.lazygate.responseOptimization`
+`maxOutputTokens` and the per-tool `maxTokens` use the built-in four-characters-per-token estimate
+unless an embedding host injects a tokenizer. The exported `Tokenizer` interface accepts a stable
+name and a `countTokens(serializedJson)` function; pass it as the second argument to `estimateTokens`
+or the fifth argument to `optimizeToolResult` (after the optional metrics sink). Application hosts
+can pass it as `tokenizer` to `createBroker` or `startGateway` so proxied calls, `run_chain`, result
+retrieval, audit rows, and budgets use the same counter. It is shared for adaptive candidate
+selection and reported original/optimized counts. Metrics
+and response metadata include its name. If it throws or returns a non-integer count, the optimizer
+falls back to four characters per token and marks the metric as `<name>_fallback_chars_per_4`.
+`maxOutputBytes` remains an exact serialized-byte limit.
+
+When `call_tool` returns an incomplete structured result, `_meta.lazygate.responseOptimization` may
+include a `resultHandle`. Call the listed `get_result` tool with that opaque handle and one or more
+dot-separated field paths (for example, `issues.id` and `issues.title`) to retrieve only selected
+fields. `get_result` defaults to a 4,000-token output cap. Handles are kept in memory for five
+minutes, are scoped to the broker session, and are discarded when that session ends. Each session
+stores at most 100 results, 2 MiB total, and 1 MiB per result; oversized results do not receive a
+handle. Field paths reject prototype-related keys.
+
+Oversized text is cut at paragraph or line boundaries where possible; structured values are cut at
+record or property boundaries. A partial result carries `_meta.lazygate.responseOptimization`
 with `complete: false`; `run_chain` also includes a summary in its returned text when needed. Projection, JSONPath, schema,
 reader mode, and pruning that removes values are marked incomplete because they intentionally omit
 source information. Metrics include original and optimized token estimates, savings, duration, and
@@ -299,8 +348,8 @@ advertised tool list stays stable and list_changed does not churn schemas. Use `
 allowlist only when you need upstream tools in `tools/list` and accept the cache cost.
 
 **Clients that ignore `tools/list_changed`** never pick up newly exposed schemas even when `expose`
-is set. Prefer `call_tool` / `describe_tool` so those clients still work. There are **12** meta-tools
-in `META_TOOLS` (10 listed in stdio; gateway also advertises `connect_server` / `disconnect_server`).
+is set. Prefer `call_tool` / `describe_tool` so those clients still work. There are **13** meta-tools
+in `META_TOOLS` (11 listed in stdio; gateway also advertises `connect_server` / `disconnect_server`).
 
 ---
 
@@ -483,10 +532,15 @@ Adapt the server, tool, arguments, and paths to the MCP server's actual response
 checks that selected JSONPath values stay identical; `preserveText` checks that each listed text
 fragment remains in the response. Every sample must pass these checks for the policy to preserve
 correctness. The output includes estimated response token counts and median, p95, and standard
-deviation for upstream tool latency, transformation latency, and their sum. Token counts use
-serialized JSON characters divided by four. This mode makes no model calls and does not measure
-model round trips or full task success. `--responses` remains the deterministic, synthetic local
-optimizer smoke benchmark.
+deviation for upstream tool latency, transformation latency, and their sum. It also returns policy
+recommendations. A recommendation requires at least three samples, successful upstream calls,
+passing preservation checks, no optimizer fallbacks, positive median token savings, and median
+optimization latency no more than half the median upstream latency. Otherwise it reports `keep_off` or
+`insufficient_evidence` with a reason. Adaptive results include their candidate and selected modes.
+These thresholds are a starting signal for policy review, not a production performance guarantee.
+Token counts use serialized JSON characters divided by four. This mode makes no model calls and does
+not measure model round trips or full task success. `--responses` remains the deterministic,
+synthetic local optimizer smoke benchmark.
 
 ### What it measures
 
