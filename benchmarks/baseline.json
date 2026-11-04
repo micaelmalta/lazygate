@@ -1,0 +1,1904 @@
+{
+  "schemaVersion": 2,
+  "config": {
+    "catalogSizes": [
+      20,
+      100
+    ],
+    "tokenizer": "o200k_base",
+    "seed": 1,
+    "lookup": "cold"
+  },
+  "results": [
+    {
+      "workload": "single_lookup",
+      "strategy": "direct",
+      "catalogTools": 20,
+      "correct": true,
+      "turns": 2,
+      "tokens": {
+        "schema": 1726,
+        "context": 1830,
+        "input": 3676,
+        "effectiveInput": 2515
+      }
+    },
+    {
+      "workload": "single_lookup",
+      "strategy": "direct_capped",
+      "catalogTools": 20,
+      "correct": true,
+      "turns": 2,
+      "tokens": {
+        "schema": 1726,
+        "context": 1830,
+        "input": 3676,
+        "effectiveInput": 2515
+      }
+    },
+    {
+      "workload": "single_lookup",
+      "strategy": "call_tool",
+      "catalogTools": 20,
+      "correct": true,
+      "turns": 4,
+      "tokens": {
+        "schema": 1201,
+        "context": 1616,
+        "input": 5913,
+        "effectiveInput": 2824
+      }
+    },
+    {
+      "workload": "single_lookup",
+      "strategy": "call_tool_opt",
+      "catalogTools": 20,
+      "correct": true,
+      "turns": 4,
+      "tokens": {
+        "schema": 1201,
+        "context": 1552,
+        "input": 5849,
+        "effectiveInput": 2760
+      }
+    },
+    {
+      "workload": "single_lookup",
+      "strategy": "run_chain",
+      "catalogTools": 20,
+      "correct": true,
+      "turns": 4,
+      "tokens": {
+        "schema": 1201,
+        "context": 1743,
+        "input": 6220,
+        "effectiveInput": 3131
+      }
+    },
+    {
+      "workload": "single_lookup",
+      "strategy": "pinned",
+      "catalogTools": 20,
+      "correct": true,
+      "turns": 2,
+      "tokens": {
+        "schema": 1438,
+        "context": 1542,
+        "input": 3100,
+        "effectiveInput": 2126
+      }
+    },
+    {
+      "workload": "dependent_chain",
+      "strategy": "direct",
+      "catalogTools": 20,
+      "correct": true,
+      "turns": 3,
+      "tokens": {
+        "schema": 1726,
+        "context": 7676,
+        "input": 11754,
+        "effectiveInput": 8986
+      }
+    },
+    {
+      "workload": "dependent_chain",
+      "strategy": "direct_capped",
+      "catalogTools": 20,
+      "correct": true,
+      "turns": 3,
+      "tokens": {
+        "schema": 1726,
+        "context": 7676,
+        "input": 11754,
+        "effectiveInput": 8986
+      }
+    },
+    {
+      "workload": "dependent_chain",
+      "strategy": "call_tool",
+      "catalogTools": 20,
+      "correct": true,
+      "turns": 5,
+      "tokens": {
+        "schema": 1201,
+        "context": 7756,
+        "input": 14546,
+        "effectiveInput": 10322
+      }
+    },
+    {
+      "workload": "dependent_chain",
+      "strategy": "call_tool_opt",
+      "catalogTools": 20,
+      "correct": true,
+      "turns": 5,
+      "tokens": {
+        "schema": 1201,
+        "context": 4288,
+        "input": 11078,
+        "effectiveInput": 6854
+      }
+    },
+    {
+      "workload": "dependent_chain",
+      "strategy": "run_chain",
+      "catalogTools": 20,
+      "correct": true,
+      "turns": 4,
+      "tokens": {
+        "schema": 1201,
+        "context": 1898,
+        "input": 6533,
+        "effectiveInput": 3444
+      }
+    },
+    {
+      "workload": "dependent_chain",
+      "strategy": "pinned",
+      "catalogTools": 20,
+      "correct": true,
+      "turns": 3,
+      "tokens": {
+        "schema": 1438,
+        "context": 7388,
+        "input": 10890,
+        "effectiveInput": 8568
+      }
+    },
+    {
+      "workload": "parallel_calls",
+      "strategy": "direct",
+      "catalogTools": 20,
+      "correct": true,
+      "turns": 2,
+      "tokens": {
+        "schema": 1726,
+        "context": 2106,
+        "input": 3952,
+        "effectiveInput": 2791
+      }
+    },
+    {
+      "workload": "parallel_calls",
+      "strategy": "direct_capped",
+      "catalogTools": 20,
+      "correct": true,
+      "turns": 2,
+      "tokens": {
+        "schema": 1726,
+        "context": 2106,
+        "input": 3952,
+        "effectiveInput": 2791
+      }
+    },
+    {
+      "workload": "parallel_calls",
+      "strategy": "call_tool",
+      "catalogTools": 20,
+      "correct": true,
+      "turns": 4,
+      "tokens": {
+        "schema": 1201,
+        "context": 2155,
+        "input": 6768,
+        "effectiveInput": 3679
+      }
+    },
+    {
+      "workload": "parallel_calls",
+      "strategy": "call_tool_opt",
+      "catalogTools": 20,
+      "correct": true,
+      "turns": 4,
+      "tokens": {
+        "schema": 1201,
+        "context": 2073,
+        "input": 6686,
+        "effectiveInput": 3597
+      }
+    },
+    {
+      "workload": "parallel_calls",
+      "strategy": "run_chain",
+      "catalogTools": 20,
+      "correct": true,
+      "turns": 4,
+      "tokens": {
+        "schema": 1201,
+        "context": 1940,
+        "input": 6691,
+        "effectiveInput": 3602
+      }
+    },
+    {
+      "workload": "parallel_calls",
+      "strategy": "pinned",
+      "catalogTools": 20,
+      "correct": true,
+      "turns": 2,
+      "tokens": {
+        "schema": 1438,
+        "context": 1818,
+        "input": 3376,
+        "effectiveInput": 2402
+      }
+    },
+    {
+      "workload": "large_json",
+      "strategy": "direct",
+      "catalogTools": 20,
+      "correct": true,
+      "turns": 2,
+      "tokens": {
+        "schema": 1726,
+        "context": 85164,
+        "input": 87010,
+        "effectiveInput": 85849
+      }
+    },
+    {
+      "workload": "large_json",
+      "strategy": "direct_capped",
+      "catalogTools": 20,
+      "correct": false,
+      "turns": 2,
+      "tokens": {
+        "schema": 1726,
+        "context": 26296,
+        "input": 28142,
+        "effectiveInput": 26981
+      }
+    },
+    {
+      "workload": "large_json",
+      "strategy": "call_tool",
+      "catalogTools": 20,
+      "correct": true,
+      "turns": 4,
+      "tokens": {
+        "schema": 1201,
+        "context": 84925,
+        "input": 89202,
+        "effectiveInput": 86113
+      }
+    },
+    {
+      "workload": "large_json",
+      "strategy": "call_tool_opt",
+      "catalogTools": 20,
+      "correct": true,
+      "turns": 4,
+      "tokens": {
+        "schema": 1201,
+        "context": 13250,
+        "input": 17527,
+        "effectiveInput": 14438
+      }
+    },
+    {
+      "workload": "large_json",
+      "strategy": "run_chain",
+      "catalogTools": 20,
+      "correct": true,
+      "turns": 4,
+      "tokens": {
+        "schema": 1201,
+        "context": 1795,
+        "input": 6282,
+        "effectiveInput": 3193
+      }
+    },
+    {
+      "workload": "large_json",
+      "strategy": "pinned",
+      "catalogTools": 20,
+      "correct": true,
+      "turns": 4,
+      "tokens": {
+        "schema": 1438,
+        "context": 85162,
+        "input": 90150,
+        "effectiveInput": 86480
+      }
+    },
+    {
+      "workload": "html_docs",
+      "strategy": "direct",
+      "catalogTools": 20,
+      "correct": true,
+      "turns": 2,
+      "tokens": {
+        "schema": 1726,
+        "context": 9868,
+        "input": 11714,
+        "effectiveInput": 10553
+      }
+    },
+    {
+      "workload": "html_docs",
+      "strategy": "direct_capped",
+      "catalogTools": 20,
+      "correct": true,
+      "turns": 2,
+      "tokens": {
+        "schema": 1726,
+        "context": 9868,
+        "input": 11714,
+        "effectiveInput": 10553
+      }
+    },
+    {
+      "workload": "html_docs",
+      "strategy": "call_tool",
+      "catalogTools": 20,
+      "correct": true,
+      "turns": 4,
+      "tokens": {
+        "schema": 1201,
+        "context": 9622,
+        "input": 13882,
+        "effectiveInput": 10793
+      }
+    },
+    {
+      "workload": "html_docs",
+      "strategy": "call_tool_opt",
+      "catalogTools": 20,
+      "correct": true,
+      "turns": 4,
+      "tokens": {
+        "schema": 1201,
+        "context": 5349,
+        "input": 9609,
+        "effectiveInput": 6520
+      }
+    },
+    {
+      "workload": "html_docs",
+      "strategy": "run_chain",
+      "catalogTools": 20,
+      "correct": true,
+      "turns": 4,
+      "tokens": {
+        "schema": 1201,
+        "context": 1809,
+        "input": 6276,
+        "effectiveInput": 3187
+      }
+    },
+    {
+      "workload": "html_docs",
+      "strategy": "pinned",
+      "catalogTools": 20,
+      "correct": true,
+      "turns": 4,
+      "tokens": {
+        "schema": 1438,
+        "context": 9859,
+        "input": 14830,
+        "effectiveInput": 11160
+      }
+    },
+    {
+      "workload": "single_lookup",
+      "strategy": "direct",
+      "catalogTools": 100,
+      "correct": true,
+      "turns": 2,
+      "tokens": {
+        "schema": 9818,
+        "context": 9922,
+        "input": 19860,
+        "effectiveInput": 13439
+      }
+    },
+    {
+      "workload": "single_lookup",
+      "strategy": "direct_capped",
+      "catalogTools": 100,
+      "correct": true,
+      "turns": 2,
+      "tokens": {
+        "schema": 9818,
+        "context": 9922,
+        "input": 19860,
+        "effectiveInput": 13439
+      }
+    },
+    {
+      "workload": "single_lookup",
+      "strategy": "call_tool",
+      "catalogTools": 100,
+      "correct": true,
+      "turns": 4,
+      "tokens": {
+        "schema": 1201,
+        "context": 1616,
+        "input": 5913,
+        "effectiveInput": 2824
+      }
+    },
+    {
+      "workload": "single_lookup",
+      "strategy": "call_tool_opt",
+      "catalogTools": 100,
+      "correct": true,
+      "turns": 4,
+      "tokens": {
+        "schema": 1201,
+        "context": 1552,
+        "input": 5849,
+        "effectiveInput": 2760
+      }
+    },
+    {
+      "workload": "single_lookup",
+      "strategy": "run_chain",
+      "catalogTools": 100,
+      "correct": true,
+      "turns": 4,
+      "tokens": {
+        "schema": 1201,
+        "context": 1743,
+        "input": 6220,
+        "effectiveInput": 3131
+      }
+    },
+    {
+      "workload": "single_lookup",
+      "strategy": "pinned",
+      "catalogTools": 100,
+      "correct": true,
+      "turns": 2,
+      "tokens": {
+        "schema": 1438,
+        "context": 1542,
+        "input": 3100,
+        "effectiveInput": 2126
+      }
+    },
+    {
+      "workload": "dependent_chain",
+      "strategy": "direct",
+      "catalogTools": 100,
+      "correct": true,
+      "turns": 3,
+      "tokens": {
+        "schema": 9818,
+        "context": 15768,
+        "input": 36030,
+        "effectiveInput": 20719
+      }
+    },
+    {
+      "workload": "dependent_chain",
+      "strategy": "direct_capped",
+      "catalogTools": 100,
+      "correct": true,
+      "turns": 3,
+      "tokens": {
+        "schema": 9818,
+        "context": 15768,
+        "input": 36030,
+        "effectiveInput": 20719
+      }
+    },
+    {
+      "workload": "dependent_chain",
+      "strategy": "call_tool",
+      "catalogTools": 100,
+      "correct": true,
+      "turns": 5,
+      "tokens": {
+        "schema": 1201,
+        "context": 7892,
+        "input": 15090,
+        "effectiveInput": 10866
+      }
+    },
+    {
+      "workload": "dependent_chain",
+      "strategy": "call_tool_opt",
+      "catalogTools": 100,
+      "correct": true,
+      "turns": 5,
+      "tokens": {
+        "schema": 1201,
+        "context": 4416,
+        "input": 11614,
+        "effectiveInput": 7390
+      }
+    },
+    {
+      "workload": "dependent_chain",
+      "strategy": "run_chain",
+      "catalogTools": 100,
+      "correct": true,
+      "turns": 4,
+      "tokens": {
+        "schema": 1201,
+        "context": 2034,
+        "input": 6941,
+        "effectiveInput": 3852
+      }
+    },
+    {
+      "workload": "dependent_chain",
+      "strategy": "pinned",
+      "catalogTools": 100,
+      "correct": true,
+      "turns": 3,
+      "tokens": {
+        "schema": 1438,
+        "context": 7388,
+        "input": 10890,
+        "effectiveInput": 8568
+      }
+    },
+    {
+      "workload": "parallel_calls",
+      "strategy": "direct",
+      "catalogTools": 100,
+      "correct": true,
+      "turns": 2,
+      "tokens": {
+        "schema": 9818,
+        "context": 10198,
+        "input": 20136,
+        "effectiveInput": 13715
+      }
+    },
+    {
+      "workload": "parallel_calls",
+      "strategy": "direct_capped",
+      "catalogTools": 100,
+      "correct": true,
+      "turns": 2,
+      "tokens": {
+        "schema": 9818,
+        "context": 10198,
+        "input": 20136,
+        "effectiveInput": 13715
+      }
+    },
+    {
+      "workload": "parallel_calls",
+      "strategy": "call_tool",
+      "catalogTools": 100,
+      "correct": true,
+      "turns": 4,
+      "tokens": {
+        "schema": 1201,
+        "context": 2241,
+        "input": 7026,
+        "effectiveInput": 3937
+      }
+    },
+    {
+      "workload": "parallel_calls",
+      "strategy": "call_tool_opt",
+      "catalogTools": 100,
+      "correct": true,
+      "turns": 4,
+      "tokens": {
+        "schema": 1201,
+        "context": 2159,
+        "input": 6944,
+        "effectiveInput": 3855
+      }
+    },
+    {
+      "workload": "parallel_calls",
+      "strategy": "run_chain",
+      "catalogTools": 100,
+      "correct": true,
+      "turns": 4,
+      "tokens": {
+        "schema": 1201,
+        "context": 2026,
+        "input": 6949,
+        "effectiveInput": 3860
+      }
+    },
+    {
+      "workload": "parallel_calls",
+      "strategy": "pinned",
+      "catalogTools": 100,
+      "correct": true,
+      "turns": 2,
+      "tokens": {
+        "schema": 1438,
+        "context": 1818,
+        "input": 3376,
+        "effectiveInput": 2402
+      }
+    },
+    {
+      "workload": "large_json",
+      "strategy": "direct",
+      "catalogTools": 100,
+      "correct": true,
+      "turns": 2,
+      "tokens": {
+        "schema": 9818,
+        "context": 93256,
+        "input": 103194,
+        "effectiveInput": 96773
+      }
+    },
+    {
+      "workload": "large_json",
+      "strategy": "direct_capped",
+      "catalogTools": 100,
+      "correct": false,
+      "turns": 2,
+      "tokens": {
+        "schema": 9818,
+        "context": 34388,
+        "input": 44326,
+        "effectiveInput": 37905
+      }
+    },
+    {
+      "workload": "large_json",
+      "strategy": "call_tool",
+      "catalogTools": 100,
+      "correct": true,
+      "turns": 4,
+      "tokens": {
+        "schema": 1201,
+        "context": 84925,
+        "input": 89202,
+        "effectiveInput": 86113
+      }
+    },
+    {
+      "workload": "large_json",
+      "strategy": "call_tool_opt",
+      "catalogTools": 100,
+      "correct": true,
+      "turns": 4,
+      "tokens": {
+        "schema": 1201,
+        "context": 13249,
+        "input": 17526,
+        "effectiveInput": 14437
+      }
+    },
+    {
+      "workload": "large_json",
+      "strategy": "run_chain",
+      "catalogTools": 100,
+      "correct": true,
+      "turns": 4,
+      "tokens": {
+        "schema": 1201,
+        "context": 1795,
+        "input": 6282,
+        "effectiveInput": 3193
+      }
+    },
+    {
+      "workload": "large_json",
+      "strategy": "pinned",
+      "catalogTools": 100,
+      "correct": true,
+      "turns": 4,
+      "tokens": {
+        "schema": 1438,
+        "context": 85162,
+        "input": 90150,
+        "effectiveInput": 86480
+      }
+    },
+    {
+      "workload": "html_docs",
+      "strategy": "direct",
+      "catalogTools": 100,
+      "correct": true,
+      "turns": 2,
+      "tokens": {
+        "schema": 9818,
+        "context": 17960,
+        "input": 27898,
+        "effectiveInput": 21477
+      }
+    },
+    {
+      "workload": "html_docs",
+      "strategy": "direct_capped",
+      "catalogTools": 100,
+      "correct": true,
+      "turns": 2,
+      "tokens": {
+        "schema": 9818,
+        "context": 17960,
+        "input": 27898,
+        "effectiveInput": 21477
+      }
+    },
+    {
+      "workload": "html_docs",
+      "strategy": "call_tool",
+      "catalogTools": 100,
+      "correct": true,
+      "turns": 4,
+      "tokens": {
+        "schema": 1201,
+        "context": 9622,
+        "input": 13882,
+        "effectiveInput": 10793
+      }
+    },
+    {
+      "workload": "html_docs",
+      "strategy": "call_tool_opt",
+      "catalogTools": 100,
+      "correct": true,
+      "turns": 4,
+      "tokens": {
+        "schema": 1201,
+        "context": 5349,
+        "input": 9609,
+        "effectiveInput": 6520
+      }
+    },
+    {
+      "workload": "html_docs",
+      "strategy": "run_chain",
+      "catalogTools": 100,
+      "correct": true,
+      "turns": 4,
+      "tokens": {
+        "schema": 1201,
+        "context": 1809,
+        "input": 6276,
+        "effectiveInput": 3187
+      }
+    },
+    {
+      "workload": "html_docs",
+      "strategy": "pinned",
+      "catalogTools": 100,
+      "correct": true,
+      "turns": 4,
+      "tokens": {
+        "schema": 1438,
+        "context": 9859,
+        "input": 14830,
+        "effectiveInput": 11160
+      }
+    }
+  ],
+  "lookupModes": [
+    {
+      "workload": "single_lookup",
+      "strategy": "call_tool",
+      "lookup": "cold",
+      "catalogTools": 20,
+      "correct": true,
+      "turns": 4,
+      "tokens": {
+        "input": 5913
+      }
+    },
+    {
+      "workload": "single_lookup",
+      "strategy": "call_tool",
+      "lookup": "merged",
+      "catalogTools": 20,
+      "correct": true,
+      "turns": 3,
+      "tokens": {
+        "input": 4209
+      }
+    },
+    {
+      "workload": "single_lookup",
+      "strategy": "call_tool",
+      "lookup": "known",
+      "catalogTools": 20,
+      "correct": true,
+      "turns": 2,
+      "tokens": {
+        "input": 2638
+      }
+    },
+    {
+      "workload": "single_lookup",
+      "strategy": "call_tool_opt",
+      "lookup": "cold",
+      "catalogTools": 20,
+      "correct": true,
+      "turns": 4,
+      "tokens": {
+        "input": 5849
+      }
+    },
+    {
+      "workload": "single_lookup",
+      "strategy": "call_tool_opt",
+      "lookup": "merged",
+      "catalogTools": 20,
+      "correct": true,
+      "turns": 3,
+      "tokens": {
+        "input": 4145
+      }
+    },
+    {
+      "workload": "single_lookup",
+      "strategy": "call_tool_opt",
+      "lookup": "known",
+      "catalogTools": 20,
+      "correct": true,
+      "turns": 2,
+      "tokens": {
+        "input": 2574
+      }
+    },
+    {
+      "workload": "single_lookup",
+      "strategy": "run_chain",
+      "lookup": "cold",
+      "catalogTools": 20,
+      "correct": true,
+      "turns": 4,
+      "tokens": {
+        "input": 6220
+      }
+    },
+    {
+      "workload": "single_lookup",
+      "strategy": "run_chain",
+      "lookup": "merged",
+      "catalogTools": 20,
+      "correct": true,
+      "turns": 3,
+      "tokens": {
+        "input": 4156
+      }
+    },
+    {
+      "workload": "single_lookup",
+      "strategy": "run_chain",
+      "lookup": "known",
+      "catalogTools": 20,
+      "correct": true,
+      "turns": 2,
+      "tokens": {
+        "input": 2585
+      }
+    },
+    {
+      "workload": "dependent_chain",
+      "strategy": "call_tool",
+      "lookup": "cold",
+      "catalogTools": 20,
+      "correct": true,
+      "turns": 5,
+      "tokens": {
+        "input": 14546
+      }
+    },
+    {
+      "workload": "dependent_chain",
+      "strategy": "call_tool",
+      "lookup": "merged",
+      "catalogTools": 20,
+      "correct": true,
+      "turns": 4,
+      "tokens": {
+        "input": 12262
+      }
+    },
+    {
+      "workload": "dependent_chain",
+      "strategy": "call_tool",
+      "lookup": "known",
+      "catalogTools": 20,
+      "correct": true,
+      "turns": 3,
+      "tokens": {
+        "input": 10299
+      }
+    },
+    {
+      "workload": "dependent_chain",
+      "strategy": "call_tool_opt",
+      "lookup": "cold",
+      "catalogTools": 20,
+      "correct": true,
+      "turns": 5,
+      "tokens": {
+        "input": 11070
+      }
+    },
+    {
+      "workload": "dependent_chain",
+      "strategy": "call_tool_opt",
+      "lookup": "merged",
+      "catalogTools": 20,
+      "correct": true,
+      "turns": 4,
+      "tokens": {
+        "input": 8786
+      }
+    },
+    {
+      "workload": "dependent_chain",
+      "strategy": "call_tool_opt",
+      "lookup": "known",
+      "catalogTools": 20,
+      "correct": true,
+      "turns": 3,
+      "tokens": {
+        "input": 6827
+      }
+    },
+    {
+      "workload": "dependent_chain",
+      "strategy": "run_chain",
+      "lookup": "cold",
+      "catalogTools": 20,
+      "correct": true,
+      "turns": 4,
+      "tokens": {
+        "input": 6533
+      }
+    },
+    {
+      "workload": "dependent_chain",
+      "strategy": "run_chain",
+      "lookup": "merged",
+      "catalogTools": 20,
+      "correct": true,
+      "turns": 3,
+      "tokens": {
+        "input": 4390
+      }
+    },
+    {
+      "workload": "dependent_chain",
+      "strategy": "run_chain",
+      "lookup": "known",
+      "catalogTools": 20,
+      "correct": true,
+      "turns": 2,
+      "tokens": {
+        "input": 2661
+      }
+    },
+    {
+      "workload": "parallel_calls",
+      "strategy": "call_tool",
+      "lookup": "cold",
+      "catalogTools": 20,
+      "correct": true,
+      "turns": 4,
+      "tokens": {
+        "input": 6768
+      }
+    },
+    {
+      "workload": "parallel_calls",
+      "strategy": "call_tool",
+      "lookup": "merged",
+      "catalogTools": 20,
+      "correct": true,
+      "turns": 3,
+      "tokens": {
+        "input": 4843
+      }
+    },
+    {
+      "workload": "parallel_calls",
+      "strategy": "call_tool",
+      "lookup": "known",
+      "catalogTools": 20,
+      "correct": true,
+      "turns": 2,
+      "tokens": {
+        "input": 2998
+      }
+    },
+    {
+      "workload": "parallel_calls",
+      "strategy": "call_tool_opt",
+      "lookup": "cold",
+      "catalogTools": 20,
+      "correct": true,
+      "turns": 4,
+      "tokens": {
+        "input": 6686
+      }
+    },
+    {
+      "workload": "parallel_calls",
+      "strategy": "call_tool_opt",
+      "lookup": "merged",
+      "catalogTools": 20,
+      "correct": true,
+      "turns": 3,
+      "tokens": {
+        "input": 4761
+      }
+    },
+    {
+      "workload": "parallel_calls",
+      "strategy": "call_tool_opt",
+      "lookup": "known",
+      "catalogTools": 20,
+      "correct": true,
+      "turns": 2,
+      "tokens": {
+        "input": 2916
+      }
+    },
+    {
+      "workload": "parallel_calls",
+      "strategy": "run_chain",
+      "lookup": "cold",
+      "catalogTools": 20,
+      "correct": true,
+      "turns": 4,
+      "tokens": {
+        "input": 6691
+      }
+    },
+    {
+      "workload": "parallel_calls",
+      "strategy": "run_chain",
+      "lookup": "merged",
+      "catalogTools": 20,
+      "correct": true,
+      "turns": 3,
+      "tokens": {
+        "input": 4490
+      }
+    },
+    {
+      "workload": "parallel_calls",
+      "strategy": "run_chain",
+      "lookup": "known",
+      "catalogTools": 20,
+      "correct": true,
+      "turns": 2,
+      "tokens": {
+        "input": 2645
+      }
+    },
+    {
+      "workload": "large_json",
+      "strategy": "call_tool",
+      "lookup": "cold",
+      "catalogTools": 20,
+      "correct": true,
+      "turns": 4,
+      "tokens": {
+        "input": 89202
+      }
+    },
+    {
+      "workload": "large_json",
+      "strategy": "call_tool",
+      "lookup": "merged",
+      "catalogTools": 20,
+      "correct": true,
+      "turns": 3,
+      "tokens": {
+        "input": 87553
+      }
+    },
+    {
+      "workload": "large_json",
+      "strategy": "call_tool",
+      "lookup": "known",
+      "catalogTools": 20,
+      "correct": true,
+      "turns": 2,
+      "tokens": {
+        "input": 85972
+      }
+    },
+    {
+      "workload": "large_json",
+      "strategy": "call_tool_opt",
+      "lookup": "cold",
+      "catalogTools": 20,
+      "correct": true,
+      "turns": 4,
+      "tokens": {
+        "input": 17526
+      }
+    },
+    {
+      "workload": "large_json",
+      "strategy": "call_tool_opt",
+      "lookup": "merged",
+      "catalogTools": 20,
+      "correct": true,
+      "turns": 3,
+      "tokens": {
+        "input": 15873
+      }
+    },
+    {
+      "workload": "large_json",
+      "strategy": "call_tool_opt",
+      "lookup": "known",
+      "catalogTools": 20,
+      "correct": true,
+      "turns": 2,
+      "tokens": {
+        "input": 14300
+      }
+    },
+    {
+      "workload": "large_json",
+      "strategy": "run_chain",
+      "lookup": "cold",
+      "catalogTools": 20,
+      "correct": true,
+      "turns": 4,
+      "tokens": {
+        "input": 6282
+      }
+    },
+    {
+      "workload": "large_json",
+      "strategy": "run_chain",
+      "lookup": "merged",
+      "catalogTools": 20,
+      "correct": true,
+      "turns": 3,
+      "tokens": {
+        "input": 4213
+      }
+    },
+    {
+      "workload": "large_json",
+      "strategy": "run_chain",
+      "lookup": "known",
+      "catalogTools": 20,
+      "correct": true,
+      "turns": 2,
+      "tokens": {
+        "input": 2632
+      }
+    },
+    {
+      "workload": "html_docs",
+      "strategy": "call_tool",
+      "lookup": "cold",
+      "catalogTools": 20,
+      "correct": true,
+      "turns": 4,
+      "tokens": {
+        "input": 13882
+      }
+    },
+    {
+      "workload": "html_docs",
+      "strategy": "call_tool",
+      "lookup": "merged",
+      "catalogTools": 20,
+      "correct": true,
+      "turns": 3,
+      "tokens": {
+        "input": 12237
+      }
+    },
+    {
+      "workload": "html_docs",
+      "strategy": "call_tool",
+      "lookup": "known",
+      "catalogTools": 20,
+      "correct": true,
+      "turns": 2,
+      "tokens": {
+        "input": 10676
+      }
+    },
+    {
+      "workload": "html_docs",
+      "strategy": "call_tool_opt",
+      "lookup": "cold",
+      "catalogTools": 20,
+      "correct": true,
+      "turns": 4,
+      "tokens": {
+        "input": 9609
+      }
+    },
+    {
+      "workload": "html_docs",
+      "strategy": "call_tool_opt",
+      "lookup": "merged",
+      "catalogTools": 20,
+      "correct": true,
+      "turns": 3,
+      "tokens": {
+        "input": 7964
+      }
+    },
+    {
+      "workload": "html_docs",
+      "strategy": "call_tool_opt",
+      "lookup": "known",
+      "catalogTools": 20,
+      "correct": true,
+      "turns": 2,
+      "tokens": {
+        "input": 6403
+      }
+    },
+    {
+      "workload": "html_docs",
+      "strategy": "run_chain",
+      "lookup": "cold",
+      "catalogTools": 20,
+      "correct": true,
+      "turns": 4,
+      "tokens": {
+        "input": 6276
+      }
+    },
+    {
+      "workload": "html_docs",
+      "strategy": "run_chain",
+      "lookup": "merged",
+      "catalogTools": 20,
+      "correct": true,
+      "turns": 3,
+      "tokens": {
+        "input": 4217
+      }
+    },
+    {
+      "workload": "html_docs",
+      "strategy": "run_chain",
+      "lookup": "known",
+      "catalogTools": 20,
+      "correct": true,
+      "turns": 2,
+      "tokens": {
+        "input": 2656
+      }
+    },
+    {
+      "workload": "single_lookup",
+      "strategy": "call_tool",
+      "lookup": "cold",
+      "catalogTools": 100,
+      "correct": true,
+      "turns": 4,
+      "tokens": {
+        "input": 5913
+      }
+    },
+    {
+      "workload": "single_lookup",
+      "strategy": "call_tool",
+      "lookup": "merged",
+      "catalogTools": 100,
+      "correct": true,
+      "turns": 3,
+      "tokens": {
+        "input": 4209
+      }
+    },
+    {
+      "workload": "single_lookup",
+      "strategy": "call_tool",
+      "lookup": "known",
+      "catalogTools": 100,
+      "correct": true,
+      "turns": 2,
+      "tokens": {
+        "input": 2638
+      }
+    },
+    {
+      "workload": "single_lookup",
+      "strategy": "call_tool_opt",
+      "lookup": "cold",
+      "catalogTools": 100,
+      "correct": true,
+      "turns": 4,
+      "tokens": {
+        "input": 5849
+      }
+    },
+    {
+      "workload": "single_lookup",
+      "strategy": "call_tool_opt",
+      "lookup": "merged",
+      "catalogTools": 100,
+      "correct": true,
+      "turns": 3,
+      "tokens": {
+        "input": 4145
+      }
+    },
+    {
+      "workload": "single_lookup",
+      "strategy": "call_tool_opt",
+      "lookup": "known",
+      "catalogTools": 100,
+      "correct": true,
+      "turns": 2,
+      "tokens": {
+        "input": 2574
+      }
+    },
+    {
+      "workload": "single_lookup",
+      "strategy": "run_chain",
+      "lookup": "cold",
+      "catalogTools": 100,
+      "correct": true,
+      "turns": 4,
+      "tokens": {
+        "input": 6220
+      }
+    },
+    {
+      "workload": "single_lookup",
+      "strategy": "run_chain",
+      "lookup": "merged",
+      "catalogTools": 100,
+      "correct": true,
+      "turns": 3,
+      "tokens": {
+        "input": 4156
+      }
+    },
+    {
+      "workload": "single_lookup",
+      "strategy": "run_chain",
+      "lookup": "known",
+      "catalogTools": 100,
+      "correct": true,
+      "turns": 2,
+      "tokens": {
+        "input": 2585
+      }
+    },
+    {
+      "workload": "dependent_chain",
+      "strategy": "call_tool",
+      "lookup": "cold",
+      "catalogTools": 100,
+      "correct": true,
+      "turns": 5,
+      "tokens": {
+        "input": 15090
+      }
+    },
+    {
+      "workload": "dependent_chain",
+      "strategy": "call_tool",
+      "lookup": "merged",
+      "catalogTools": 100,
+      "correct": true,
+      "turns": 4,
+      "tokens": {
+        "input": 12670
+      }
+    },
+    {
+      "workload": "dependent_chain",
+      "strategy": "call_tool",
+      "lookup": "known",
+      "catalogTools": 100,
+      "correct": true,
+      "turns": 3,
+      "tokens": {
+        "input": 10299
+      }
+    },
+    {
+      "workload": "dependent_chain",
+      "strategy": "call_tool_opt",
+      "lookup": "cold",
+      "catalogTools": 100,
+      "correct": true,
+      "turns": 5,
+      "tokens": {
+        "input": 11612
+      }
+    },
+    {
+      "workload": "dependent_chain",
+      "strategy": "call_tool_opt",
+      "lookup": "merged",
+      "catalogTools": 100,
+      "correct": true,
+      "turns": 4,
+      "tokens": {
+        "input": 9191
+      }
+    },
+    {
+      "workload": "dependent_chain",
+      "strategy": "call_tool_opt",
+      "lookup": "known",
+      "catalogTools": 100,
+      "correct": true,
+      "turns": 3,
+      "tokens": {
+        "input": 6835
+      }
+    },
+    {
+      "workload": "dependent_chain",
+      "strategy": "run_chain",
+      "lookup": "cold",
+      "catalogTools": 100,
+      "correct": true,
+      "turns": 4,
+      "tokens": {
+        "input": 6941
+      }
+    },
+    {
+      "workload": "dependent_chain",
+      "strategy": "run_chain",
+      "lookup": "merged",
+      "catalogTools": 100,
+      "correct": true,
+      "turns": 3,
+      "tokens": {
+        "input": 4662
+      }
+    },
+    {
+      "workload": "dependent_chain",
+      "strategy": "run_chain",
+      "lookup": "known",
+      "catalogTools": 100,
+      "correct": true,
+      "turns": 2,
+      "tokens": {
+        "input": 2661
+      }
+    },
+    {
+      "workload": "parallel_calls",
+      "strategy": "call_tool",
+      "lookup": "cold",
+      "catalogTools": 100,
+      "correct": true,
+      "turns": 4,
+      "tokens": {
+        "input": 7026
+      }
+    },
+    {
+      "workload": "parallel_calls",
+      "strategy": "call_tool",
+      "lookup": "merged",
+      "catalogTools": 100,
+      "correct": true,
+      "turns": 3,
+      "tokens": {
+        "input": 5015
+      }
+    },
+    {
+      "workload": "parallel_calls",
+      "strategy": "call_tool",
+      "lookup": "known",
+      "catalogTools": 100,
+      "correct": true,
+      "turns": 2,
+      "tokens": {
+        "input": 2998
+      }
+    },
+    {
+      "workload": "parallel_calls",
+      "strategy": "call_tool_opt",
+      "lookup": "cold",
+      "catalogTools": 100,
+      "correct": true,
+      "turns": 4,
+      "tokens": {
+        "input": 6944
+      }
+    },
+    {
+      "workload": "parallel_calls",
+      "strategy": "call_tool_opt",
+      "lookup": "merged",
+      "catalogTools": 100,
+      "correct": true,
+      "turns": 3,
+      "tokens": {
+        "input": 4933
+      }
+    },
+    {
+      "workload": "parallel_calls",
+      "strategy": "call_tool_opt",
+      "lookup": "known",
+      "catalogTools": 100,
+      "correct": true,
+      "turns": 2,
+      "tokens": {
+        "input": 2916
+      }
+    },
+    {
+      "workload": "parallel_calls",
+      "strategy": "run_chain",
+      "lookup": "cold",
+      "catalogTools": 100,
+      "correct": true,
+      "turns": 4,
+      "tokens": {
+        "input": 6949
+      }
+    },
+    {
+      "workload": "parallel_calls",
+      "strategy": "run_chain",
+      "lookup": "merged",
+      "catalogTools": 100,
+      "correct": true,
+      "turns": 3,
+      "tokens": {
+        "input": 4662
+      }
+    },
+    {
+      "workload": "parallel_calls",
+      "strategy": "run_chain",
+      "lookup": "known",
+      "catalogTools": 100,
+      "correct": true,
+      "turns": 2,
+      "tokens": {
+        "input": 2645
+      }
+    },
+    {
+      "workload": "large_json",
+      "strategy": "call_tool",
+      "lookup": "cold",
+      "catalogTools": 100,
+      "correct": true,
+      "turns": 4,
+      "tokens": {
+        "input": 89202
+      }
+    },
+    {
+      "workload": "large_json",
+      "strategy": "call_tool",
+      "lookup": "merged",
+      "catalogTools": 100,
+      "correct": true,
+      "turns": 3,
+      "tokens": {
+        "input": 87553
+      }
+    },
+    {
+      "workload": "large_json",
+      "strategy": "call_tool",
+      "lookup": "known",
+      "catalogTools": 100,
+      "correct": true,
+      "turns": 2,
+      "tokens": {
+        "input": 85972
+      }
+    },
+    {
+      "workload": "large_json",
+      "strategy": "call_tool_opt",
+      "lookup": "cold",
+      "catalogTools": 100,
+      "correct": true,
+      "turns": 4,
+      "tokens": {
+        "input": 17527
+      }
+    },
+    {
+      "workload": "large_json",
+      "strategy": "call_tool_opt",
+      "lookup": "merged",
+      "catalogTools": 100,
+      "correct": true,
+      "turns": 3,
+      "tokens": {
+        "input": 15879
+      }
+    },
+    {
+      "workload": "large_json",
+      "strategy": "call_tool_opt",
+      "lookup": "known",
+      "catalogTools": 100,
+      "correct": true,
+      "turns": 2,
+      "tokens": {
+        "input": 14300
+      }
+    },
+    {
+      "workload": "large_json",
+      "strategy": "run_chain",
+      "lookup": "cold",
+      "catalogTools": 100,
+      "correct": true,
+      "turns": 4,
+      "tokens": {
+        "input": 6282
+      }
+    },
+    {
+      "workload": "large_json",
+      "strategy": "run_chain",
+      "lookup": "merged",
+      "catalogTools": 100,
+      "correct": true,
+      "turns": 3,
+      "tokens": {
+        "input": 4213
+      }
+    },
+    {
+      "workload": "large_json",
+      "strategy": "run_chain",
+      "lookup": "known",
+      "catalogTools": 100,
+      "correct": true,
+      "turns": 2,
+      "tokens": {
+        "input": 2632
+      }
+    },
+    {
+      "workload": "html_docs",
+      "strategy": "call_tool",
+      "lookup": "cold",
+      "catalogTools": 100,
+      "correct": true,
+      "turns": 4,
+      "tokens": {
+        "input": 13882
+      }
+    },
+    {
+      "workload": "html_docs",
+      "strategy": "call_tool",
+      "lookup": "merged",
+      "catalogTools": 100,
+      "correct": true,
+      "turns": 3,
+      "tokens": {
+        "input": 12237
+      }
+    },
+    {
+      "workload": "html_docs",
+      "strategy": "call_tool",
+      "lookup": "known",
+      "catalogTools": 100,
+      "correct": true,
+      "turns": 2,
+      "tokens": {
+        "input": 10676
+      }
+    },
+    {
+      "workload": "html_docs",
+      "strategy": "call_tool_opt",
+      "lookup": "cold",
+      "catalogTools": 100,
+      "correct": true,
+      "turns": 4,
+      "tokens": {
+        "input": 9609
+      }
+    },
+    {
+      "workload": "html_docs",
+      "strategy": "call_tool_opt",
+      "lookup": "merged",
+      "catalogTools": 100,
+      "correct": true,
+      "turns": 3,
+      "tokens": {
+        "input": 7964
+      }
+    },
+    {
+      "workload": "html_docs",
+      "strategy": "call_tool_opt",
+      "lookup": "known",
+      "catalogTools": 100,
+      "correct": true,
+      "turns": 2,
+      "tokens": {
+        "input": 6403
+      }
+    },
+    {
+      "workload": "html_docs",
+      "strategy": "run_chain",
+      "lookup": "cold",
+      "catalogTools": 100,
+      "correct": true,
+      "turns": 4,
+      "tokens": {
+        "input": 6276
+      }
+    },
+    {
+      "workload": "html_docs",
+      "strategy": "run_chain",
+      "lookup": "merged",
+      "catalogTools": 100,
+      "correct": true,
+      "turns": 3,
+      "tokens": {
+        "input": 4217
+      }
+    },
+    {
+      "workload": "html_docs",
+      "strategy": "run_chain",
+      "lookup": "known",
+      "catalogTools": 100,
+      "correct": true,
+      "turns": 2,
+      "tokens": {
+        "input": 2656
+      }
+    }
+  ],
+  "discovery": [
+    {
+      "set": "tuned",
+      "servers": 41,
+      "strategy": "lexical",
+      "queries": 92,
+      "recallAt1": 0.804,
+      "recallAt3": 0.913,
+      "wrongTopRate": 0.185
+    },
+    {
+      "set": "tuned",
+      "servers": 41,
+      "strategy": "bm25",
+      "queries": 92,
+      "recallAt1": 0.913,
+      "recallAt3": 0.957,
+      "wrongTopRate": 0.087
+    },
+    {
+      "set": "tuned",
+      "servers": 57,
+      "strategy": "lexical",
+      "queries": 92,
+      "recallAt1": 0.793,
+      "recallAt3": 0.902,
+      "wrongTopRate": 0.196
+    },
+    {
+      "set": "tuned",
+      "servers": 57,
+      "strategy": "bm25",
+      "queries": 92,
+      "recallAt1": 0.902,
+      "recallAt3": 0.946,
+      "wrongTopRate": 0.098
+    },
+    {
+      "set": "heldout",
+      "servers": 38,
+      "strategy": "lexical",
+      "queries": 40,
+      "recallAt1": 0.85,
+      "recallAt3": 0.95,
+      "wrongTopRate": 0.125
+    },
+    {
+      "set": "heldout",
+      "servers": 38,
+      "strategy": "bm25",
+      "queries": 40,
+      "recallAt1": 0.95,
+      "recallAt3": 0.95,
+      "wrongTopRate": 0.025
+    },
+    {
+      "set": "heldout",
+      "servers": 54,
+      "strategy": "lexical",
+      "queries": 40,
+      "recallAt1": 0.85,
+      "recallAt3": 0.925,
+      "wrongTopRate": 0.125
+    },
+    {
+      "set": "heldout",
+      "servers": 54,
+      "strategy": "bm25",
+      "queries": 40,
+      "recallAt1": 0.95,
+      "recallAt3": 0.95,
+      "wrongTopRate": 0.025
+    }
+  ],
+  "truncation": [
+    {
+      "case": "text_230KB",
+      "budgetTokens": 500,
+      "withinBudget": true,
+      "tokenizerCalls": 18,
+      "tokenizedChars": 247134
+    },
+    {
+      "case": "json_array_300KB",
+      "budgetTokens": 500,
+      "withinBudget": true,
+      "tokenizerCalls": 14,
+      "tokenizedChars": 318543
+    },
+    {
+      "case": "text_230KB",
+      "budgetTokens": 2000,
+      "withinBudget": true,
+      "tokenizerCalls": 11,
+      "tokenizedChars": 272576
+    },
+    {
+      "case": "json_array_300KB",
+      "budgetTokens": 2000,
+      "withinBudget": true,
+      "tokenizerCalls": 13,
+      "tokenizedChars": 347177
+    },
+    {
+      "case": "text_230KB",
+      "budgetTokens": 8000,
+      "withinBudget": true,
+      "tokenizerCalls": 13,
+      "tokenizedChars": 459174
+    },
+    {
+      "case": "json_array_300KB",
+      "budgetTokens": 8000,
+      "withinBudget": true,
+      "tokenizerCalls": 15,
+      "tokenizedChars": 501931
+    }
+  ]
+}

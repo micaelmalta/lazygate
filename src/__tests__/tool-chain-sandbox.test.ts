@@ -257,7 +257,7 @@ describe("runCode: limits", () => {
   it("exposes the documented default limits", () => {
     expect(DEFAULT_LIMITS.memoryBytes).toBe(64 * 1024 * 1024);
     expect(DEFAULT_LIMITS.maxCalls).toBe(64);
-    expect(DEFAULT_LIMITS.maxConcurrent).toBe(4);
+    expect(DEFAULT_LIMITS.maxConcurrent).toBe(8);
     expect(DEFAULT_LIMITS.maxLogBytes).toBe(64 * 1024);
     expect(DEFAULT_LIMITS.maxValueBytes).toBe(1024 * 1024);
   });

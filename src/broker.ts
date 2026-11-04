@@ -2,7 +2,7 @@
 // Request handling for the broker, independent of the stdio transport so it can be tested.
 
 import type { z } from "zod";
-import type { ToolRouter, ServerConfig } from "./router.js";
+import { isConfidentMatch, MIN_DISCOVERY_SCORE, type ToolRouter, type ServerConfig } from "./router.js";
 import type { SkillRouter } from "./skill-router.js";
 import type { SkillHashStore } from "./skill-hashes.js";
 import type { ProcessManager, RuntimeCredentials, MCPTool } from "./process-manager.js";
@@ -23,6 +23,8 @@ import { composePrompt, type SecretLookup } from "./prompt-compose.js";
 import { bareToolName, parseNamespacedTool } from "./tool-names.js";
 import { LOG_PREFIX } from "./version.js";
 import { runCode, serverStubs, toScriptResult, type CodeBinding } from "./tool-chain/index.js";
+import { compactSignature } from "./tool-chain/stubs.js";
+import { matchTools } from "./discovery.js";
 import {
   ResultHandleStore,
   textWithinBudget,
@@ -93,6 +95,13 @@ export interface BrokerDeps {
   onOptimizationMetrics?: (context: OptimizationContext, metrics: OptimizationMetrics) => void;
   /** Called when get_result reads a handle, with the tool whose response it holds. */
   onResultHandleRead?: (origin: ResultHandleOrigin) => void;
+  /**
+   * Default for servers that do not set `previewOnDiscover` themselves: `discover_tools` starts
+   * the single clearly best server (when it needs no credentials or interactive login) so the
+   * reply can carry its call signatures. Default off: discovery never starts a process unless a
+   * server opts in.
+   */
+  previewOnDiscover?: boolean;
 }
 
 /** Reject if the promise does not settle within `ms` (nested calls in scripts use the run budget). */
@@ -144,6 +153,15 @@ function attachOptimizationMetadata<T extends ToolResult>(result: T, metrics: Op
     },
   };
 }
+
+/**
+ * Metadata plus result-handle pointer cost roughly this many tokens. Agent-requested projections
+ * and adaptive transforms that save less than this (or under 10% of the result) are not worth it:
+ * the original result is returned as it came, so optimization never costs more than it saves.
+ */
+export const MIN_NET_SAVINGS_TOKENS = 128;
+/** Results at most this large that the agent projected get the lean fields only: no metadata, no handle. */
+export const TINY_RESULT_TOKENS = 128;
 
 const HANDLE_RESERVE_TOKENS = 128;
 const HANDLE_RESERVE_BYTES = 640;
@@ -248,13 +266,42 @@ function matchedLine(keywords: string[], descriptionWords: string[], toolWords: 
   return parts.join(" | ") || "—";
 }
 
+/** Upstream tools the query matched, so the agent can go straight to describe_tool / call_tool. */
+function likelyTools(names: string[]): string {
+  return names.length ? `\n  Likely tools: ${names.slice(0, 3).join(", ")}` : "";
+}
+
 const SUMMARY_MAX = 160;
 /** Above this many tools, activation lists names only (the schemas carry the details). */
 const DETAILED_LIST_MAX_TOOLS = 12;
 /** Cap discovery results so a large catalog cannot flood the context window. */
 export const DISCOVER_TOP_K = 5;
 /** Require at least one keyword match or two description-word matches. */
-export const DISCOVER_MIN_SCORE = 2;
+export const DISCOVER_MIN_SCORE = MIN_DISCOVERY_SCORE;
+
+/** discover_tools inlines at most this many signatures (best-matching tools of the top server). */
+export const DISCOVER_MAX_SIGNATURES = 2;
+/** A previewed server this small shows every tool's signature even when the query names none. */
+export const DISCOVER_SMALL_SERVER_TOOLS = 4;
+/** A second-ranked server this close to the best one makes the match ambiguous: no signatures. */
+const SIGNATURE_AMBIGUITY_RATIO = 0.85;
+/** Longest input schema (minified JSON) appended to a call_tool error. */
+export const ERROR_SCHEMA_MAX_CHARS = 1200;
+/** Looks like the upstream rejected the arguments (as opposed to failing while doing the work). */
+const ARGUMENT_ERROR_RE =
+  /\b(invalid|missing|required|unexpected|unrecognized|unknown (?:argument|parameter|property|field)|must be|should be|expected|validation|schema|argument|parameter|param)\b/i;
+const JSONRPC_INVALID_PARAMS = -32602;
+
+/** Input schema of a tool for an error message: minified JSON, or the compact signature when too long. */
+function schemaHint(tool: { name: string; inputSchema?: Record<string, unknown> }, shownName = tool.name): string {
+  const schema = tool.inputSchema ?? {};
+  const json = JSON.stringify(schema);
+  if (json.length <= ERROR_SCHEMA_MAX_CHARS) return `Input schema for "${shownName}": ${json}`;
+  return (
+    `Input schema for "${shownName}" is large; argument shape: ${compactSignature({ name: shownName, inputSchema: schema }, ERROR_SCHEMA_MAX_CHARS)}` +
+    ` (describe_tool returns the full schema)`
+  );
+}
 
 /** Whether any of this server's tools are merged into tools/list. */
 export function exposesInList(cfg: ServerConfig | undefined): boolean {
@@ -350,6 +397,7 @@ export function createBroker({
   tokenizer: injectedTokenizer,
   onOptimizationMetrics,
   onResultHandleRead,
+  previewOnDiscover = false,
 }: BrokerDeps) {
   // Each broker instance belongs to one stdio client or gateway session; result handles never
   // cross that boundary or survive a process restart.
@@ -369,6 +417,8 @@ export function createBroker({
     policy?: ReturnType<typeof resolveOptimizationPolicy>;
     tokenizer?: Tokenizer;
     recordMetrics?: (metrics: OptimizationMetrics) => void;
+    /** The delivered result is a lean projection of a tiny result: do not offer a handle. */
+    noHandle?: boolean;
   }> => {
     const tokenizer = await resolveTokenizer();
     const resolved = resolveOptimizationPolicy(currentOptimizationConfig(), context);
@@ -405,11 +455,48 @@ export function createBroker({
       metrics = { ...metrics, intent: "fields" };
       if (optimizedResult._meta) optimizedResult = attachOptimizationMetadata(optimizedResult, metrics);
     }
+
+    // Tiny or barely-shrinking results: do not pay for metadata and a handle pointer that cost more
+    // than the transform saved. Operator-configured modes (redaction, budgets) always apply.
+    let noHandle = false;
+    const automatic = requestedFields !== undefined || resolved.mode === "adaptive";
+    const withinLimits =
+      (policy.maxTokens === undefined || metrics.originalTokens <= policy.maxTokens) &&
+      (policy.maxOutputBytes === undefined ||
+        Buffer.byteLength(JSON.stringify(result), "utf8") <= policy.maxOutputBytes);
+    if (automatic && withinLimits && metrics.changed && !result.isError) {
+      const { _meta: _dropped, ...bare } = optimizedResult;
+      const contentTokens = estimateTokens(bare, tokenizer);
+      const saved = metrics.originalTokens - contentTokens;
+      if (saved < Math.max(MIN_NET_SAVINGS_TOKENS, metrics.originalTokens * 0.1)) {
+        if (requestedFields !== undefined && saved > 0 && metrics.originalTokens <= TINY_RESULT_TOKENS) {
+          optimizedResult = bare as ToolResult;
+          metrics = {
+            ...metrics,
+            optimizedTokens: contentTokens,
+            savedTokens: saved,
+            reductionPercent: Math.round((saved / metrics.originalTokens) * 100),
+          };
+          noHandle = true;
+        } else {
+          optimizedResult = result;
+          metrics = {
+            ...metrics,
+            optimizedTokens: metrics.originalTokens,
+            savedTokens: 0,
+            reductionPercent: 0,
+            changed: false,
+            complete: true,
+          };
+        }
+      }
+    }
     return {
       result: optimizedResult,
       metrics,
       policy,
       tokenizer,
+      noHandle,
       recordMetrics: (metrics) => {
         try {
           sink(context, metrics);
@@ -571,6 +658,62 @@ export function createBroker({
     return { tools: [...meta, ...activeTools] };
   }
 
+  /**
+   * Compact signatures of the tools the query points at on the clearly best server, so the agent
+   * can call_tool straight away. Uses the live schema when the server is active, else the signature
+   * learned in the ToolIndex; never activates anything.
+   */
+  function inlineSignatures(query: string, ranked: ReturnType<ToolRouter["rank"]>): string[] {
+    const top = clearTopMatch(ranked);
+    if (!top) return [];
+    const active = manager.getAllActiveTools().filter((t) => t.serverName === top.name);
+    const indexed = router.indexedTools(top.name);
+    const known = active.length
+      ? active.map((t) => ({ name: bareToolName(top.name, t.name), description: t.description }))
+      : indexed;
+    let chosen = [
+      ...top.toolNameMatches,
+      ...matchTools(query, known, DISCOVER_MAX_SIGNATURES),
+    ].filter((name, i, all) => all.indexOf(name) === i && known.some((k) => k.name === name));
+    let limit = DISCOVER_MAX_SIGNATURES;
+    if (known.length > 0 && known.length <= DISCOVER_SMALL_SERVER_TOOLS) {
+      // A tiny server: showing all of it (matches first) is cheaper than another lookup turn.
+      chosen = [...chosen, ...known.map((k) => k.name)].filter((name, i, all) => all.indexOf(name) === i);
+      limit = DISCOVER_SMALL_SERVER_TOOLS;
+    }
+    const out: string[] = [];
+    for (const name of chosen.slice(0, limit)) {
+      const live = active.find((t) => toolNameMatches(top.name, t.name, name));
+      const sig = live
+        ? compactSignature({ name, inputSchema: live.inputSchema })
+        : indexed.find((t) => t.name === name)?.signature;
+      if (sig) out.push(sig);
+    }
+    return out;
+  }
+
+  /** The best-ranked server when it is clearly ahead of the runner-up; otherwise undefined. */
+  function clearTopMatch(ranked: ReturnType<ToolRouter["rank"]>): ReturnType<ToolRouter["rank"]>[number] | undefined {
+    const top = ranked[0];
+    if (!top || !top.best) return undefined;
+    const runnerUp = ranked[1];
+    if (runnerUp && runnerUp.relevance > top.relevance * SIGNATURE_AMBIGUITY_RATIO) return undefined;
+    return top;
+  }
+
+  /**
+   * Load the clearly best server so discover_tools can show its signatures. Skips servers that
+   * need credentials or an interactive OAuth login; any failure just means no preview.
+   */
+  async function previewTopServer(ranked: ReturnType<ToolRouter["rank"]>): Promise<void> {
+    const top = clearTopMatch(ranked);
+    if (!top || manager.listActive().includes(top.name)) return;
+    const cfg = router.getConfig(top.name);
+    if (!cfg || !(cfg.previewOnDiscover ?? previewOnDiscover)) return;
+    if (cfg.oauth || (access?.missing?.(top.name, cfg) ?? []).length > 0) return;
+    await ensureActive(top.name, cfg);
+  }
+
   function parseArgs<S extends z.ZodTypeAny>(schema: S, args: unknown): z.infer<S> | ToolResult {
     const parsed = schema.safeParse(args ?? {});
     if (parsed.success) return parsed.data;
@@ -598,7 +741,7 @@ export function createBroker({
         router.reloadServersFromDisk();
         const ranked = router
           .rank(a.query)
-          .filter((r) => visible(r.name) && r.score >= DISCOVER_MIN_SCORE)
+          .filter((r) => visible(r.name) && isConfidentMatch(r))
           .slice(0, DISCOVER_TOP_K);
 
         if (ranked.length === 0) {
@@ -611,17 +754,31 @@ export function createBroker({
           );
         }
 
+        await previewTopServer(ranked);
         const active = manager.listActive();
         const lines = ranked.map((r) => {
           const cfg = router.getConfig(r.name)!;
           const missing = active.includes(r.name) ? [] : access?.missing?.(r.name, cfg) ?? [];
           const status = active.includes(r.name) ? "✓ active" : missing.length ? "⚠ needs credentials" : "○ inactive";
           const needs = missing.length ? `\n  Needs: ${missing.join(", ")}` : "";
-          return `${status} | ${r.name} (score: ${r.score})\n  ${cfg.description}\n  Matched ${matchedLine(r.reason, r.descriptionMatches, r.toolMatches)}${needs}`;
+          return `${status} | ${r.name} (score: ${r.score})\n  ${cfg.description}\n  Matched ${matchedLine(r.reason, r.descriptionMatches, r.toolMatches)}${likelyTools(r.toolNameMatches)}${needs}`;
         });
+        const chainable = ranked.some((r) => router.getConfig(r.name)?.toolChain);
+        const signatures = inlineSignatures(a.query, ranked);
+        const topName = ranked[0]!.name;
+        const topChainable = Boolean(router.getConfig(topName)?.toolChain);
+        const signatureBlock = signatures.length
+          ? `Call signatures (call_tool server "${topName}", no describe_tool needed${
+              topChainable ? `; in run_chain scripts call servers.${topName}.<tool>(args)` : ""
+            }):\n${signatures.map((sig) => `  ${sig}`).join("\n")}\n\n`
+          : "";
         return text(
           `Servers relevant to "${a.query}":\n\n${lines.join("\n\n")}\n\n` +
-            `Use activate_server to load an inactive server.`
+            signatureBlock +
+            `call_tool and describe_tool load an inactive server on demand; activate_server is only needed to list its tools in tools/list.` +
+            (chainable && !(signatures.length && topChainable)
+              ? " For several dependent calls, describe_tool(server) without a tool gives run_chain stubs."
+              : "")
         );
       }
 
@@ -740,27 +897,43 @@ export function createBroker({
         }
         const actErr = await ensureActive(a.server, cfg);
         if (actErr) return actErr;
-        const known = manager
+        const target = manager
           .getAllActiveTools()
-          .some((t) => t.serverName === a.server && toolNameMatches(a.server, t.name, a.tool));
-        if (!known) {
-          const names = manager
-            .getAllActiveTools()
-            .filter((t) => t.serverName === a.server)
-            .map((t) => t.name);
+          .find((t) => t.serverName === a.server && toolNameMatches(a.server, t.name, a.tool));
+        if (!target) {
+          const serverTools = manager.getAllActiveTools().filter((t) => t.serverName === a.server);
+          const names = serverTools.map((t) => t.name);
+          // Close matches come with their argument shape so the retry can be right the first time.
+          const close = matchTools(
+            a.tool,
+            serverTools.map((t) => ({ name: t.name, description: t.description })),
+            DISCOVER_MAX_SIGNATURES
+          )
+            .map((n) => serverTools.find((t) => t.name === n)!)
+            .map((t) => `  ${compactSignature({ name: bareToolName(a.server, t.name), inputSchema: t.inputSchema })}`);
           return fail(
             `Tool "${a.tool}" not found on server "${a.server}". ` +
-              `Available: ${names.join(", ") || "(none)"}`
+              `Available: ${names.join(", ") || "(none)"}` +
+              (close.length ? `\nClosest matches:\n${close.join("\n")}` : "")
           );
         }
         try {
           const raw = (await manager.callTool(a.server, a.tool, a.args ?? {})) as ToolResult;
+          if (raw.isError) {
+            // The upstream refused the arguments: show the schema so the agent can fix them in one retry.
+            const message = raw.content
+              .map((block) => (block as { type?: string; text?: string }).type === "text" ? (block as { text?: string }).text ?? "" : "")
+              .join("\n");
+            if (ARGUMENT_ERROR_RE.test(message)) {
+              return { ...raw, content: [...raw.content, { type: "text", text: schemaHint(target, a.tool) }] };
+            }
+          }
           const optimized = await optimize(
             raw,
             { serverName: a.server, toolName: a.tool, source: "call_tool" },
             a.fields
           );
-          const offered = optimized.metrics
+          const offered = optimized.metrics && !optimized.noHandle
             ? offerResultHandle(
                 optimized.result,
                 optimized.metrics,
@@ -769,7 +942,7 @@ export function createBroker({
                 optimized.tokenizer,
                 { serverName: a.server, toolName: a.tool }
               )
-            : { result: optimized.result, metrics: undefined };
+            : { result: optimized.result, metrics: optimized.metrics };
           const res = offered.result;
           if (offered.metrics) optimized.recordMetrics?.(offered.metrics);
           // Surface the upstream hints on the result too (kept in _meta so content is untouched).
@@ -788,7 +961,12 @@ export function createBroker({
             _meta: { ...meta, lazygate: { ...lazygateMeta, tool: a.tool, server: a.server, annotations: tags } },
           };
         } catch (err) {
-          return fail(`Error calling ${a.tool}: ${(err as Error).message}`);
+          const message = (err as Error).message;
+          const invalidParams = (err as { code?: number }).code === JSONRPC_INVALID_PARAMS;
+          return fail(
+            `Error calling ${a.tool}: ${message}` +
+              (invalidParams || ARGUMENT_ERROR_RE.test(message) ? `\n${schemaHint(target, a.tool)}` : "")
+          );
         }
       }
 

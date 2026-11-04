@@ -29,18 +29,21 @@ lazygate (formerly context-broker) is an MCP server that itself acts as a proxy.
 |---|---|
 | `index.ts` | Entry point. Loads the package-root `.env`, subcommand dispatch (`migrate`/`revert`/`benchmark`), config loading, wires the MCP SDK server, connects stdio, *then* auto-activates `autoActivate` servers in the background |
 | `env-file.ts` | `loadEnvFile` — dotenv file → `process.env` (existing variables win; missing file is fine) |
-| `broker.ts` | `createBroker({router, manager, skillRouter})` → `listTools()` / `callTool()`. All meta-tool handling and proxying; transport-independent so it is unit-tested |
+| `broker.ts` | `createBroker({router, manager, skillRouter})` → `listTools()` / `callTool()`. All meta-tool handling and proxying; transport-independent so it is unit-tested. `discover_tools` inlines call signatures for a clear match (from the live schema or `tool-index.json`; it starts nothing unless a server opts in with `previewOnDiscover: true`, per server or via `createBroker`; opt-in loads a clear match that needs no credentials or OAuth) — tiny servers (≤4 tools) show every signature; `call_tool` argument errors / unknown tools return the input schema / closest signatures; optimization of tiny or barely-shrinking `call_tool` results is skipped (`MIN_NET_SAVINGS_TOKENS`, `TINY_RESULT_TOKENS`) |
 | `meta-tools.ts` | 13 meta-tool definitions (`META_TOOLS`, incl. `run_chain` and `get_result`) and zod argument schemas; gateway-only tools filtered in stdio. `call_tool` takes optional agent-requested `fields` |
 | `response-optimizer.ts` | Opt-in response transforms (`prune`/`project`/`jsonpath`/`schema`/`html_markdown`/`html_reader`/`adaptive`), config validation, output budgets, `Tokenizer` interface. Adaptive without candidates uses `automaticCandidates()` (`prune` + `html_markdown`; `prune` skipped with `keepEmptyValues`, which the broker defaults on for tools with an `outputSchema`; `schema` only with `allowSummary`), ranks candidates by serialized size and tokenizes only the winner |
+| `prefix-fit.ts` | `longestFittingPrefix` — bounded, aimed prefix search used by truncation (≤12 tokenizer probes; skips values that cannot fit, `MAX_PLAUSIBLE_CHARS_PER_TOKEN`) |
 | `tokenizers.ts` | Built-in token counters (`chars_per_4`, `o200k_base`, `cl100k_base` via `js-tiktoken`, lazy-loaded, memoized, sampled above 256 KiB); `--tokenizer` flag parsing |
 | `result-handles.ts` | `ResultHandleStore` — per-broker, expiring store of full results behind `get_result` handles (JSON: field selection; text: offset paging); `textWithinBudget` |
 | `tool-chain/sandbox.ts` | `runCode()` — runs a `run_chain` script in a fresh QuickJS (WebAssembly) context via `quickjs-emscripten`. Only `servers.*` bindings and `console.log` reach the host; resource limits (memory, stack, deadline, call count, concurrency, log and value size) |
 | `tool-chain/stubs.ts` | JSON Schema → compact TypeScript signatures for a server's tool-chain tools (`describe_tool` without `tool`) |
 | `tool-chain/results.ts` | Converts an upstream MCP result to the value a script sees; `isError` becomes `{ error }` |
-| `router.ts` | `ToolRouter` + `ServerConfig` type; ranks servers against a query; `reloadServersFromDisk()` |
+| `router.ts` | `ToolRouter` + `ServerConfig` type; `rank(query, {strategy})` with `lexical` / `bm25` (default) / `hybrid`; `isConfidentMatch`; `select()` (auto-activation) stays lexical; `setUsageSignal()`; `reloadServersFromDisk()` |
+| `discovery.ts` | `DiscoveryRanker` — field-weighted BM25 over server/tool text, stop words, aliases, exact tool-identifier bonus, capped usage nudge; per-server document cache. `matchTools` picks the tools of one server a query points at (inline signatures, close matches for an unknown tool) |
+| `discovery-eval.ts` | Labeled discovery evaluation (`evaluateDiscovery`: Recall@k, wrong-top rate), deterministic distractor catalogs; tuned set `scripts/fixtures/discovery-eval.json`, held-out set `scripts/fixtures/discovery-heldout.json` (never tune the ranker to it) |
 | `skill-router.ts` | `SkillRouter` — same for file-based skills; `reloadFromDisk()`, `load()` |
-| `scoring.ts` | Shared word-based scorer (keywords +2, description words +1, learned tool words up to +2, light stemming) |
-| `tool-index.ts` | `ToolIndex` — persists each server's tool names/descriptions (`tool-index.json`) so `discover_tools` can route by them |
+| `scoring.ts` | Shared word-based scorer (keywords +2, description words +1, learned tool words up to +2, light stemming); also exports `stem`, `normalizeWord`, `aliasesOf` (alias table) |
+| `tool-index.ts` | `ToolIndex` — persists each server's tool names/descriptions and compact call signatures (`tool-index.json`) so `discover_tools` can route by them and inline a signature without activating |
 | `tool-names.ts` | Optional `server__tool` namespacing helpers (`namespaceTools` per server or `--namespace-tools`) |
 | `gateway/tool-index-warm.ts` | Admin pre-warm of the shared ToolIndex (shared-scope servers only) |
 | `child-env.ts` | `buildChildEnv` — scopes the environment passed to stdio children (`inheritEnv`) |
@@ -55,7 +58,7 @@ lazygate (formerly context-broker) is an MCP server that itself acts as a proxy.
 | `gateway/tokens.ts` | `TokenStore` — personal access tokens (`lzg_<id>_<secret>`, hash only) |
 | `gateway/vault.ts` | `UserVault` — per-user credentials saved from the web UI, AES-256-GCM bound to user/server/field; `mergeCreds` (request headers win) |
 | `gateway/ui-api.ts`, `gateway/ui-assets.ts` | Web UI at `/ui`: JSON API (token-gated, admin split) and the embedded page/script/CSS (no inline script or style — strict CSP) |
-| `gateway/{cli,audit,redact,private-file,http-util}.ts` | `serve` / `token` / `secret` commands, JSONL audit log (+ usage summary and `recommendOptimizationPolicies`), secret redaction, 0600 file helpers |
+| `gateway/{cli,audit,redact,private-file,http-util}.ts` | `serve` / `token` / `secret` commands, JSONL audit log (+ usage summary incl. `chain` adoption metrics and `recommendOptimizationPolicies`), secret redaction, 0600 file helpers |
 | `paths.ts` | `APP_NAME`, `configDir()`, and `adoptLegacyConfigDir()` — one-time move of `~/.config/context-broker` to `~/.config/lazygate` (old path left as a symlink) |
 
 ### Request flow
@@ -69,7 +72,7 @@ lazygate (formerly context-broker) is an MCP server that itself acts as a proxy.
 
 ### Config files
 
-- `~/.config/lazygate/servers.json` — server registry (`{ servers: { name: { description, keywords, command, args, env, inheritEnv, autoActivate, expose, namespaceTools, toolChain, toolTimeoutMs, migratedFrom, disabledPlugins } } }`; HTTP servers use `type`, `url`, `headers`, `oauth`; `expose` is `"none"` (default) | `"all"` | tool-name allowlist; `namespaceTools: true` exposes tools as `server__tool`; `toolChain` is `true` | tool-name allowlist and lets `run_chain` scripts call the server)
+- `~/.config/lazygate/servers.json` — server registry (`{ servers: { name: { description, keywords, command, args, env, inheritEnv, autoActivate, expose, namespaceTools, toolChain, previewOnDiscover, toolTimeoutMs, migratedFrom, disabledPlugins } } }`; HTTP servers use `type`, `url`, `headers`, `oauth`; `expose` is `"none"` (default) | `"all"` | tool-name allowlist; `namespaceTools: true` exposes tools as `server__tool`; `toolChain` is `true` | tool-name allowlist and lets `run_chain` scripts call the server)
 - `~/.config/lazygate/skills.json` — skill registry (`{ skills: { name: { description, keywords, path, migratedFrom | plugin } } }`)
 - `config/*.json` in the repo — **examples only**, never loaded implicitly
 
@@ -80,6 +83,12 @@ Config resolution: `--config` / `--skills` flag → `~/.config/lazygate/<file>`;
 Plain `.mjs` files, no build step (except `migrate.mjs`, which imports `dist/migrate-helpers.js`, and `benchmark.mjs`, which imports `dist/meta-tools.js`).
 
 `benchmark.mjs --tasks` runs one multi-step fixture task (`src/__tests__/fixtures/tickets-server.mjs`) four ways — **direct** (Claude → every runnable server from your Lazygate catalog + tickets, no proxy), lazygate `call_tool`, lazygate `call_tool+opt` (response optimization on: adaptive default + `call_tool` `fields`), and lazygate `run_chain` — and checks each answer against the fixture's known result. OAuth-only HTTP servers are skipped. Needs a logged-in `claude` CLI.
+
+`benchmark.mjs --tasks --cold-discovery` is the live-model variant of `--tasks` where the lazygate strategies are not told the server or tool names (needs a logged-in `claude`; `--estimate` dry-runs the instructions; covered only by `benchmark-tasks-cold.test.ts`). Task mode runs claude with user settings/hooks off, counts API calls from `stream-json` (`num_turns` counts tool calls) and reports **net** input (raw − calls × the measured no-MCP per-call overhead).
+
+`benchmark.mjs --suite` is the model-free, reproducible suite (`lib/suite.mjs`; fixtures `fixtures/suite-{data,tools,server}.mjs`, `fixtures/discovery-eval.json` and the held-out `fixtures/discovery-heldout.json`). A scripted oracle agent drives a real stdio fixture server through the real `ProcessManager` and broker: 5 workloads × 6 strategies (`direct`, `direct_capped`, `call_tool`, `call_tool_opt`, `run_chain`, `pinned`) × 20/100/250/500 catalog tools (15 rounds; `--quick` 3), recording correctness, turns, raw and cache-modeled ("effective") input tokens, measured tool latency (median, min–max; p95 only from 20 samples) and modeled model time (`modeledMs`, turn-time sweep). A cold-start section compares three lookup modes (`cold` discover → describe → call, `merged` discovery with inline signatures, `known`); discovery runs on the tuned and held-out sets and its wrong-tool rate feeds the modeled "exp." columns. Options: `--merged-discovery` / `--known-tools`, `--cache-read-discount`, `--cache-write-premium`, `--direct-output-cap`, `--schema-tokens-per-tool` / `--catalog-from`, `--turn-ms-sweep`, `--retry-turns`, `--no-lookup-comparison`. `--baseline benchmarks/baseline.json` fails on regressions of deterministic fields (CI runs `--quick`); `--write-baseline` regenerates it. Full results are published in `benchmarks/results/`.
+
+`check-pack.mjs` verifies the npm tarball contents (`npm run pack:check`; also run by `prepublishOnly`, CI and the release workflow).
 
 - `lib/shared.mjs` — atomic writes + backups, `find` replacement, frontmatter parsing, `deriveEntry`, `splitSkillMd` / `mergeInstructions`, Cursor `${env:VAR}` conversion. Copied next to `session-sync.mjs` on install.
 - `migrate.mjs` — reads servers from `~/.claude.json` / `~/.cursor/mcp.json` / `~/.config/opencode/opencode.json` (+ plugin `.mcp.json` files, labelled `plugin`), converts to broker format with a `migratedFrom` marker, extracts secrets (env and headers) to the shell file, registers skills/commands **in place** (no file moves), splits `SKILL.md`, adds the `SessionStart` hook, and registers the broker in the source client (`~/.claude.json`, Cursor `mcpServers`, OpenCode `mcp`). Every file it modifies is backed up (`.bak-<timestamp>`) and written atomically.

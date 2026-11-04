@@ -7,10 +7,13 @@ import { readFileSync, writeFileSync, renameSync, mkdirSync, existsSync, statSyn
 import { dirname } from "path";
 import type { ServerConfig } from "./router.js";
 import { LOG_PREFIX } from "./version.js";
+import { compactSignature } from "./tool-chain/stubs.js";
 
 export interface IndexedTool {
   name: string;
   description: string;
+  /** Compact argument signature learned from the tool's input schema (bounded; may end in "…"). */
+  signature?: string;
 }
 
 interface Entry {
@@ -105,14 +108,22 @@ export class ToolIndex {
   }
 
   /** Remember a server's tools. Returns true when the stored index changed. */
-  record(name: string, cfg: ServerConfig, tools: Array<{ name: string; description?: string }>): boolean {
+  record(
+    name: string,
+    cfg: ServerConfig,
+    tools: Array<{ name: string; description?: string; inputSchema?: Record<string, unknown>; signature?: string }>
+  ): boolean {
     this.ensureLoaded();
     const entry: Entry = {
       sig: serverSignature(cfg),
-      tools: tools.slice(0, MAX_TOOLS_PER_SERVER).map((t) => ({
-        name: t.name,
-        description: (t.description ?? "").slice(0, MAX_DESCRIPTION_CHARS),
-      })),
+      tools: tools.slice(0, MAX_TOOLS_PER_SERVER).map((t) => {
+        const signature = t.signature ?? (t.inputSchema ? compactSignature({ name: t.name, inputSchema: t.inputSchema }) : undefined);
+        return {
+          name: t.name,
+          description: (t.description ?? "").slice(0, MAX_DESCRIPTION_CHARS),
+          ...(signature ? { signature } : {}),
+        };
+      }),
     };
     if (JSON.stringify(this.data[name]) === JSON.stringify(entry)) return false;
     this.data[name] = entry;

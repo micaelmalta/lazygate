@@ -29,6 +29,16 @@
 //   lazygate benchmark --estimate   # local chars÷4 preview, no API
 //   lazygate benchmark --responses  # local JSON/HTML optimizer benchmark, no API
 //   lazygate benchmark --responses-live --cases benchmark-cases.json
+//   lazygate benchmark --suite [--quick] [--catalog-sizes 20,100,250,500] [--rounds 5]
+//                      [--out-dir benchmark-results] [--baseline benchmarks/baseline.json]
+//                      [--write-baseline path] [--workloads a,b] [--strategies a,b] [--json]
+//                      [--known-tools | --merged-discovery] [--turn-ms 1500] [--prefill-ms-per-1k 20]
+//                      [--turn-ms-sweep 500,1500,3000] [--cache-read-discount 0.1] [--cache-write-premium 1.25]
+//                      [--direct-output-cap 25000] [--schema-tokens-per-tool N | --catalog-from file]
+//                      [--retry-turns 1] [--no-lookup-comparison] [--tokenizer o200k_base]
+//   lazygate benchmark --tasks [--cold-discovery] [--rounds 3] [--include-catalog]
+//                      live `claude -p` task; --cold-discovery starts lazygate cold (the model is not told
+//                      the server or tool names and must use discover_tools); needs a logged-in claude CLI
 
 import { execFile, spawn } from "child_process";
 import { promisify } from "util";
@@ -110,6 +120,15 @@ const get = (flag) => {
 };
 const has = (flag) => args.includes(flag);
 
+// Reproducible end-to-end suite (no model, no network): see scripts/lib/suite.mjs.
+if (has("--suite")) {
+  const { suiteMain } = await import("./lib/suite.mjs");
+  const code = await suiteMain({ get, has });
+  // A large report on a pipe is written asynchronously: let it drain before exiting.
+  await new Promise((done) => process.stdout.write("", done));
+  process.exit(code);
+}
+
 const configArg = get("--config");
 const skillsConfigArg = get("--skills-config");
 const serverArg = get("--servers");
@@ -129,6 +148,14 @@ const responseCasesArg = get("--cases");
 // --tasks runs Claude with permission checks bypassed. By default it only sees the tickets fixture;
 // the user's real catalog (and its destructive tools) is loaded only with an explicit flag.
 const includeCatalog = has("--include-catalog");
+// --cold-discovery: the lazygate strategies start cold. The model is not told which server or tools
+// exist, so it has to discover_tools → (describe_tool) → call, like a fresh agent with no skill or
+// AGENTS.md hint. Without it the instructions name the server and tools (a "known tools" agent).
+const coldDiscovery = has("--cold-discovery");
+if (coldDiscovery && !tasksOnly) {
+  console.error("--cold-discovery only applies to --tasks.");
+  process.exit(1);
+}
 if (tasksOnly && (mcpOnly || skillsOnly)) {
   console.error("--tasks cannot be combined with --mcp-only / --skills-only.");
   process.exit(1);
@@ -1184,7 +1211,7 @@ console.log(`${"─".repeat(60)}`);
 if (tasksOnly) {
   // Task mode still uses the tickets fixture for the workload; direct wires the user's catalog too.
   console.log(
-    `Mode:    --tasks (direct | call_tool | call_tool+opt | run_chain; ${includeCatalog ? "loads your full Lazygate catalog (--include-catalog)" : "fixture server only (pass --include-catalog for the full catalog)"})`
+    `Mode:    --tasks${coldDiscovery ? " --cold-discovery (lazygate starts cold: the model must discover the server and tools)" : ""} (direct | call_tool | call_tool+opt | run_chain; ${includeCatalog ? "loads your full Lazygate catalog (--include-catalog)" : "fixture server only (pass --include-catalog for the full catalog)"})`
   );
   console.log(
     `Catalog: ${Object.keys(servers).length} runnable` +
@@ -1229,6 +1256,12 @@ const TASK_PROMPT =
 
 const fmtNumTask = (n) => n.toLocaleString();
 
+/** Same task, but nothing names the server: the model has to find it (--cold-discovery). */
+const COLD_TASK_PROMPT =
+  "Count the open support tickets assigned to ana and sum each ticket's bodyLength field " +
+  "(the per-ticket record has it). Answer with exactly two numbers: the count, then the sum.";
+const COLD_ANSWER_RULE = "Your entire final message must be exactly: <count> <sum> — two integers, one space, nothing else.";
+
 /** Expected answer, derived from the same deterministic data as the fixture server. */
 function taskExpectedAnswer() {
   const fixturePath = resolve(__dirname, "..", "src", "__tests__", "fixtures", "tickets-server.mjs");
@@ -1256,6 +1289,10 @@ const TASK_STRATEGIES = {
       "2) For each open ticket whose assignee is \"ana\", call get_ticket once.\n" +
       "3) Add the numeric bodyLength fields from those results (do NOT count characters in body).\n" +
       "Your entire final message must be exactly: <count> <sum> — two integers, one space, nothing else.",
+    coldInstruction:
+      "You have many MCP servers loaded directly (no lazygate). Pick the one that serves support tickets and use its tools.\n" +
+      "Ticket bodies are large — still fetch each ticket you need, and add the numeric bodyLength fields (do NOT count characters in body).\n" +
+      COLD_ANSWER_RULE,
   },
   "call-tool": {
     label: "call_tool",
@@ -1268,6 +1305,11 @@ const TASK_STRATEGIES = {
       "2) For each open ticket whose assignee is \"ana\", call_tool get_ticket once.\n" +
       "3) Add the numeric bodyLength fields from those results (do NOT count characters in body).\n" +
       "Your entire final message must be exactly: <count> <sum> — two integers, one space, nothing else.",
+    coldInstruction:
+      "You have the lazygate MCP server and do not know which upstream servers or tools exist.\n" +
+      "Start with discover_tools to find the right server, learn the tool names and argument shapes from its answer (use describe_tool only if you need more), then use call_tool only (never run_chain).\n" +
+      "Ticket bodies are large — still fetch each ticket you need, and add the numeric bodyLength fields (do NOT count characters in body).\n" +
+      COLD_ANSWER_RULE,
   },
   "call-tool-optimized": {
     label: "call_tool+opt",
@@ -1283,6 +1325,11 @@ const TASK_STRATEGIES = {
       "args={id}, fields=[\"id\",\"bodyLength\"]) once.\n" +
       "3) Add the numeric bodyLength fields from those results (do NOT count characters in body).\n" +
       "Your entire final message must be exactly: <count> <sum> — two integers, one space, nothing else.",
+    coldInstruction:
+      "You have the lazygate MCP server and do not know which upstream servers or tools exist.\n" +
+      "Start with discover_tools to find the right server, learn the tool names and argument shapes from its answer (use describe_tool only if you need more), then use call_tool only (never run_chain).\n" +
+      "Ticket bodies are large, so ask call_tool for only the fields you need: pass fields=[...] (for example [\"id\",\"bodyLength\"]).\n" +
+      COLD_ANSWER_RULE,
   },
   "run-chain": {
     label: "run_chain",
@@ -1296,6 +1343,11 @@ const TASK_STRATEGIES = {
       "filter assignee===\"ana\", await servers.tickets.get_ticket({id}) for each (use Promise.all if you want), " +
       "sum bodyLength (or body.length), return {count, total}. Do not use call_tool.\n" +
       "Your entire final message must be exactly: <count> <sum> — two integers, one space, nothing else.",
+    coldInstruction:
+      "You have the lazygate MCP server and do not know which upstream servers or tools exist.\n" +
+      "Start with discover_tools to find the right server; a clear match lists call signatures, and inside run_chain you call servers.<server>.<tool>(args). Use describe_tool with that server and NO tool argument only if you need the tool-chain stubs.\n" +
+      "Then write ONE run_chain script that fetches, filters and totals; ticket bodies are large, so keep them inside the script (never use call_tool).\n" +
+      COLD_ANSWER_RULE,
   },
 };
 
@@ -1309,6 +1361,8 @@ function ticketsServerEntry() {
     args: [ticketsServer],
     inheritEnv: false,
     toolChain: true,
+    // The fixture is safe to start, so cold discovery can show its signatures in one turn.
+    previewOnDiscover: true,
   };
 }
 
@@ -1375,8 +1429,8 @@ async function runTaskStrategy(id) {
   const dir = mkdtempSync(join(workDir, `task-${id}-`));
   const mcpConfig = taskMcpConfig(strategy, dir);
   const appendFile = join(dir, "instruction.md");
-  writeFileSync(appendFile, strategy.instruction);
-  const result = await runClaudeTask(mcpConfig, { appendFile, prompt: TASK_PROMPT });
+  writeFileSync(appendFile, coldDiscovery ? strategy.coldInstruction : strategy.instruction);
+  const result = await runClaudeTask(mcpConfig, { appendFile, prompt: coldDiscovery ? COLD_TASK_PROMPT : TASK_PROMPT });
   return { id, label: strategy.label, ...result };
 }
 
@@ -1387,13 +1441,17 @@ async function runTaskStrategy(id) {
  *   - skips `--bare` so Claude can use a logged-in session (bare only accepts ANTHROPIC_API_KEY)
  *   - allows MCP calls without interactive approval
  *   - ignores the user's real MCP config (`--strict-mcp-config`)
+ *   - ignores the user's settings and hooks (`--setting-sources ""`, `disableAllHooks`)
  */
 async function runClaudeTask(mcpConfig, { appendFile, prompt }) {
   const claudeArgs = [
     "-p",
     prompt,
+    // stream-json (with --verbose) lets us count API round trips: `num_turns` counts tool calls,
+    // so a model that batches eight calls into one response still reports ten turns.
     "--output-format",
-    "json",
+    "stream-json",
+    "--verbose",
     "--tools",
     "",
     "--no-session-persistence",
@@ -1402,6 +1460,12 @@ async function runClaudeTask(mcpConfig, { appendFile, prompt }) {
     "--permission-mode",
     "bypassPermissions",
     "--dangerously-skip-permissions",
+    // Keep the user's own hooks, memory plugins and settings out of the measurement: they inject
+    // tens of thousands of tokens into every turn, which hides the difference between strategies.
+    "--setting-sources",
+    "",
+    "--settings",
+    JSON.stringify({ disableAllHooks: true }),
     "--mcp-config",
     JSON.stringify(mcpConfig),
     "--append-system-prompt-file",
@@ -1424,8 +1488,15 @@ async function runClaudeTask(mcpConfig, { appendFile, prompt }) {
     }
   }
   let data;
+  const messageIds = new Set();
   try {
-    data = JSON.parse(stdout.trim());
+    for (const line of stdout.split("\n")) {
+      if (!line.trim()) continue;
+      const event = JSON.parse(line);
+      if (event.type === "assistant" && event.message?.id) messageIds.add(event.message.id);
+      else if (event.type === "result") data = event;
+    }
+    if (!data) throw new Error("no result event");
   } catch {
     return { ok: false, error: "invalid JSON from claude", durationMs: Date.now() - start };
   }
@@ -1438,11 +1509,30 @@ async function runClaudeTask(mcpConfig, { appendFile, prompt }) {
     ok: true,
     answer: String(data.result ?? ""),
     turns: data.num_turns ?? 0,
+    apiCalls: Math.max(1, messageIds.size),
     totalInput,
     outputTokens: u.output_tokens ?? 0,
     durationMs: data.duration_ms ?? Date.now() - start,
     costUSD: data.total_cost_usd ?? 0,
   };
+}
+
+
+/**
+ * Input tokens one bare API call costs in this environment (system prompt, built-in agents,
+ * ...), measured once with no MCP servers. Every call pays it, so it dwarfs the schema and
+ * result differences between strategies; subtracting it per call exposes them.
+ */
+let taskBaselinePromise = null;
+function measureTaskBaseline() {
+  taskBaselinePromise ??= (async () => {
+    const dir = mkdtempSync(join(workDir, "task-baseline-"));
+    const appendFile = join(dir, "instruction.md");
+    writeFileSync(appendFile, "Reply with exactly the word ok.");
+    const r = await runClaudeTask({ mcpServers: {} }, { appendFile, prompt: "Reply with the single word ok." });
+    return r.ok && r.apiCalls === 1 ? r.totalInput : 0;
+  })();
+  return taskBaselinePromise;
 }
 
 /**
@@ -1494,6 +1584,7 @@ function summarizeTaskRuns(id, label, runs) {
     minInput: Math.min(...inputs),
     maxInput: Math.max(...inputs),
     turns: mean(basis.map((r) => r.turns)),
+    apiCalls: mean(basis.map((r) => r.apiCalls ?? 0)),
     durationMs: Math.round(mean(basis.map((r) => r.durationMs))),
     answer: basis[basis.length - 1].answer,
   };
@@ -1506,7 +1597,10 @@ function fmtTurns(n) {
 
 if (tasksOnly) {
   const expected = taskExpectedAnswer();
-  console.log(`Task:    ${TASK_PROMPT}`);
+  console.log(`Task:    ${coldDiscovery ? COLD_TASK_PROMPT : TASK_PROMPT}`);
+  if (coldDiscovery) {
+    console.log(`Lookup:  cold discovery — the extra turns versus a known-tools run (omit --cold-discovery) are the discover_tools / describe_tool lookups`);
+  }
   console.log(
     `Expect:  ${expected.count} tickets, total bodyLength ${fmtNumTask(expected.total)} ` +
       `(~${Math.round(expected.total / 1024)} KiB of bodies if every get_ticket returns through the model)`
@@ -1517,9 +1611,13 @@ if (tasksOnly) {
       `averages use correct runs only)\n`
   );
   if (estimateOnly) {
-    console.log(`Mode:    --estimate: skipping live runs (task mode needs claude -p).`);
+    console.log(`Mode:    --estimate: skipping live runs (task mode needs claude -p). Instructions the model would get:\n`);
+    for (const strategy of Object.values(TASK_STRATEGIES)) {
+      console.log(`[${strategy.label}]\n${coldDiscovery ? strategy.coldInstruction : strategy.instruction}\n`);
+    }
     process.exit(0);
   }
+  const baselinePerCall = await measureTaskBaseline();
   const taskRows = [];
   for (const id of Object.keys(TASK_STRATEGIES)) {
     const label = TASK_STRATEGIES[id].label;
@@ -1531,9 +1629,17 @@ if (tasksOnly) {
       if (r.ok) r.correct = answerMatches(r.answer, expected);
       runs.push(r);
     }
-    taskRows.push(summarizeTaskRuns(id, label, runs));
+    const row = summarizeTaskRuns(id, label, runs);
+    // Input above the fixed per-call overhead: schemas, instructions, calls and results only.
+    if (row.ok) row.netInput = Math.max(0, Math.round(row.totalInput - row.apiCalls * baselinePerCall));
+    taskRows.push(row);
   }
-  console.log();
+  console.log(
+    baselinePerCall
+      ? `\nFixed overhead: ${fmtNumTask(baselinePerCall)} input tokens per API call (system prompt of this Claude Code install, no MCP). ` +
+          `"net" removes it, so the strategies are compared on what they add.\n`
+      : `\nCould not measure the fixed per-call overhead; "net" equals the raw input.\n`
+  );
   for (const r of taskRows) {
     if (!r.ok) {
       console.log(`${r.label.padEnd(14)} ERROR  ${r.error}`);
@@ -1544,7 +1650,8 @@ if (tasksOnly) {
     const verdict =
       rounds > 1 ? `correct ${r.correctRuns}/${r.runs}` : r.correctRuns ? "correct" : "WRONG";
     console.log(
-      `${r.label.padEnd(14)} input ${fmtNumTask(r.totalInput).padStart(9)}  turns ${fmtTurns(r.turns).padStart(4)}  ` +
+      `${r.label.padEnd(14)} net ${fmtNumTask(r.netInput).padStart(8)}  raw ${fmtNumTask(r.totalInput).padStart(9)}  ` +
+        `calls ${fmtTurns(r.apiCalls).padStart(4)}  tool calls ${fmtTurns(r.turns).padStart(4)}  ` +
         `${(r.durationMs / 1000).toFixed(1).padStart(5)}s  ${verdict}  answer: ${answerSummary(r.answer)}${range}`
     );
   }
@@ -1556,10 +1663,11 @@ if (tasksOnly) {
 
   const deltaLine = (label, base, other) => {
     if (!fair(base) || !fair(other)) return null;
-    const d = other.totalInput - base.totalInput;
-    const pct = base.totalInput ? Math.abs((d / base.totalInput) * 100).toFixed(1) : "0.0";
+    const d = other.netInput - base.netInput;
+    const pct = base.netInput ? Math.abs((d / base.netInput) * 100).toFixed(1) : "0.0";
     const sign = d > 0 ? "+" : d < 0 ? "−" : "±";
-    return `${label}: ${sign}${fmtNumTask(Math.abs(d))} input tokens (${sign}${pct}%)`;
+    const rawD = other.totalInput - base.totalInput;
+    return `${label}: ${sign}${fmtNumTask(Math.abs(d))} net input tokens (${sign}${pct}%); ${other.apiCalls - base.apiCalls >= 0 ? "+" : "−"}${fmtTurns(Math.abs(other.apiCalls - base.apiCalls))} API calls; raw ${rawD >= 0 ? "+" : "−"}${fmtNumTask(Math.abs(rawD))}`;
   };
 
   const lines = [

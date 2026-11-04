@@ -2,7 +2,7 @@
 // JSON Schema -> compact TypeScript stubs, and MCP result -> script value conversion.
 
 import { describe, it, expect } from "@jest/globals";
-import { schemaToType, toolSignature, serverStubs, STUB_HEADER } from "../tool-chain/stubs.js";
+import { schemaToType, toolSignature, serverStubs, compactSignature, STUB_HEADER } from "../tool-chain/stubs.js";
 import { toScriptResult, toScriptValue } from "../tool-chain/results.js";
 
 describe("schemaToType", () => {
@@ -162,5 +162,21 @@ describe("toScriptResult", () => {
   it("uses a fallback message when an error result has no text", () => {
     const r = toScriptResult({ isError: true, content: [] });
     expect(r).toEqual({ value: { error: "tool returned an error with no text" }, failed: true });
+  });
+});
+
+describe("compactSignature", () => {
+  it("shows the argument shape without a description and bounds its length", () => {
+    expect(
+      compactSignature({
+        name: "get_order",
+        inputSchema: { type: "object", properties: { id: { type: "string" }, verbose: { type: "boolean" } }, required: ["id"] },
+      })
+    ).toBe("get_order(args: { id: string; verbose?: boolean })");
+    expect(compactSignature({ name: "ping", inputSchema: { type: "object" } })).toBe("ping(args: {})");
+    const wide = { type: "object", properties: Object.fromEntries(Array.from({ length: 60 }, (_, i) => [`field_${i}`, { type: "string" }])) };
+    const long = compactSignature({ name: "wide", inputSchema: wide }, 120);
+    expect(long.length).toBeLessThanOrEqual(120);
+    expect(long.endsWith("…")).toBe(true);
   });
 });

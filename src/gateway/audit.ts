@@ -270,6 +270,17 @@ export interface UsageBucket {
   optimizationSelectedModes: Record<string, number>;
 }
 
+export interface ChainUsage {
+  runChainCalls: number;
+  callToolCalls: number;
+  /** run_chain share of run_chain + call_tool, in percent (0 when neither was used). */
+  adoptionRate: number;
+  /** Successful run_chain calls, in percent of run_chain calls. */
+  successRate: number;
+  /** Upstream tool calls made by scripts, per run_chain call. */
+  nestedCallsPerChain: number;
+}
+
 export interface UsageSummary {
   /** Events included in the summary (MCP tool traffic only). */
   calls: number;
@@ -292,6 +303,11 @@ export interface UsageSummary {
   resultHandleReads: number;
   /** Reads as a percentage of offers: how often a reduction cost the agent another tool call. */
   resultHandleReadRate: number;
+  /**
+   * run_chain adoption: scripts run versus direct call_tool calls (calls a script makes itself are
+   * excluded from both), how often scripts succeed, and how many upstream calls each one makes.
+   */
+  chain: ChainUsage;
   from: string | null;
   to: string | null;
   byServer: UsageBucket[];
@@ -378,6 +394,10 @@ export function summarizeUsage(events: AuditedEvent[], top = 10): UsageSummary {
   const byServer = new Map<string, UsageBucket>();
   const byTool = new Map<string, UsageBucket>();
   const byUser = new Map<string, UsageBucket>();
+  let runChainCalls = 0;
+  let runChainOk = 0;
+  let callToolCalls = 0;
+  let nestedCalls = 0;
   let from: string | null = null;
   let to: string | null = null;
 
@@ -387,6 +407,11 @@ export function summarizeUsage(events: AuditedEvent[], top = 10): UsageSummary {
     originalTokens += e.originalTokens ?? 0;
     optimizedTokens += e.optimizedTokens ?? 0;
     savedTokens += e.savedTokens ?? 0;
+    if (e.via === "run_chain") nestedCalls += 1;
+    else if (e.tool === "run_chain") {
+      runChainCalls += 1;
+      if (e.ok !== false) runChainOk += 1;
+    } else if (e.tool === "call_tool") callToolCalls += 1;
     if (e.resultHandleOffered) resultHandleOffers += 1;
     if (e.tool === "get_result" && e.resultHandleSource && e.ok !== false) resultHandleReads += 1;
     if (e.optimizationMode) {
@@ -428,6 +453,14 @@ export function summarizeUsage(events: AuditedEvent[], top = 10): UsageSummary {
     resultHandleReadRate: resultHandleOffers
       ? Math.round((Math.min(resultHandleReads, resultHandleOffers) / resultHandleOffers) * 100)
       : 0,
+    chain: {
+      runChainCalls,
+      callToolCalls,
+      adoptionRate:
+        runChainCalls + callToolCalls ? Math.round((runChainCalls / (runChainCalls + callToolCalls)) * 100) : 0,
+      successRate: runChainCalls ? Math.round((runChainOk / runChainCalls) * 100) : 0,
+      nestedCallsPerChain: runChainCalls ? Math.round((nestedCalls / runChainCalls) * 10) / 10 : 0,
+    },
     from,
     to,
     byServer: ranked(byServer, top),

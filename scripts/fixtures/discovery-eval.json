@@ -1,0 +1,1381 @@
+{
+  "description": "Labeled tool-discovery evaluation set: a 40-server catalog shaped like a real install, and queries whose correct server is known. Categories: brand (names the product), capability (describes the job without naming it), tool (names an upstream tool), alias (uses a synonym or abbreviation), compound (several intents, expected server is the primary one).",
+  "servers": {
+    "github": {
+      "description": "GitHub repositories, pull requests and code search",
+      "keywords": [
+        "github",
+        "repo",
+        "pr",
+        "pull request"
+      ],
+      "tools": [
+        [
+          "create_pull_request",
+          "Open a pull request from a branch"
+        ],
+        [
+          "search_code",
+          "Search code across repositories"
+        ],
+        [
+          "list_commits",
+          "List commits on a branch"
+        ],
+        [
+          "create_branch",
+          "Create a new branch in a repository"
+        ]
+      ]
+    },
+    "gitlab": {
+      "description": "GitLab projects, merge requests and CI pipelines",
+      "keywords": [
+        "gitlab",
+        "merge request",
+        "mr"
+      ],
+      "tools": [
+        [
+          "create_merge_request",
+          "Open a merge request"
+        ],
+        [
+          "list_pipelines",
+          "List CI pipelines for a project"
+        ],
+        [
+          "get_job_log",
+          "Fetch the log of a CI job"
+        ]
+      ]
+    },
+    "jira": {
+      "description": "Jira issue tracker for tickets, bugs and sprints",
+      "keywords": [
+        "jira",
+        "ticket",
+        "issue",
+        "bug",
+        "sprint"
+      ],
+      "tools": [
+        [
+          "createJiraIssue",
+          "Create a Jira issue from fields"
+        ],
+        [
+          "search_issues",
+          "Search issues with JQL"
+        ],
+        [
+          "transition_issue",
+          "Move an issue to another workflow status"
+        ],
+        [
+          "add_comment",
+          "Comment on an issue"
+        ]
+      ]
+    },
+    "linear": {
+      "description": "Linear product planning: issues, cycles and projects",
+      "keywords": [
+        "linear",
+        "cycle",
+        "roadmap"
+      ],
+      "tools": [
+        [
+          "create_linear_issue",
+          "Create an issue in a team"
+        ],
+        [
+          "list_cycles",
+          "List planning cycles"
+        ],
+        [
+          "update_project",
+          "Update a project's status"
+        ]
+      ]
+    },
+    "asana": {
+      "description": "Asana tasks, projects and team workloads",
+      "keywords": [
+        "asana",
+        "task",
+        "workload"
+      ],
+      "tools": [
+        [
+          "create_task",
+          "Create a task in a project"
+        ],
+        [
+          "list_my_tasks",
+          "List tasks assigned to me"
+        ],
+        [
+          "complete_task",
+          "Mark a task complete"
+        ]
+      ]
+    },
+    "trello": {
+      "description": "Trello boards, lists and cards",
+      "keywords": [
+        "trello",
+        "board",
+        "card",
+        "kanban"
+      ],
+      "tools": [
+        [
+          "create_card",
+          "Add a card to a list"
+        ],
+        [
+          "move_card",
+          "Move a card to another list"
+        ],
+        [
+          "list_boards",
+          "List boards for the user"
+        ]
+      ]
+    },
+    "notion": {
+      "description": "Notion workspace pages and databases",
+      "keywords": [
+        "notion",
+        "page",
+        "workspace"
+      ],
+      "tools": [
+        [
+          "create_page",
+          "Create a page under a parent"
+        ],
+        [
+          "query_database",
+          "Query a Notion database with filters"
+        ],
+        [
+          "append_block",
+          "Append blocks to a page"
+        ]
+      ]
+    },
+    "confluence": {
+      "description": "Confluence wiki docs and documentation pages",
+      "keywords": [
+        "confluence",
+        "docs",
+        "wiki",
+        "documentation"
+      ],
+      "tools": [
+        [
+          "get_page",
+          "Fetch a wiki page body"
+        ],
+        [
+          "update_page",
+          "Update a documentation page"
+        ],
+        [
+          "search_content",
+          "Search spaces for content"
+        ]
+      ]
+    },
+    "slack": {
+      "description": "Slack messaging channels and threads",
+      "keywords": [
+        "slack",
+        "message",
+        "channel",
+        "thread"
+      ],
+      "tools": [
+        [
+          "post_message",
+          "Post a message to a channel"
+        ],
+        [
+          "list_channels",
+          "List channels in the workspace"
+        ],
+        [
+          "search_messages",
+          "Search message history"
+        ],
+        [
+          "reply_in_thread",
+          "Reply to a thread"
+        ]
+      ]
+    },
+    "discord": {
+      "description": "Discord servers, voice channels and community moderation",
+      "keywords": [
+        "discord",
+        "guild",
+        "moderation"
+      ],
+      "tools": [
+        [
+          "send_discord_message",
+          "Send a message to a Discord channel"
+        ],
+        [
+          "ban_member",
+          "Ban a member from a guild"
+        ],
+        [
+          "list_guild_roles",
+          "List roles in a guild"
+        ]
+      ]
+    },
+    "teams": {
+      "description": "Microsoft Teams chats, meetings and channels",
+      "keywords": [
+        "teams",
+        "microsoft teams",
+        "meeting"
+      ],
+      "tools": [
+        [
+          "send_chat",
+          "Send a chat message"
+        ],
+        [
+          "schedule_meeting",
+          "Schedule an online meeting"
+        ],
+        [
+          "list_team_channels",
+          "List channels of a team"
+        ]
+      ]
+    },
+    "gmail": {
+      "description": "Gmail email inbox, drafts and labels",
+      "keywords": [
+        "gmail",
+        "email",
+        "inbox",
+        "mail"
+      ],
+      "tools": [
+        [
+          "send_email",
+          "Send an email"
+        ],
+        [
+          "search_inbox",
+          "Search the inbox with Gmail operators"
+        ],
+        [
+          "create_draft",
+          "Create a draft email"
+        ],
+        [
+          "apply_label",
+          "Apply a label to a thread"
+        ]
+      ]
+    },
+    "calendar": {
+      "description": "Google Calendar events and availability",
+      "keywords": [
+        "calendar",
+        "event",
+        "schedule",
+        "availability"
+      ],
+      "tools": [
+        [
+          "create_event",
+          "Create a calendar event with attendees"
+        ],
+        [
+          "list_events",
+          "List upcoming events"
+        ],
+        [
+          "find_free_time",
+          "Find free slots for attendees"
+        ]
+      ]
+    },
+    "gdrive": {
+      "description": "Google Drive files, folders and sharing",
+      "keywords": [
+        "drive",
+        "gdrive",
+        "google docs",
+        "sharing"
+      ],
+      "tools": [
+        [
+          "search_files",
+          "Search Drive files by name or content"
+        ],
+        [
+          "share_file",
+          "Share a file with a user"
+        ],
+        [
+          "upload_file",
+          "Upload a file to a folder"
+        ]
+      ]
+    },
+    "s3": {
+      "description": "AWS S3 buckets and object storage",
+      "keywords": [
+        "s3",
+        "bucket",
+        "object storage"
+      ],
+      "tools": [
+        [
+          "list_objects",
+          "List objects in a bucket"
+        ],
+        [
+          "get_object",
+          "Download an object"
+        ],
+        [
+          "put_object",
+          "Upload an object to a bucket"
+        ],
+        [
+          "presign_url",
+          "Create a presigned URL"
+        ]
+      ]
+    },
+    "ec2": {
+      "description": "AWS EC2 virtual machines, instances and security groups",
+      "keywords": [
+        "ec2",
+        "instance",
+        "virtual machine",
+        "vm",
+        "aws"
+      ],
+      "tools": [
+        [
+          "describe_instances",
+          "List EC2 instances and their state"
+        ],
+        [
+          "start_instance",
+          "Start a stopped instance"
+        ],
+        [
+          "stop_instance",
+          "Stop a running instance"
+        ],
+        [
+          "list_security_groups",
+          "List security groups"
+        ]
+      ]
+    },
+    "lambda": {
+      "description": "AWS Lambda serverless functions",
+      "keywords": [
+        "lambda",
+        "serverless",
+        "function"
+      ],
+      "tools": [
+        [
+          "invoke_function",
+          "Invoke a Lambda function with a payload"
+        ],
+        [
+          "list_functions",
+          "List Lambda functions"
+        ],
+        [
+          "get_function_logs",
+          "Read recent function logs"
+        ]
+      ]
+    },
+    "gcp": {
+      "description": "Google Cloud Platform projects, compute and billing",
+      "keywords": [
+        "gcp",
+        "google cloud",
+        "gke"
+      ],
+      "tools": [
+        [
+          "list_projects",
+          "List GCP projects"
+        ],
+        [
+          "get_billing_report",
+          "Summarize billing by service"
+        ],
+        [
+          "list_compute_instances",
+          "List Compute Engine instances"
+        ]
+      ]
+    },
+    "azure": {
+      "description": "Microsoft Azure resource groups and virtual machines",
+      "keywords": [
+        "azure",
+        "resource group",
+        "arm"
+      ],
+      "tools": [
+        [
+          "list_resource_groups",
+          "List resource groups"
+        ],
+        [
+          "restart_vm",
+          "Restart an Azure VM"
+        ],
+        [
+          "get_cost_analysis",
+          "Get cost analysis for a subscription"
+        ]
+      ]
+    },
+    "kubernetes": {
+      "description": "Kubernetes clusters, pods, deployments and namespaces",
+      "keywords": [
+        "kubernetes",
+        "k8s",
+        "pod",
+        "cluster",
+        "kubectl"
+      ],
+      "tools": [
+        [
+          "get_pods",
+          "List pods in a namespace"
+        ],
+        [
+          "rollout_restart",
+          "Restart a deployment"
+        ],
+        [
+          "get_pod_logs",
+          "Stream logs from a pod"
+        ],
+        [
+          "scale_deployment",
+          "Set the replica count of a deployment"
+        ]
+      ]
+    },
+    "docker": {
+      "description": "Docker containers, images and compose stacks",
+      "keywords": [
+        "docker",
+        "container",
+        "image",
+        "compose"
+      ],
+      "tools": [
+        [
+          "list_containers",
+          "List running containers"
+        ],
+        [
+          "build_image",
+          "Build an image from a Dockerfile"
+        ],
+        [
+          "container_logs",
+          "Read container logs"
+        ],
+        [
+          "prune_images",
+          "Remove unused images"
+        ]
+      ]
+    },
+    "terraform": {
+      "description": "Terraform infrastructure as code plans and state",
+      "keywords": [
+        "terraform",
+        "infrastructure",
+        "iac",
+        "tf"
+      ],
+      "tools": [
+        [
+          "plan",
+          "Run terraform plan for a workspace"
+        ],
+        [
+          "apply",
+          "Apply a saved plan"
+        ],
+        [
+          "state_list",
+          "List resources in state"
+        ]
+      ]
+    },
+    "postgres": {
+      "description": "PostgreSQL SQL database queries and schemas",
+      "keywords": [
+        "postgres",
+        "sql",
+        "database",
+        "db"
+      ],
+      "tools": [
+        [
+          "run_query",
+          "Run a read-only SQL query"
+        ],
+        [
+          "describe_table",
+          "Show columns and indexes of a table"
+        ],
+        [
+          "list_schemas",
+          "List database schemas"
+        ]
+      ]
+    },
+    "mysql": {
+      "description": "MySQL relational database administration",
+      "keywords": [
+        "mysql",
+        "mariadb",
+        "relational"
+      ],
+      "tools": [
+        [
+          "mysql_query",
+          "Execute a query on MySQL"
+        ],
+        [
+          "show_processlist",
+          "Show running MySQL threads"
+        ],
+        [
+          "list_databases",
+          "List databases on the server"
+        ]
+      ]
+    },
+    "mongodb": {
+      "description": "MongoDB document collections and aggregation pipelines",
+      "keywords": [
+        "mongodb",
+        "mongo",
+        "nosql",
+        "collection"
+      ],
+      "tools": [
+        [
+          "find_documents",
+          "Find documents in a collection"
+        ],
+        [
+          "aggregate",
+          "Run an aggregation pipeline"
+        ],
+        [
+          "list_collections",
+          "List collections in a database"
+        ]
+      ]
+    },
+    "redis": {
+      "description": "Redis key-value cache and queues",
+      "keywords": [
+        "redis",
+        "cache",
+        "key value"
+      ],
+      "tools": [
+        [
+          "get_key",
+          "Read a key"
+        ],
+        [
+          "set_key",
+          "Set a key with optional TTL"
+        ],
+        [
+          "scan_keys",
+          "Scan keys matching a pattern"
+        ],
+        [
+          "flush_cache",
+          "Flush a database"
+        ]
+      ]
+    },
+    "elasticsearch": {
+      "description": "Elasticsearch full-text search indices",
+      "keywords": [
+        "elasticsearch",
+        "elastic",
+        "index",
+        "full-text"
+      ],
+      "tools": [
+        [
+          "search_index",
+          "Search an index with a query DSL"
+        ],
+        [
+          "list_indices",
+          "List indices and sizes"
+        ],
+        [
+          "reindex",
+          "Reindex documents into a new index"
+        ]
+      ]
+    },
+    "datadog": {
+      "description": "Datadog metrics, monitors, logs and APM traces",
+      "keywords": [
+        "datadog",
+        "monitor",
+        "logs",
+        "metrics",
+        "apm"
+      ],
+      "tools": [
+        [
+          "query_metrics",
+          "Query timeseries metrics"
+        ],
+        [
+          "search_logs",
+          "Search logs with a query"
+        ],
+        [
+          "list_monitors",
+          "List monitors and their state"
+        ],
+        [
+          "get_trace",
+          "Fetch an APM trace"
+        ]
+      ]
+    },
+    "sentry": {
+      "description": "Sentry error tracking, exceptions and releases",
+      "keywords": [
+        "sentry",
+        "exception",
+        "crash",
+        "stack trace"
+      ],
+      "tools": [
+        [
+          "list_unresolved_issues",
+          "List unresolved error groups"
+        ],
+        [
+          "get_event",
+          "Get an event with its stack trace"
+        ],
+        [
+          "resolve_issue",
+          "Resolve an error group"
+        ]
+      ]
+    },
+    "pagerduty": {
+      "description": "PagerDuty incidents, on-call schedules and escalations",
+      "keywords": [
+        "pagerduty",
+        "incident",
+        "on-call",
+        "oncall",
+        "escalation"
+      ],
+      "tools": [
+        [
+          "list_incidents",
+          "List open incidents"
+        ],
+        [
+          "acknowledge_incident",
+          "Acknowledge an incident"
+        ],
+        [
+          "get_oncall",
+          "Who is on call right now"
+        ]
+      ]
+    },
+    "grafana": {
+      "description": "Grafana dashboards and alert rules",
+      "keywords": [
+        "grafana",
+        "dashboard",
+        "panel"
+      ],
+      "tools": [
+        [
+          "search_dashboards",
+          "Search dashboards by title"
+        ],
+        [
+          "get_dashboard",
+          "Fetch a dashboard definition"
+        ],
+        [
+          "list_alert_rules",
+          "List alert rules"
+        ]
+      ]
+    },
+    "stripe": {
+      "description": "Stripe payments, customers, invoices and refunds",
+      "keywords": [
+        "stripe",
+        "payment",
+        "invoice",
+        "refund",
+        "subscription"
+      ],
+      "tools": [
+        [
+          "create_refund",
+          "Refund a charge"
+        ],
+        [
+          "list_invoices",
+          "List invoices for a customer"
+        ],
+        [
+          "get_customer",
+          "Fetch a customer"
+        ],
+        [
+          "cancel_subscription",
+          "Cancel a subscription"
+        ]
+      ]
+    },
+    "salesforce": {
+      "description": "Salesforce CRM leads, accounts and opportunities",
+      "keywords": [
+        "salesforce",
+        "crm",
+        "lead",
+        "opportunity",
+        "account"
+      ],
+      "tools": [
+        [
+          "query_soql",
+          "Run a SOQL query"
+        ],
+        [
+          "create_lead",
+          "Create a lead"
+        ],
+        [
+          "update_opportunity",
+          "Update the stage of an opportunity"
+        ]
+      ]
+    },
+    "zendesk": {
+      "description": "Zendesk customer support tickets and help center",
+      "keywords": [
+        "zendesk",
+        "support",
+        "help center",
+        "customer"
+      ],
+      "tools": [
+        [
+          "list_support_tickets",
+          "List support tickets by status"
+        ],
+        [
+          "reply_to_ticket",
+          "Reply to a customer on a ticket"
+        ],
+        [
+          "search_articles",
+          "Search help center articles"
+        ]
+      ]
+    },
+    "twilio": {
+      "description": "Twilio SMS, voice calls and phone numbers",
+      "keywords": [
+        "twilio",
+        "sms",
+        "text message",
+        "phone",
+        "voice"
+      ],
+      "tools": [
+        [
+          "send_sms",
+          "Send an SMS"
+        ],
+        [
+          "list_calls",
+          "List recent voice calls"
+        ],
+        [
+          "buy_number",
+          "Buy a phone number"
+        ]
+      ]
+    },
+    "figma": {
+      "description": "Figma design files, components and comments",
+      "keywords": [
+        "figma",
+        "design",
+        "mockup",
+        "component"
+      ],
+      "tools": [
+        [
+          "get_file",
+          "Fetch a Figma file"
+        ],
+        [
+          "export_frame",
+          "Export a frame as an image"
+        ],
+        [
+          "list_comments",
+          "List comments on a file"
+        ]
+      ]
+    },
+    "vercel": {
+      "description": "Vercel frontend deployments, domains and previews",
+      "keywords": [
+        "vercel",
+        "deployment",
+        "preview",
+        "domain",
+        "frontend"
+      ],
+      "tools": [
+        [
+          "list_deployments",
+          "List deployments of a project"
+        ],
+        [
+          "promote_deployment",
+          "Promote a preview to production"
+        ],
+        [
+          "add_domain",
+          "Add a domain to a project"
+        ]
+      ]
+    },
+    "npm": {
+      "description": "npm package registry search and package metadata",
+      "keywords": [
+        "npm",
+        "package",
+        "registry",
+        "dependency"
+      ],
+      "tools": [
+        [
+          "search_packages",
+          "Search the npm registry"
+        ],
+        [
+          "get_package_info",
+          "Get versions and dependencies of a package"
+        ],
+        [
+          "check_vulnerabilities",
+          "Audit a package for known vulnerabilities"
+        ]
+      ]
+    }
+  },
+  "queries": [
+    {
+      "query": "list github repos",
+      "expect": "github",
+      "category": "brand"
+    },
+    {
+      "query": "open a pull request for my branch",
+      "expect": "github",
+      "category": "brand"
+    },
+    {
+      "query": "file a ticket in jira",
+      "expect": "jira",
+      "category": "brand"
+    },
+    {
+      "query": "post a slack message to #dev",
+      "expect": "slack",
+      "category": "brand"
+    },
+    {
+      "query": "check pagerduty for open incidents",
+      "expect": "pagerduty",
+      "category": "brand"
+    },
+    {
+      "query": "refund a customer in stripe",
+      "expect": "stripe",
+      "category": "brand"
+    },
+    {
+      "query": "query the postgres orders table",
+      "expect": "postgres",
+      "category": "brand"
+    },
+    {
+      "query": "scale the deployment in kubernetes",
+      "expect": "kubernetes",
+      "category": "brand"
+    },
+    {
+      "query": "find dashboards in grafana",
+      "expect": "grafana",
+      "category": "brand"
+    },
+    {
+      "query": "search sentry for new crashes",
+      "expect": "sentry",
+      "category": "brand"
+    },
+    {
+      "query": "search datadog logs for 500 errors",
+      "expect": "datadog",
+      "category": "brand"
+    },
+    {
+      "query": "merge request pipeline failing in gitlab",
+      "expect": "gitlab",
+      "category": "brand"
+    },
+    {
+      "query": "create a notion page for the meeting notes",
+      "expect": "notion",
+      "category": "brand"
+    },
+    {
+      "query": "upload the report to s3",
+      "expect": "s3",
+      "category": "brand"
+    },
+    {
+      "query": "deploy a preview on vercel",
+      "expect": "vercel",
+      "category": "brand"
+    },
+    {
+      "query": "send an sms through twilio",
+      "expect": "twilio",
+      "category": "brand"
+    },
+    {
+      "query": "who is on call tonight",
+      "expect": "pagerduty",
+      "category": "capability"
+    },
+    {
+      "query": "show me what is crashing in production with the stack trace",
+      "expect": "sentry",
+      "category": "capability"
+    },
+    {
+      "query": "how much did we spend on cloud last month",
+      "expect": "gcp",
+      "category": "capability"
+    },
+    {
+      "query": "restart the pods that keep failing",
+      "expect": "kubernetes",
+      "category": "capability"
+    },
+    {
+      "query": "run a sql query against the customers table",
+      "expect": "postgres",
+      "category": "capability"
+    },
+    {
+      "query": "find free time for everyone on friday",
+      "expect": "calendar",
+      "category": "capability"
+    },
+    {
+      "query": "reply to the customer who emailed support",
+      "expect": "zendesk",
+      "category": "capability"
+    },
+    {
+      "query": "see which containers are running on this machine",
+      "expect": "docker",
+      "category": "capability"
+    },
+    {
+      "query": "preview what infrastructure changes will be applied",
+      "expect": "terraform",
+      "category": "capability"
+    },
+    {
+      "query": "look up which version of a library has a known vulnerability",
+      "expect": "npm",
+      "category": "capability"
+    },
+    {
+      "query": "export a frame from the design as a png",
+      "expect": "figma",
+      "category": "capability"
+    },
+    {
+      "query": "invoke a serverless function with a test payload",
+      "expect": "lambda",
+      "category": "capability"
+    },
+    {
+      "query": "move the card to done on the kanban board",
+      "expect": "trello",
+      "category": "capability"
+    },
+    {
+      "query": "draft an email to the team about the outage",
+      "expect": "gmail",
+      "category": "capability"
+    },
+    {
+      "query": "which leads are in the pipeline this quarter",
+      "expect": "salesforce",
+      "category": "capability"
+    },
+    {
+      "query": "aggregate documents grouped by status",
+      "expect": "mongodb",
+      "category": "capability"
+    },
+    {
+      "query": "search the full-text index for matching documents",
+      "expect": "elasticsearch",
+      "category": "capability"
+    },
+    {
+      "query": "clear the cache entries for this user",
+      "expect": "redis",
+      "category": "capability"
+    },
+    {
+      "query": "share the spreadsheet with the finance team",
+      "expect": "gdrive",
+      "category": "capability"
+    },
+    {
+      "query": "ban a spammer from the community server",
+      "expect": "discord",
+      "category": "capability"
+    },
+    {
+      "query": "createJiraIssue",
+      "expect": "jira",
+      "category": "tool"
+    },
+    {
+      "query": "create_pull_request",
+      "expect": "github",
+      "category": "tool"
+    },
+    {
+      "query": "rollout_restart",
+      "expect": "kubernetes",
+      "category": "tool"
+    },
+    {
+      "query": "describe_instances",
+      "expect": "ec2",
+      "category": "tool"
+    },
+    {
+      "query": "acknowledge_incident",
+      "expect": "pagerduty",
+      "category": "tool"
+    },
+    {
+      "query": "query_soql",
+      "expect": "salesforce",
+      "category": "tool"
+    },
+    {
+      "query": "presign_url",
+      "expect": "s3",
+      "category": "tool"
+    },
+    {
+      "query": "find_free_time",
+      "expect": "calendar",
+      "category": "tool"
+    },
+    {
+      "query": "list_unresolved_issues",
+      "expect": "sentry",
+      "category": "tool"
+    },
+    {
+      "query": "get_pod_logs for the api",
+      "expect": "kubernetes",
+      "category": "tool"
+    },
+    {
+      "query": "show_processlist",
+      "expect": "mysql",
+      "category": "tool"
+    },
+    {
+      "query": "cancel_subscription",
+      "expect": "stripe",
+      "category": "tool"
+    },
+    {
+      "query": "promote_deployment to production",
+      "expect": "vercel",
+      "category": "tool"
+    },
+    {
+      "query": "apply_label to a thread",
+      "expect": "gmail",
+      "category": "tool"
+    },
+    {
+      "query": "open a PR",
+      "expect": "github",
+      "category": "alias"
+    },
+    {
+      "query": "show the k8s cluster status",
+      "expect": "kubernetes",
+      "category": "alias"
+    },
+    {
+      "query": "check the db schema",
+      "expect": "postgres",
+      "category": "alias"
+    },
+    {
+      "query": "any bugs assigned to me",
+      "expect": "jira",
+      "category": "alias"
+    },
+    {
+      "query": "provision a VM in the cloud",
+      "expect": "ec2",
+      "category": "alias"
+    },
+    {
+      "query": "mail the weekly summary",
+      "expect": "gmail",
+      "category": "alias"
+    },
+    {
+      "query": "read the wiki page about onboarding",
+      "expect": "confluence",
+      "category": "alias"
+    },
+    {
+      "query": "tail the service logs",
+      "expect": "datadog",
+      "category": "alias"
+    },
+    {
+      "query": "text the on-call engineer",
+      "expect": "twilio",
+      "category": "alias"
+    },
+    {
+      "query": "look at the iac state",
+      "expect": "terraform",
+      "category": "alias"
+    },
+    {
+      "query": "message the team channel",
+      "expect": "slack",
+      "category": "alias"
+    },
+    {
+      "query": "tickets from support customers",
+      "expect": "zendesk",
+      "category": "alias"
+    },
+    {
+      "query": "mongo collection stats",
+      "expect": "mongodb",
+      "category": "alias"
+    },
+    {
+      "query": "gke cluster billing",
+      "expect": "gcp",
+      "category": "alias"
+    },
+    {
+      "query": "the payment failed, find the customer's invoices and refund it",
+      "expect": "stripe",
+      "category": "compound"
+    },
+    {
+      "query": "find the failing job log and open a merge request with the fix",
+      "expect": "gitlab",
+      "category": "compound"
+    },
+    {
+      "query": "get the trace for the slow request then page the on-call",
+      "expect": "datadog",
+      "category": "compound"
+    },
+    {
+      "query": "scale up the deployment and check the pods",
+      "expect": "kubernetes",
+      "category": "compound"
+    },
+    {
+      "query": "create an issue for the crash and link the sentry event",
+      "expect": "sentry",
+      "category": "compound"
+    },
+    {
+      "query": "update the docs page and notify the channel",
+      "expect": "confluence",
+      "category": "compound"
+    },
+    {
+      "query": "query the database and upload the csv to the bucket",
+      "expect": "postgres",
+      "category": "compound"
+    },
+    {
+      "query": "schedule a meeting and send an invite email",
+      "expect": "calendar",
+      "category": "compound"
+    },
+    {
+      "query": "which service is paging the team right now",
+      "expect": "pagerduty",
+      "category": "capability"
+    },
+    {
+      "query": "create a new branch and push my changes",
+      "expect": "github",
+      "category": "capability"
+    },
+    {
+      "query": "what changed in the last release of the dependency",
+      "expect": "npm",
+      "category": "capability"
+    },
+    {
+      "query": "show the cpu graph for the api",
+      "expect": "grafana",
+      "category": "capability"
+    },
+    {
+      "query": "list who has access to this folder",
+      "expect": "gdrive",
+      "category": "capability"
+    },
+    {
+      "query": "find tickets about login failures",
+      "expect": "jira",
+      "category": "capability"
+    },
+    {
+      "query": "check why the build is red",
+      "expect": "gitlab",
+      "category": "capability"
+    },
+    {
+      "query": "add a comment to the card",
+      "expect": "trello",
+      "category": "capability"
+    },
+    {
+      "query": "send a notification to the on-call channel",
+      "expect": "slack",
+      "category": "capability"
+    },
+    {
+      "query": "what is the current state of the vm",
+      "expect": "ec2",
+      "category": "capability"
+    },
+    {
+      "query": "restart the azure virtual machine",
+      "expect": "azure",
+      "category": "capability"
+    },
+    {
+      "query": "list the invoices for a customer",
+      "expect": "stripe",
+      "category": "capability"
+    },
+    {
+      "query": "get the table definition",
+      "expect": "postgres",
+      "category": "capability"
+    },
+    {
+      "query": "export the design frame",
+      "expect": "figma",
+      "category": "capability"
+    },
+    {
+      "query": "create a task for the new hire",
+      "expect": "asana",
+      "category": "capability"
+    },
+    {
+      "query": "read the page about our release process",
+      "expect": "confluence",
+      "category": "capability"
+    },
+    {
+      "query": "look up the lead and update the opportunity stage",
+      "expect": "salesforce",
+      "category": "capability"
+    },
+    {
+      "query": "pull the recent errors and their stack traces",
+      "expect": "sentry",
+      "category": "capability"
+    },
+    {
+      "query": "trace id lookup for the slow endpoint",
+      "expect": "datadog",
+      "category": "capability"
+    },
+    {
+      "query": "remove old images to free disk space",
+      "expect": "docker",
+      "category": "capability"
+    }
+  ]
+}

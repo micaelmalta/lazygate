@@ -50,14 +50,32 @@ const ALIASES: Record<string, readonly string[]> = {
   documentation: ["doc", "docs"],
   log: ["logs"],
   logs: ["log"],
+  k8s: ["kubernetes"],
+  kubernetes: ["k8s"],
+  vm: ["instance", "virtual"],
+  instance: ["vm"],
+  mail: ["email", "inbox"],
+  email: ["mail"],
+  wiki: ["doc", "documentation"],
+  iac: ["terraform", "infrastructure"],
+  infrastructure: ["iac"],
+  sms: ["text"],
+  mongo: ["mongodb"],
+  mongodb: ["mongo"],
+  oncall: ["on-call"],
 };
 
-function stem(word: string): string {
+export function stem(word: string): string {
   if (word.length > 4 && word.endsWith("ies")) return word.slice(0, -3) + "y";
   if (word.length > 3 && word.endsWith("s") && !word.endsWith("ss")) {
     return word.slice(0, -1);
   }
   return word;
+}
+
+/** Lowercase and stem one word. */
+export function normalizeWord(word: string): string {
+  return stem(word.toLowerCase());
 }
 
 /** Insert spaces at camelCase / snake_case / kebab-case boundaries before tokenizing. */
@@ -78,7 +96,7 @@ function tokenizeRaw(text: string): string[] {
   return (text.toLowerCase().match(TOKEN_RE) ?? []).map(stem);
 }
 
-function aliasesOf(token: string): string[] {
+export function aliasesOf(token: string): string[] {
   return [...(ALIASES[token] ?? [])];
 }
 

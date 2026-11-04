@@ -3,6 +3,7 @@ import { parse, serialize } from "parse5";
 import TurndownService from "turndown";
 import { gfm } from "turndown-plugin-gfm";
 import { z } from "zod";
+import { longestFittingPrefix, MAX_PLAUSIBLE_CHARS_PER_TOKEN } from "./prefix-fit.js";
 
 export const OPTIMIZATION_MODES = [
   "off",
@@ -304,11 +305,18 @@ interface TokenEstimator {
   label(): string;
 }
 
+/** Payloads at least this long are memoized per optimization run (counting them is the slow part). */
+const ESTIMATE_MEMO_MIN_CHARS = 4096;
+const ESTIMATE_MEMO_ENTRIES = 8;
+
 const TOKENIZER_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
 function createTokenEstimator(tokenizer?: Tokenizer): TokenEstimator {
   const name = tokenizer && TOKENIZER_NAME_PATTERN.test(tokenizer.name) ? tokenizer.name : "custom";
   let fallbackUsed = false;
+  // One optimization run counts the same large payload several times (original, budget check,
+  // metrics). Built-in tokenizers memoize by hash; this covers injected ones, for this run only.
+  const memo = new Map<string, number>();
   return {
     hasCustom: Boolean(tokenizer),
     estimate(value: unknown): number {
@@ -319,9 +327,17 @@ function createTokenEstimator(tokenizer?: Tokenizer): TokenEstimator {
         return 0;
       }
       if (!tokenizer) return Math.ceil(encoded.length / 4);
+      const memoized = encoded.length >= ESTIMATE_MEMO_MIN_CHARS ? memo.get(encoded) : undefined;
+      if (memoized !== undefined) return memoized;
       try {
         const count = tokenizer.countTokens(encoded);
-        if (Number.isSafeInteger(count) && count >= 0) return count;
+        if (Number.isSafeInteger(count) && count >= 0) {
+          if (encoded.length >= ESTIMATE_MEMO_MIN_CHARS) {
+            if (memo.size >= ESTIMATE_MEMO_ENTRIES) memo.delete(memo.keys().next().value!);
+            memo.set(encoded, count);
+          }
+          return count;
+        }
       } catch {
         // A tokenizer is advisory. Keep budgeting available if an injected counter fails.
       }
@@ -754,20 +770,17 @@ export function largestFit(n: number, fits: (k: number) => boolean, guess?: numb
   return low;
 }
 
-/** Predicted prefix length: measured tokens per unit of the whole, applied to the budget. */
-function guessFit(total: number, wholeTokens: number, maxTokens: number): number | undefined {
-  if (!(wholeTokens > 0) || !(total > 0)) return undefined;
-  return Math.floor((total * maxTokens) / wholeTokens);
-}
-
 function truncateStringByEstimator(
   value: string,
   maxTokens: number,
   estimate: ValueTokenEstimator,
   render: (prefix: string) => string
 ): { value: string; complete: boolean } {
-  const wholeTokens = estimate(value);
-  if (wholeTokens <= maxTokens) return { value, complete: true };
+  // Counting a response many times over its budget is the slowest step, and its answer is known:
+  // skip it unless the value is short enough to plausibly fit.
+  const mayFit = value.length <= maxTokens * MAX_PLAUSIBLE_CHARS_PER_TOKEN;
+  const wholeTokens = mayFit ? estimate(value) : undefined;
+  if (wholeTokens !== undefined && wholeTokens <= maxTokens) return { value, complete: true };
 
   const minimum = render("");
   if (estimate(minimum) > maxTokens) {
@@ -777,39 +790,15 @@ function truncateStringByEstimator(
     };
   }
 
-  const best = largestFit(
+  // Every probe renders the candidate with its marker, so the result is verified as returned.
+  const best = longestFittingPrefix(
     value.length,
-    (k) => estimate(render(value.slice(0, k))) <= maxTokens,
-    guessFit(value.length, wholeTokens, maxTokens)
+    maxTokens,
+    (length) => estimate(render(value.slice(0, length))),
+    wholeTokens ? value.length / wholeTokens : undefined
   );
+  if (best >= value.length && !mayFit && estimate(value) <= maxTokens) return { value, complete: true };
   return { value: render(value.slice(0, best)), complete: false };
-}
-
-/** Longest prefix of `items` (as an array, or object entries) whose estimate fits. */
-function truncateCollection(
-  size: number,
-  build: (count: number) => unknown,
-  itemLengths: () => number[],
-  wholeTokens: number,
-  maxTokens: number,
-  estimate: ValueTokenEstimator
-): unknown {
-  let guess: number | undefined;
-  try {
-    const lengths = itemLengths();
-    const total = lengths.reduce((sum, length) => sum + length + 1, 2);
-    const budgetChars = (total * maxTokens) / wholeTokens;
-    let used = 2;
-    let count = 0;
-    while (count < lengths.length && used + lengths[count]! + 1 <= budgetChars) {
-      used += lengths[count]! + 1;
-      count += 1;
-    }
-    guess = count;
-  } catch {
-    guess = undefined;
-  }
-  return build(largestFit(size, (k) => estimate(build(k)) <= maxTokens, guess));
 }
 
 function truncateText(
@@ -849,35 +838,64 @@ function truncateStructured(
   estimate?: ValueTokenEstimator
 ): { value: unknown; complete: boolean } {
   if (estimate) {
-    const wholeTokens = estimate(value);
-    if (wholeTokens <= maxTokens) return { value, complete: true };
-    if (Array.isArray(value)) {
-      const kept = truncateCollection(
-        value.length,
-        (count) => value.slice(0, count),
-        () => value.map((item) => (JSON.stringify(item) ?? "null").length),
-        wholeTokens,
+    const isArray = Array.isArray(value);
+    const isObject = !isArray && value !== null && typeof value === "object";
+    if (isArray || isObject) {
+      const entries: Array<[string, unknown]> = isArray
+        ? (value as unknown[]).map((item, index) => [String(index), item])
+        : Object.entries(value as JsonObject);
+      const build = (count: number): unknown => {
+        if (isArray) return (value as unknown[]).slice(0, count);
+        const out: JsonObject = {};
+        for (const [key, item] of entries.slice(0, count)) {
+          Object.defineProperty(out, key, { value: item, enumerable: true, configurable: true, writable: true });
+        }
+        return out;
+      };
+
+      // A structure far longer than its budget is not counted whole (counting it is the slowest
+      // step and the answer is known). `plausible` is how many leading entries could fit.
+      const charLimit = maxTokens * MAX_PLAUSIBLE_CHARS_PER_TOKEN;
+      let chars = 2;
+      let plausible = 0;
+      let plausibleOpen = true;
+      for (const [key, item] of entries) {
+        chars += key.length + serialized(item).length + 4;
+        if (plausibleOpen && chars > charLimit) plausibleOpen = false;
+        if (plausibleOpen) plausible += 1;
+      }
+      const mayFit = plausible === entries.length;
+      const wholeTokens = mayFit ? estimate(value) : undefined;
+      if (wholeTokens !== undefined && wholeTokens <= maxTokens) return { value, complete: true };
+
+      // Longest entry prefix that fits; probing prefixes avoids re-serializing a growing value per entry.
+      const keep = longestFittingPrefix(
+        plausible,
         maxTokens,
-        estimate
+        (count) => estimate(build(count)),
+        // Entries per token: measured when the whole value was counted, otherwise from chars ÷ 4.
+        entries.length / Math.max(1, wholeTokens ?? chars / 4)
       );
-      return { value: kept, complete: false };
-    }
-    if (value && typeof value === "object") {
-      const entries = Object.entries(value as JsonObject);
-      const kept = truncateCollection(
-        entries.length,
-        (count) => {
-          const out: JsonObject = {};
-          for (const [key, item] of entries.slice(0, count)) {
-            Object.defineProperty(out, key, { value: item, enumerable: true, configurable: true, writable: true });
+      const kept = build(keep);
+
+      // The next entry did not fit whole; keep as much of it as the remaining budget allows.
+      if (isObject && keep < entries.length) {
+        const [key, item] = entries[keep]!;
+        if (item !== null && typeof item === "object") {
+          const room = maxTokens - estimate(kept) - estimate({ [key]: [] });
+          if (room > 0) {
+            const partial = truncateStructured(item, room, estimate);
+            const candidate = build(keep) as JsonObject;
+            Object.defineProperty(candidate, key, {
+              value: partial.value,
+              enumerable: true,
+              configurable: true,
+              writable: true,
+            });
+            if (estimate(candidate) <= maxTokens) return { value: candidate, complete: false };
           }
-          return out;
-        },
-        () => entries.map(([key, item]) => JSON.stringify(key).length + 1 + (JSON.stringify(item) ?? "null").length),
-        wholeTokens,
-        maxTokens,
-        estimate
-      );
+        }
+      }
       return { value: kept, complete: false };
     }
     if (typeof value === "string") {

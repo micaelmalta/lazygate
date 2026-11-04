@@ -228,3 +228,33 @@ describe("usage summary", () => {
     });
   });
 });
+
+describe("run_chain adoption", () => {
+  it("separates scripts from direct calls and ignores calls scripts make themselves", () => {
+    const summary = summarizeUsage([
+      ...calls(3, { tool: "run_chain" }),
+      ...calls(1, { tool: "run_chain", ok: false }),
+      ...calls(4, { tool: "call_tool", server: "jira", target: "search" }),
+      // A script's own upstream calls carry via: "run_chain" and the upstream tool name.
+      ...calls(8, { tool: "search", server: "jira", via: "run_chain" }),
+      ...calls(2, { tool: "call_tool", server: "jira", via: "run_chain" }),
+    ]);
+    expect(summary.chain).toEqual({
+      runChainCalls: 4,
+      callToolCalls: 4,
+      adoptionRate: 50,
+      successRate: 75,
+      nestedCallsPerChain: 2.5,
+    });
+  });
+
+  it("reports zeros when neither tool was used", () => {
+    expect(summarizeUsage(calls(2, { tool: "discover_tools" })).chain).toEqual({
+      runChainCalls: 0,
+      callToolCalls: 0,
+      adoptionRate: 0,
+      successRate: 0,
+      nestedCallsPerChain: 0,
+    });
+  });
+});

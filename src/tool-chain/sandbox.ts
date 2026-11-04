@@ -35,7 +35,7 @@ export const DEFAULT_LIMITS: RunLimits = {
   stackBytes: 512 * 1024,
   deadlineMs: 60_000,
   maxCalls: 64,
-  maxConcurrent: 4,
+  maxConcurrent: 8,
   maxLogBytes: 64 * 1024,
   maxValueBytes: 1024 * 1024,
   callTimeoutMs: 5 * 60_000,

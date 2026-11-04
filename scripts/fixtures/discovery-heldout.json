@@ -1,0 +1,391 @@
+{
+  "description": "Held-out discovery set. Written after the tuned set (discovery-eval.json) was frozen and NOT used to tune aliases, weights or thresholds: servers are realistic catalog neighbors (github/gitlab/bitbucket, mysql/postgres/sqlite, s3/gcs/azure-blob, datadog/newrelic/prometheus, ...) and queries are phrased the way a user would, including near-duplicate and adversarial cases. Report its numbers next to the tuned set; never fit the ranker to it.",
+  "servers": {
+    "github": {
+      "description": "GitHub repositories, pull requests, issues and Actions workflows",
+      "keywords": ["github", "repository", "pull request", "actions"],
+      "tools": [
+        ["create_pull_request", "Open a pull request from a branch"],
+        ["list_repositories", "List repositories for a user or organization"],
+        ["search_code", "Search code across repositories"],
+        ["list_workflow_runs", "List GitHub Actions workflow runs and their status"]
+      ]
+    },
+    "gitlab": {
+      "description": "GitLab projects, merge requests, issues and CI pipelines",
+      "keywords": ["gitlab", "merge request", "ci pipeline", "project"],
+      "tools": [
+        ["create_merge_request", "Open a merge request from a branch"],
+        ["list_projects", "List GitLab projects"],
+        ["list_pipelines", "List CI pipelines of a project and their status"],
+        ["get_job_log", "Read the log of a CI job"]
+      ]
+    },
+    "bitbucket": {
+      "description": "Bitbucket Cloud repositories, pull requests and Pipelines",
+      "keywords": ["bitbucket", "repository", "pull request", "pipelines"],
+      "tools": [
+        ["create_pull_request", "Create a pull request in a Bitbucket repository"],
+        ["list_repositories", "List Bitbucket repositories in a workspace"],
+        ["list_pipelines", "List Bitbucket Pipelines runs"],
+        ["get_pipeline_logs", "Fetch the logs of a Pipelines step"]
+      ]
+    },
+    "jira": {
+      "description": "Jira Cloud issue tracking: issues, boards, sprints and projects",
+      "keywords": ["jira", "issue", "sprint", "backlog"],
+      "tools": [
+        ["create_issue", "Create a Jira issue in a project"],
+        ["search_issues_jql", "Search issues with a JQL query"],
+        ["transition_issue", "Move an issue to another workflow status"],
+        ["list_sprints", "List sprints of a board"]
+      ]
+    },
+    "youtrack": {
+      "description": "JetBrains YouTrack issue tracker with agile boards and work items",
+      "keywords": ["youtrack", "issue", "agile board", "work item"],
+      "tools": [
+        ["create_issue", "Create a YouTrack issue"],
+        ["search_issues", "Search YouTrack issues with a query"],
+        ["log_work_item", "Log time spent on an issue"],
+        ["list_agile_boards", "List agile boards"]
+      ]
+    },
+    "shortcut": {
+      "description": "Shortcut (formerly Clubhouse) stories, epics and iterations for product teams",
+      "keywords": ["shortcut", "clubhouse", "story", "epic", "iteration"],
+      "tools": [
+        ["create_story", "Create a story"],
+        ["list_epics", "List epics and their progress"],
+        ["list_iterations", "List iterations"],
+        ["update_story", "Update the state or owner of a story"]
+      ]
+    },
+    "slack": {
+      "description": "Slack workspace messaging: channels, threads, direct messages and reactions",
+      "keywords": ["slack", "channel", "thread", "direct message"],
+      "tools": [
+        ["post_message", "Post a message to a channel"],
+        ["list_channels", "List public channels"],
+        ["search_messages", "Search message history"],
+        ["add_reaction", "Add an emoji reaction to a message"]
+      ]
+    },
+    "mattermost": {
+      "description": "Mattermost self-hosted team chat: channels, posts and teams",
+      "keywords": ["mattermost", "channel", "post", "self-hosted chat"],
+      "tools": [
+        ["create_post", "Create a post in a channel"],
+        ["list_channels", "List channels of a team"],
+        ["search_posts", "Search posts"],
+        ["list_teams", "List teams"]
+      ]
+    },
+    "msteams": {
+      "description": "Microsoft Teams chats, channel messages and online meetings",
+      "keywords": ["teams", "microsoft teams", "meeting", "chat"],
+      "tools": [
+        ["send_channel_message", "Send a message to a Teams channel"],
+        ["schedule_online_meeting", "Schedule an online meeting"],
+        ["list_joined_teams", "List teams the user has joined"]
+      ]
+    },
+    "s3": {
+      "description": "Amazon S3 object storage: buckets, objects and presigned URLs",
+      "keywords": ["s3", "aws", "bucket", "object storage"],
+      "tools": [
+        ["list_objects", "List objects in an S3 bucket"],
+        ["get_object", "Download an object from S3"],
+        ["put_object", "Upload an object to S3"],
+        ["create_presigned_url", "Create a presigned URL for an object"]
+      ]
+    },
+    "gcs": {
+      "description": "Google Cloud Storage buckets and blobs",
+      "keywords": ["gcs", "google cloud storage", "bucket", "blob"],
+      "tools": [
+        ["list_blobs", "List blobs in a Cloud Storage bucket"],
+        ["download_blob", "Download a blob from Cloud Storage"],
+        ["upload_blob", "Upload a blob to Cloud Storage"],
+        ["sign_url", "Generate a signed URL for a blob"]
+      ]
+    },
+    "azure-blob": {
+      "description": "Azure Blob Storage containers and blobs in a storage account",
+      "keywords": ["azure", "blob storage", "container", "storage account"],
+      "tools": [
+        ["list_containers", "List containers in a storage account"],
+        ["list_blobs", "List blobs in an Azure container"],
+        ["upload_blob", "Upload a blob to an Azure container"],
+        ["generate_sas_token", "Generate a shared access signature for a blob"]
+      ]
+    },
+    "postgres": {
+      "description": "PostgreSQL database access: run SQL, inspect tables and indexes",
+      "keywords": ["postgres", "postgresql", "sql", "database"],
+      "tools": [
+        ["run_query", "Run a read-only SQL query"],
+        ["describe_table", "Describe the columns of a table"],
+        ["list_indexes", "List indexes of a table"],
+        ["explain_query", "Show the query plan for a statement"]
+      ]
+    },
+    "mysql": {
+      "description": "MySQL and MariaDB database access: run SQL and inspect the server",
+      "keywords": ["mysql", "mariadb", "sql", "database"],
+      "tools": [
+        ["run_query", "Run a SQL query against MySQL"],
+        ["show_tables", "List tables in a MySQL database"],
+        ["show_processlist", "Show running MySQL connections"],
+        ["describe_table", "Describe a MySQL table"]
+      ]
+    },
+    "sqlite": {
+      "description": "SQLite local file databases: query and inspect .db files",
+      "keywords": ["sqlite", "local database", "db file"],
+      "tools": [
+        ["query", "Run SQL against a SQLite file"],
+        ["list_tables", "List tables in a SQLite file"],
+        ["schema", "Print the schema of a SQLite database"]
+      ]
+    },
+    "snowflake": {
+      "description": "Snowflake data warehouse: run analytical SQL, manage warehouses and stages",
+      "keywords": ["snowflake", "data warehouse", "warehouse", "analytics"],
+      "tools": [
+        ["execute_sql", "Execute SQL in Snowflake"],
+        ["list_warehouses", "List virtual warehouses"],
+        ["suspend_warehouse", "Suspend a virtual warehouse"],
+        ["list_stages", "List stages"]
+      ]
+    },
+    "datadog": {
+      "description": "Datadog monitoring: metrics, monitors, logs and APM traces",
+      "keywords": ["datadog", "monitor", "apm", "metrics"],
+      "tools": [
+        ["query_metrics", "Query timeseries metrics"],
+        ["list_monitors", "List monitors and their state"],
+        ["search_logs", "Search logs"],
+        ["get_trace", "Get an APM trace"]
+      ]
+    },
+    "newrelic": {
+      "description": "New Relic observability: NRQL queries, alerts and entities",
+      "keywords": ["new relic", "newrelic", "nrql", "alerts"],
+      "tools": [
+        ["run_nrql", "Run an NRQL query"],
+        ["list_alert_policies", "List alert policies"],
+        ["get_entity", "Fetch an entity"],
+        ["list_incidents", "List open alert incidents"]
+      ]
+    },
+    "prometheus": {
+      "description": "Prometheus time series: PromQL queries, targets and alerting rules",
+      "keywords": ["prometheus", "promql", "scrape", "alerting rules"],
+      "tools": [
+        ["instant_query", "Run an instant PromQL query"],
+        ["range_query", "Run a PromQL range query"],
+        ["list_targets", "List scrape targets and their health"],
+        ["list_rules", "List alerting and recording rules"]
+      ]
+    },
+    "stripe": {
+      "description": "Stripe payments: charges, customers, invoices, refunds and subscriptions",
+      "keywords": ["stripe", "payment", "refund", "subscription"],
+      "tools": [
+        ["create_refund", "Refund a charge"],
+        ["list_invoices", "List invoices"],
+        ["get_customer", "Fetch a customer"],
+        ["cancel_subscription", "Cancel a subscription"]
+      ]
+    },
+    "paypal": {
+      "description": "PayPal checkout, payouts, disputes and transactions",
+      "keywords": ["paypal", "payout", "dispute", "checkout"],
+      "tools": [
+        ["create_payout", "Send a payout to a recipient"],
+        ["list_transactions", "List transactions"],
+        ["list_disputes", "List open disputes"],
+        ["refund_capture", "Refund a captured payment"]
+      ]
+    },
+    "sendgrid": {
+      "description": "SendGrid transactional email delivery: send mail, templates and delivery stats",
+      "keywords": ["sendgrid", "transactional email", "template", "delivery"],
+      "tools": [
+        ["send_mail", "Send a transactional email"],
+        ["list_templates", "List dynamic email templates"],
+        ["get_email_stats", "Get delivery and bounce statistics"]
+      ]
+    },
+    "mailchimp": {
+      "description": "Mailchimp marketing email: audiences, campaigns and subscribers",
+      "keywords": ["mailchimp", "newsletter", "audience", "campaign"],
+      "tools": [
+        ["create_campaign", "Create an email campaign"],
+        ["add_subscriber", "Add a subscriber to an audience"],
+        ["list_audiences", "List audiences"],
+        ["get_campaign_report", "Get open and click report for a campaign"]
+      ]
+    },
+    "twilio": {
+      "description": "Twilio programmable messaging and voice: SMS, calls and phone numbers",
+      "keywords": ["twilio", "sms", "voice", "phone number"],
+      "tools": [
+        ["send_sms", "Send an SMS message"],
+        ["list_calls", "List voice calls"],
+        ["buy_phone_number", "Provision a phone number"]
+      ]
+    },
+    "okta": {
+      "description": "Okta identity: users, groups, application assignments and SSO",
+      "keywords": ["okta", "sso", "identity provider", "groups"],
+      "tools": [
+        ["list_users", "List Okta users"],
+        ["add_user_to_group", "Add a user to a group"],
+        ["deactivate_user", "Deactivate a user account"],
+        ["list_applications", "List applications"]
+      ]
+    },
+    "auth0": {
+      "description": "Auth0 tenant management: users, connections, roles and login logs",
+      "keywords": ["auth0", "tenant", "login", "roles"],
+      "tools": [
+        ["list_users", "List Auth0 users"],
+        ["assign_role", "Assign a role to a user"],
+        ["list_connections", "List connections"],
+        ["get_login_logs", "Read login logs"]
+      ]
+    },
+    "cloudflare": {
+      "description": "Cloudflare DNS records, zones, cache purge and firewall rules",
+      "keywords": ["cloudflare", "dns", "zone", "cache purge"],
+      "tools": [
+        ["list_dns_records", "List DNS records in a zone"],
+        ["create_dns_record", "Create a DNS record"],
+        ["purge_cache", "Purge the CDN cache"],
+        ["list_firewall_rules", "List firewall rules"]
+      ]
+    },
+    "route53": {
+      "description": "Amazon Route 53 hosted zones and DNS record sets",
+      "keywords": ["route53", "route 53", "hosted zone", "aws dns"],
+      "tools": [
+        ["list_hosted_zones", "List hosted zones"],
+        ["change_record_sets", "Create, update or delete record sets"],
+        ["list_record_sets", "List record sets of a hosted zone"]
+      ]
+    },
+    "notion": {
+      "description": "Notion workspace pages, databases and blocks",
+      "keywords": ["notion", "workspace", "database page", "wiki"],
+      "tools": [
+        ["create_page", "Create a page"],
+        ["query_database", "Query a Notion database"],
+        ["append_blocks", "Append blocks to a page"],
+        ["search", "Search pages and databases"]
+      ]
+    },
+    "confluence": {
+      "description": "Atlassian Confluence spaces and pages for team documentation",
+      "keywords": ["confluence", "space", "documentation", "atlassian"],
+      "tools": [
+        ["get_page", "Fetch a Confluence page"],
+        ["update_page", "Update a page body"],
+        ["search_content", "Search Confluence content"],
+        ["list_spaces", "List spaces"]
+      ]
+    },
+    "kubernetes": {
+      "description": "Kubernetes clusters: pods, deployments, logs and scaling",
+      "keywords": ["kubernetes", "k8s", "pod", "cluster"],
+      "tools": [
+        ["get_pods", "List pods in a namespace"],
+        ["get_pod_logs", "Read logs of a pod"],
+        ["scale_deployment", "Change the replica count of a deployment"],
+        ["rollout_restart", "Restart a deployment rollout"]
+      ]
+    },
+    "docker": {
+      "description": "Docker engine: containers, images, volumes and compose stacks",
+      "keywords": ["docker", "container", "image", "compose"],
+      "tools": [
+        ["list_containers", "List containers"],
+        ["container_logs", "Read container logs"],
+        ["build_image", "Build an image from a Dockerfile"],
+        ["compose_up", "Start a compose stack"]
+      ]
+    },
+    "terraform": {
+      "description": "Terraform infrastructure as code: plan, apply and inspect state",
+      "keywords": ["terraform", "infrastructure as code", "iac", "state"],
+      "tools": [
+        ["plan", "Produce an execution plan"],
+        ["apply", "Apply changes"],
+        ["state_show", "Show a resource in state"]
+      ]
+    },
+    "sentry": {
+      "description": "Sentry error tracking: issues, events, releases and stack traces",
+      "keywords": ["sentry", "error tracking", "stack trace", "release"],
+      "tools": [
+        ["list_issues", "List unresolved error groups"],
+        ["get_event", "Get one error event with its stack trace"],
+        ["resolve_issue", "Resolve an error group"],
+        ["list_releases", "List releases"]
+      ]
+    },
+    "pagerduty": {
+      "description": "PagerDuty incident response: incidents, on-call schedules and escalation policies",
+      "keywords": ["pagerduty", "on-call", "incident", "escalation"],
+      "tools": [
+        ["list_incidents", "List incidents"],
+        ["acknowledge_incident", "Acknowledge an incident"],
+        ["get_oncall", "Who is on call now"],
+        ["list_escalation_policies", "List escalation policies"]
+      ]
+    }
+  },
+  "queries": [
+    { "query": "open a pull request on bitbucket", "expect": "bitbucket", "category": "neighbor" },
+    { "query": "create a merge request for my feature branch", "expect": "gitlab", "category": "neighbor" },
+    { "query": "which github actions workflow runs failed last night", "expect": "github", "category": "neighbor" },
+    { "query": "show me the CI pipelines of my gitlab project", "expect": "gitlab", "category": "neighbor" },
+    { "query": "fetch the logs of a Pipelines step", "expect": "bitbucket", "category": "neighbor" },
+    { "query": "upload this file to a Google Cloud Storage bucket", "expect": "gcs", "category": "neighbor" },
+    { "query": "generate a shared access signature for a blob", "expect": "azure-blob", "category": "neighbor" },
+    { "query": "make a presigned download link for an S3 object", "expect": "s3", "category": "neighbor" },
+    { "query": "run a PromQL range query for cpu usage", "expect": "prometheus", "category": "neighbor" },
+    { "query": "run an NRQL query on page load times", "expect": "newrelic", "category": "neighbor" },
+    { "query": "show running connections on the mysql server", "expect": "mysql", "category": "neighbor" },
+    { "query": "open the local sqlite file and print its schema", "expect": "sqlite", "category": "neighbor" },
+    { "query": "post a message in the mattermost town square channel", "expect": "mattermost", "category": "neighbor" },
+    { "query": "schedule an online meeting with the design team in Teams", "expect": "msteams", "category": "neighbor" },
+    { "query": "refund a captured paypal payment", "expect": "paypal", "category": "neighbor" },
+    { "query": "assign the admin role to a user in my auth0 tenant", "expect": "auth0", "category": "neighbor" },
+    { "query": "add a user to the engineering group in okta", "expect": "okta", "category": "neighbor" },
+    { "query": "purge the CDN cache for the marketing site", "expect": "cloudflare", "category": "neighbor" },
+    { "query": "change record sets in a hosted zone", "expect": "route53", "category": "neighbor" },
+    { "query": "transition the ticket to done", "expect": "jira", "category": "capability" },
+    { "query": "acknowledge the incident that woke me up", "expect": "pagerduty", "category": "capability" },
+    { "query": "why is this endpoint throwing exceptions in production", "expect": "sentry", "category": "capability" },
+    { "query": "scale the web deployment up to five replicas", "expect": "kubernetes", "category": "capability" },
+    { "query": "spin up the compose stack for local development", "expect": "docker", "category": "capability" },
+    { "query": "preview what infrastructure changes would be made", "expect": "terraform", "category": "capability" },
+    { "query": "send a transactional email receipt", "expect": "sendgrid", "category": "capability" },
+    { "query": "add this person to our newsletter audience", "expect": "mailchimp", "category": "capability" },
+    { "query": "text a verification code to a phone", "expect": "twilio", "category": "capability" },
+    { "query": "cancel a customer's subscription", "expect": "stripe", "category": "capability" },
+    { "query": "suspend the analytics warehouse to save credits", "expect": "snowflake", "category": "capability" },
+    { "query": "log two hours of work against the issue", "expect": "youtrack", "category": "capability" },
+    { "query": "what is in the current iteration", "expect": "shortcut", "category": "capability" },
+    { "query": "append a section to the onboarding page", "expect": "notion", "category": "capability" },
+    { "query": "update the runbook page in the ops space", "expect": "confluence", "category": "capability" },
+    { "query": "query_metrics for request latency", "expect": "datadog", "category": "tool" },
+    { "query": "run create_dns_record for the api subdomain", "expect": "cloudflare", "category": "tool" },
+    { "query": "call list_escalation_policies", "expect": "pagerduty", "category": "tool" },
+    { "query": "use get_job_log to read the failing build", "expect": "gitlab", "category": "tool" },
+    { "query": "pull request and CI pipeline status for the repo I own on atlassian", "expect": "bitbucket", "category": "compound" },
+    { "query": "find errors in the logs and open a ticket for the bug", "expect": "jira", "category": "compound" }
+  ]
+}
