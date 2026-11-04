@@ -156,6 +156,21 @@ if (coldDiscovery && !tasksOnly) {
   console.error("--cold-discovery only applies to --tasks.");
   process.exit(1);
 }
+// --task a,b|all picks which tasks --tasks runs (default: all). --json writes the full results.
+const taskArg = get("--task") ?? "all";
+const taskFlagGiven = has("--task");
+const jsonOut = get("--json");
+const selectedTasks = taskArg === "all" ? [...TASK_IDS] : taskArg.split(",").map((t) => t.trim()).filter(Boolean);
+if (tasksOnly) {
+  const unknown = selectedTasks.filter((t) => !TASK_IDS.includes(t));
+  if (unknown.length || selectedTasks.length === 0) {
+    console.error(`Unknown --task ${unknown.join(", ") || taskArg}. Available: ${TASK_IDS.join(", ")} (or "all").`);
+    process.exit(1);
+  }
+} else if (taskFlagGiven) {
+  console.error("--task only applies to --tasks.");
+  process.exit(1);
+}
 if (tasksOnly && (mcpOnly || skillsOnly)) {
   console.error("--tasks cannot be combined with --mcp-only / --skills-only.");
   process.exit(1);
@@ -1209,9 +1224,9 @@ const largest = [...skills].sort((a, b) => b.charsFull - a.charsFull)[0] ?? null
 console.log(`\nlazygate benchmark`);
 console.log(`${"─".repeat(60)}`);
 if (tasksOnly) {
-  // Task mode still uses the tickets fixture for the workload; direct wires the user's catalog too.
+  // Task mode runs against the fixture servers; --include-catalog adds the user's catalog too.
   console.log(
-    `Mode:    --tasks${coldDiscovery ? " --cold-discovery (lazygate starts cold: the model must discover the server and tools)" : ""} (direct | call_tool | call_tool+opt | run_chain; ${includeCatalog ? "loads your full Lazygate catalog (--include-catalog)" : "fixture server only (pass --include-catalog for the full catalog)"})`
+    `Mode:    --tasks${coldDiscovery ? " --cold-discovery (lazygate starts cold: the model must discover the server and tools)" : ""} (direct | call_tool | call_tool+opt | run_chain; ${includeCatalog ? "loads your full Lazygate catalog (--include-catalog)" : "fixture servers only (pass --include-catalog for the full catalog)"})`
   );
   console.log(
     `Catalog: ${Object.keys(servers).length} runnable` +
@@ -1242,140 +1257,59 @@ const fmtNum = (n) => n.toLocaleString();
 
 // ─── Task mode (--tasks) ───────────────────────────────────────────────────
 //
-// One multi-step task four ways against the same fixture server:
-//   direct              — Claude talks to the tickets MCP server itself (no lazygate)
+// Several multi-step tasks, each run four ways against the same fixture servers:
+//   direct              — Claude talks to the fixture MCP servers itself (no lazygate)
 //   call-tool           — lazygate; model chains call_tool (one round trip per step)
 //   call-tool-optimized — call-tool with response optimization (adaptive default + call_tool fields)
 //   run-chain           — lazygate; model writes one run_chain script for the chain
-// Each strategy is one cold-cache `claude -p` turn. Results are checked against the fixture's
-// known answer, so a strategy that returns a wrong number is reported as a failure.
+// Every run's catalog holds all fixture servers (tickets, orders, logs), so a task also has to pick
+// the right server, and one task needs two. Each strategy is one cold-cache `claude -p` turn;
+// answers are checked against the fixture data, so a strategy that returns a wrong number is
+// reported as a failure. Tasks, instructions and expected answers live in lib/tasks.mjs.
 
-const TASK_PROMPT =
-  "Using the tickets server, count the open tickets assigned to ana and sum each ticket's " +
-  "bodyLength field (from get_ticket). Answer with exactly two numbers: the count, then the sum.";
+import {
+  TASKS,
+  TASK_IDS,
+  STRATEGY_IDS,
+  STRATEGY_LABELS,
+  FIXTURE_SERVERS,
+  FIXTURE_DIR,
+  buildInstruction,
+  taskPrompt,
+  strategyResponseOptimization,
+  answerMatches,
+  answerSummary,
+} from "./lib/tasks.mjs";
 
 const fmtNumTask = (n) => n.toLocaleString();
 
-/** Same task, but nothing names the server: the model has to find it (--cold-discovery). */
-const COLD_TASK_PROMPT =
-  "Count the open support tickets assigned to ana and sum each ticket's bodyLength field " +
-  "(the per-ticket record has it). Answer with exactly two numbers: the count, then the sum.";
-const COLD_ANSWER_RULE = "Your entire final message must be exactly: <count> <sum> — two integers, one space, nothing else.";
-
-/** Expected answer, derived from the same deterministic data as the fixture server. */
-function taskExpectedAnswer() {
-  const fixturePath = resolve(__dirname, "..", "src", "__tests__", "fixtures", "tickets-server.mjs");
-  const src = readFileSync(fixturePath, "utf8");
-  // Include TICKET_COUNT / BODY_REPEATS so the TICKETS initializer can eval offline.
-  const start = src.indexOf("const TICKET_COUNT");
-  const dataset = src.slice(start === -1 ? src.indexOf("const TICKETS") : start, src.indexOf("const tools"));
-  const TICKETS = new Function(`${dataset}; return TICKETS;`)();
-  const hits = TICKETS.filter((t) => t.status === "open" && t.assignee === "ana");
-  const total = hits.reduce((sum, t) => sum + t.body.length, 0);
-  return { count: hits.length, total };
-}
-
-const TASK_STRATEGIES = {
-  direct: {
-    label: "direct",
-    // Claude gets every runnable server from ~/.config/lazygate/servers.json plus the tickets fixture.
-    mcp: "direct",
-    instruction:
-      "You have many MCP servers loaded directly (no lazygate), including \"tickets\".\n" +
-      "IGNORE every server except tickets. Tools on tickets: list_tickets, get_ticket.\n" +
-      "There are several matching tickets; get_ticket bodies are large — still fetch each one.\n" +
-      "Required sequence:\n" +
-      "1) list_tickets with status \"open\" — the list includes assignee.\n" +
-      "2) For each open ticket whose assignee is \"ana\", call get_ticket once.\n" +
-      "3) Add the numeric bodyLength fields from those results (do NOT count characters in body).\n" +
-      "Your entire final message must be exactly: <count> <sum> — two integers, one space, nothing else.",
-    coldInstruction:
-      "You have many MCP servers loaded directly (no lazygate). Pick the one that serves support tickets and use its tools.\n" +
-      "Ticket bodies are large — still fetch each ticket you need, and add the numeric bodyLength fields (do NOT count characters in body).\n" +
-      COLD_ANSWER_RULE,
-  },
-  "call-tool": {
-    label: "call_tool",
-    mcp: "lazygate",
-    instruction:
-      "You have the lazygate MCP server. Upstream server: \"tickets\". Tools: list_tickets, get_ticket.\n" +
-      "There are several matching tickets; get_ticket bodies are large — still fetch each one.\n" +
-      "Required sequence (use call_tool only; never run_chain):\n" +
-      "1) call_tool(server=\"tickets\", tool=\"list_tickets\", args={status:\"open\"}) — list includes assignee.\n" +
-      "2) For each open ticket whose assignee is \"ana\", call_tool get_ticket once.\n" +
-      "3) Add the numeric bodyLength fields from those results (do NOT count characters in body).\n" +
-      "Your entire final message must be exactly: <count> <sum> — two integers, one space, nothing else.",
-    coldInstruction:
-      "You have the lazygate MCP server and do not know which upstream servers or tools exist.\n" +
-      "Start with discover_tools to find the right server, learn the tool names and argument shapes from its answer (use describe_tool only if you need more), then use call_tool only (never run_chain).\n" +
-      "Ticket bodies are large — still fetch each ticket you need, and add the numeric bodyLength fields (do NOT count characters in body).\n" +
-      COLD_ANSWER_RULE,
-  },
-  "call-tool-optimized": {
-    label: "call_tool+opt",
-    mcp: "lazygate",
-    // Response optimization on, with no per-tool policy: adaptive defaults plus agent-requested fields.
-    responseOptimization: { enabled: true, defaultMode: "adaptive", maxOutputTokens: 4000 },
-    instruction:
-      "You have the lazygate MCP server. Upstream server: \"tickets\". Tools: list_tickets, get_ticket.\n" +
-      "There are several matching tickets; get_ticket bodies are large, so ask call_tool for only the fields you need.\n" +
-      "Required sequence (use call_tool only; never run_chain):\n" +
-      "1) call_tool(server=\"tickets\", tool=\"list_tickets\", args={status:\"open\"}) — list includes assignee.\n" +
-      "2) For each open ticket whose assignee is \"ana\", call_tool(server=\"tickets\", tool=\"get_ticket\", " +
-      "args={id}, fields=[\"id\",\"bodyLength\"]) once.\n" +
-      "3) Add the numeric bodyLength fields from those results (do NOT count characters in body).\n" +
-      "Your entire final message must be exactly: <count> <sum> — two integers, one space, nothing else.",
-    coldInstruction:
-      "You have the lazygate MCP server and do not know which upstream servers or tools exist.\n" +
-      "Start with discover_tools to find the right server, learn the tool names and argument shapes from its answer (use describe_tool only if you need more), then use call_tool only (never run_chain).\n" +
-      "Ticket bodies are large, so ask call_tool for only the fields you need: pass fields=[...] (for example [\"id\",\"bodyLength\"]).\n" +
-      COLD_ANSWER_RULE,
-  },
-  "run-chain": {
-    label: "run_chain",
-    mcp: "lazygate",
-    instruction:
-      "You have the lazygate MCP server. Upstream server: \"tickets\" (toolChain on).\n" +
-      "There are several matching tickets with large bodies; keep all of that inside the script.\n" +
-      "Do exactly this, then stop (no retries unless a tool returns an error):\n" +
-      "1) describe_tool with server=\"tickets\" and NO tool argument (stubs).\n" +
-      "2) ONE run_chain call. Inside the script: await servers.tickets.list_tickets({status:\"open\"}), " +
-      "filter assignee===\"ana\", await servers.tickets.get_ticket({id}) for each (use Promise.all if you want), " +
-      "sum bodyLength (or body.length), return {count, total}. Do not use call_tool.\n" +
-      "Your entire final message must be exactly: <count> <sum> — two integers, one space, nothing else.",
-    coldInstruction:
-      "You have the lazygate MCP server and do not know which upstream servers or tools exist.\n" +
-      "Start with discover_tools to find the right server; a clear match lists call signatures, and inside run_chain you call servers.<server>.<tool>(args). Use describe_tool with that server and NO tool argument only if you need the tool-chain stubs.\n" +
-      "Then write ONE run_chain script that fetches, filters and totals; ticket bodies are large, so keep them inside the script (never use call_tool).\n" +
-      COLD_ANSWER_RULE,
-  },
-};
-
-/** Tickets fixture entry for a temp servers.json (tool chain on for run_chain). */
-function ticketsServerEntry() {
-  const ticketsServer = resolve(__dirname, "..", "src", "__tests__", "fixtures", "tickets-server.mjs");
+/** One fixture server as a servers.json entry (tool chain on; opted in to the discover preview). */
+function fixtureServerEntry(name, startLog) {
+  const fixture = FIXTURE_SERVERS[name];
   return {
-    description: "Support tickets: list and fetch",
-    keywords: ["tickets", "support", "ticket", "open"],
+    description: fixture.description,
+    keywords: fixture.keywords,
     command: process.execPath,
-    args: [ticketsServer],
+    args: [resolve(FIXTURE_DIR, fixture.file)],
+    env: { FIXTURE_START_LOG: startLog },
     inheritEnv: false,
     toolChain: true,
-    // The fixture is safe to start, so cold discovery can show its signatures in one turn.
+    // The fixtures are safe to start, so cold discovery can show their signatures in one turn.
     previewOnDiscover: true,
   };
 }
 
 /**
- * Broker config for lazygate task strategies: the user's runnable catalog plus the tickets
- * fixture. Meta-tools stay the only schemas in tools/list (expose defaults to none); other
- * servers are available if discovered but the task instructions say to use tickets only.
+ * Broker config for lazygate task strategies: every fixture server (plus the user's runnable
+ * catalog with --include-catalog). Meta-tools stay the only schemas in tools/list (expose
+ * defaults to none); the instructions name the servers a task needs, or the model discovers them.
  */
-function taskBrokerConfig(strategyDir, strategy) {
+function taskBrokerConfig(strategyDir, strategyId, startLog) {
   const cfgPath = join(strategyDir, "servers.json");
-  // Only the fixture unless --include-catalog: the real catalog can hold destructive tools and
+  // Only the fixtures unless --include-catalog: the real catalog can hold destructive tools and
   // --tasks bypasses permission prompts.
-  const merged = { ...(includeCatalog ? servers : {}), tickets: ticketsServerEntry() };
+  const merged = { ...(includeCatalog ? servers : {}) };
+  for (const name of Object.keys(FIXTURE_SERVERS)) merged[name] = fixtureServerEntry(name, startLog);
   // Expand ${VAR} the same way direct MCP wiring does, so stdio children get real secrets.
   const out = {};
   for (const [name, cfg] of Object.entries(merged)) {
@@ -1390,32 +1324,30 @@ function taskBrokerConfig(strategyDir, strategy) {
     }
     out[name] = copy;
   }
-  writeFileSync(
-    cfgPath,
-    JSON.stringify({
-      ...(strategy.responseOptimization ? { responseOptimization: strategy.responseOptimization } : {}),
-      servers: out,
-    })
-  );
+  const responseOptimization = strategyResponseOptimization(strategyId);
+  writeFileSync(cfgPath, JSON.stringify({ ...(responseOptimization ? { responseOptimization } : {}), servers: out }));
   return cfgPath;
 }
 
 /**
  * MCP config for a task strategy.
- * - direct: every runnable server from the user's Lazygate catalog + tickets fixture (classic MCP)
+ * - direct: every fixture server (and the user's runnable catalog with --include-catalog), classic MCP
  * - lazygate: one broker process wrapping that same catalog
  */
-function taskMcpConfig(strategy, strategyDir) {
-  const ticketsServer = resolve(__dirname, "..", "src", "__tests__", "fixtures", "tickets-server.mjs");
-  if (strategy.mcp === "direct") {
-    const mcp = includeCatalog
-      ? buildMcpConfig(Object.keys(servers))
-      : { mcpServers: {} };
-    // Fixture wins if the user already has a server named "tickets".
-    mcp.mcpServers.tickets = { command: process.execPath, args: [ticketsServer] };
+function taskMcpConfig(strategyId, strategyDir, startLog) {
+  if (strategyId === "direct") {
+    const mcp = includeCatalog ? buildMcpConfig(Object.keys(servers)) : { mcpServers: {} };
+    // A fixture wins if the user already has a server with the same name.
+    for (const name of Object.keys(FIXTURE_SERVERS)) {
+      mcp.mcpServers[name] = {
+        command: process.execPath,
+        args: [resolve(FIXTURE_DIR, FIXTURE_SERVERS[name].file)],
+        env: { FIXTURE_START_LOG: startLog },
+      };
+    }
     return mcp;
   }
-  const cfgPath = taskBrokerConfig(strategyDir, strategy);
+  const cfgPath = taskBrokerConfig(strategyDir, strategyId, startLog);
   const brokerEntry = resolve(__dirname, "..", "dist", "index.js");
   return {
     mcpServers: {
@@ -1424,14 +1356,23 @@ function taskMcpConfig(strategy, strategyDir) {
   };
 }
 
-async function runTaskStrategy(id) {
-  const strategy = TASK_STRATEGIES[id];
-  const dir = mkdtempSync(join(workDir, `task-${id}-`));
-  const mcpConfig = taskMcpConfig(strategy, dir);
+/** Number of fixture-server processes a run launched (each appends a line to the start log). */
+function countServerStarts(startLog) {
+  try {
+    return readFileSync(startLog, "utf8").split("\n").filter(Boolean).length;
+  } catch {
+    return 0;
+  }
+}
+
+async function runTaskStrategy(taskId, strategyId) {
+  const dir = mkdtempSync(join(workDir, `task-${taskId}-${strategyId}-`));
+  const startLog = join(dir, "starts.log");
+  const mcpConfig = taskMcpConfig(strategyId, dir, startLog);
   const appendFile = join(dir, "instruction.md");
-  writeFileSync(appendFile, coldDiscovery ? strategy.coldInstruction : strategy.instruction);
-  const result = await runClaudeTask(mcpConfig, { appendFile, prompt: coldDiscovery ? COLD_TASK_PROMPT : TASK_PROMPT });
-  return { id, label: strategy.label, ...result };
+  writeFileSync(appendFile, buildInstruction(taskId, strategyId, { cold: coldDiscovery }));
+  const result = await runClaudeTask(mcpConfig, { appendFile, prompt: taskPrompt(taskId, { cold: coldDiscovery }) });
+  return { taskId, id: strategyId, label: STRATEGY_LABELS[strategyId], ...result, serversStarted: countServerStarts(startLog) };
 }
 
 /**
@@ -1489,12 +1430,17 @@ async function runClaudeTask(mcpConfig, { appendFile, prompt }) {
   }
   let data;
   const messageIds = new Set();
+  const toolUses = new Map(); // tool_use id → tool name (a block can repeat across stream events)
   try {
     for (const line of stdout.split("\n")) {
       if (!line.trim()) continue;
       const event = JSON.parse(line);
-      if (event.type === "assistant" && event.message?.id) messageIds.add(event.message.id);
-      else if (event.type === "result") data = event;
+      if (event.type === "assistant" && event.message?.id) {
+        messageIds.add(event.message.id);
+        for (const block of event.message.content ?? []) {
+          if (block?.type === "tool_use" && block.id) toolUses.set(block.id, String(block.name ?? ""));
+        }
+      } else if (event.type === "result") data = event;
     }
     if (!data) throw new Error("no result event");
   } catch {
@@ -1510,6 +1456,8 @@ async function runClaudeTask(mcpConfig, { appendFile, prompt }) {
     answer: String(data.result ?? ""),
     turns: data.num_turns ?? 0,
     apiCalls: Math.max(1, messageIds.size),
+    // discover_tools / describe_tool / activate_server calls: the turns spent finding the right tool.
+    lookups: [...toolUses.values()].filter((name) => /(discover_tools|describe_tool|activate_server)$/.test(name)).length,
     totalInput,
     outputTokens: u.output_tokens ?? 0,
     durationMs: data.duration_ms ?? Date.now() - start,
@@ -1536,45 +1484,20 @@ function measureTaskBaseline() {
 }
 
 /**
- * True when the answer reports the expected pair.
- * Prefer a final line that is exactly two integers (what we asked for); fall back to
- * finding both numbers anywhere so minor formatting still counts as correct.
- */
-/** The "count total" line the model was asked for, or the start of its first line when it gave prose. */
-function answerSummary(answer) {
-  const lines = String(answer).trim().split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-  const numeric = lines.findLast((l) => /^(\d+)\s+(\d+)$/.test(l));
-  return numeric ?? (lines[0] ?? "").slice(0, 60);
-}
-
-function answerMatches(answer, expected) {
-  const lines = String(answer)
-    .trim()
-    .split(/\r?\n/)
-    .map((l) => l.trim())
-    .filter(Boolean);
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const m = /^(\d+)\s+(\d+)$/.exec(lines[i]);
-    if (m) return Number(m[1]) === expected.count && Number(m[2]) === expected.total;
-  }
-  const nums = (answer.match(/\d+/g) ?? []).map(Number);
-  return nums.includes(expected.count) && nums.includes(expected.total);
-}
-
-/**
  * Collapse one strategy's rounds into a row. Token, turn and duration figures are means over
  * the correct runs, so a wrong answer never skews the comparison; `ok` is false only when every
  * round errored.
  */
-function summarizeTaskRuns(id, label, runs) {
+function summarizeTaskRuns(id, label, runs, taskId) {
   const completed = runs.filter((r) => r.ok);
   if (completed.length === 0) {
-    return { id, label, ok: false, error: runs[0]?.error ?? "no runs", runs: runs.length, correctRuns: 0 };
+    return { taskId, id, label, ok: false, error: runs[0]?.error ?? "no runs", runs: runs.length, correctRuns: 0 };
   }
   const correct = completed.filter((r) => r.correct);
   const basis = correct.length ? correct : completed;
   const inputs = basis.map((r) => r.totalInput);
   return {
+    taskId,
     id,
     label,
     ok: true,
@@ -1585,6 +1508,8 @@ function summarizeTaskRuns(id, label, runs) {
     maxInput: Math.max(...inputs),
     turns: mean(basis.map((r) => r.turns)),
     apiCalls: mean(basis.map((r) => r.apiCalls ?? 0)),
+    lookups: mean(basis.map((r) => r.lookups ?? 0)),
+    serversStarted: mean(basis.map((r) => r.serversStarted ?? 0)),
     durationMs: Math.round(mean(basis.map((r) => r.durationMs))),
     answer: basis[basis.length - 1].answer,
   };
@@ -1595,105 +1520,185 @@ function fmtTurns(n) {
   return Number.isInteger(n) ? String(n) : n.toFixed(1);
 }
 
-if (tasksOnly) {
-  const expected = taskExpectedAnswer();
-  console.log(`Task:    ${coldDiscovery ? COLD_TASK_PROMPT : TASK_PROMPT}`);
-  if (coldDiscovery) {
-    console.log(`Lookup:  cold discovery — the extra turns versus a known-tools run (omit --cold-discovery) are the discover_tools / describe_tool lookups`);
-  }
-  console.log(
-    `Expect:  ${expected.count} tickets, total bodyLength ${fmtNumTask(expected.total)} ` +
-      `(~${Math.round(expected.total / 1024)} KiB of bodies if every get_ticket returns through the model)`
+/** Mean of a list, ignoring nothing; 0 for an empty list. */
+const avg = (xs) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0);
+
+/** One strategy's row under a task: net/raw input, calls, lookups, servers started, time, verdict. */
+function taskRowLine(r, rounds, expectedCount) {
+  if (!r.ok) return `${r.label.padEnd(14)} ERROR  ${r.error}`;
+  const range = r.correctRuns > 1 ? `  (${fmtNumTask(r.minInput)}–${fmtNumTask(r.maxInput)})` : "";
+  const verdict = rounds > 1 ? `correct ${r.correctRuns}/${r.runs}` : r.correctRuns ? "correct" : "WRONG";
+  return (
+    `${r.label.padEnd(14)} net ${fmtNumTask(r.netInput).padStart(8)}  raw ${fmtNumTask(r.totalInput).padStart(9)}  ` +
+    `calls ${fmtTurns(r.apiCalls).padStart(4)}  tool calls ${fmtTurns(r.turns).padStart(4)}  ` +
+    `lookups ${fmtTurns(r.lookups).padStart(3)}  servers started ${fmtTurns(r.serversStarted).padStart(3)}  ` +
+    `${(r.durationMs / 1000).toFixed(1).padStart(5)}s  ${verdict}  answer: ${answerSummary(r.answer, expectedCount)}${range}`
   );
+}
+
+/** "label: −N net input tokens (−P%); ±K API calls" for two strategies that both answered correctly. */
+function taskDeltaLine(label, base, other) {
+  const fair = (r) => r?.ok && r.correctRuns > 0;
+  if (!fair(base) || !fair(other)) return null;
+  const d = other.netInput - base.netInput;
+  const pct = base.netInput ? Math.abs((d / base.netInput) * 100).toFixed(1) : "0.0";
+  const sign = d > 0 ? "+" : d < 0 ? "−" : "±";
+  const rawD = other.totalInput - base.totalInput;
+  const callsD = other.apiCalls - base.apiCalls;
+  return (
+    `${label}: ${sign}${fmtNumTask(Math.abs(d))} net input tokens (${sign}${pct}%); ` +
+    `${callsD >= 0 ? "+" : "−"}${fmtTurns(Math.abs(callsD))} API calls; raw ${rawD >= 0 ? "+" : "−"}${fmtNumTask(Math.abs(rawD))}`
+  );
+}
+
+/**
+ * Aggregate across tasks. A strategy is compared with `direct` only on tasks where both answered
+ * correctly, using summed net input, so one cheap task cannot dominate and a wrong run never counts.
+ */
+function summarizeAcrossTasks(rowsByTask) {
+  const out = [];
+  for (const id of STRATEGY_IDS) {
+    const rows = Object.values(rowsByTask).map((r) => r.find((x) => x.id === id)).filter(Boolean);
+    const okRows = rows.filter((r) => r.ok);
+    const paired = Object.values(rowsByTask)
+      .map((r) => [r.find((x) => x.id === "direct"), r.find((x) => x.id === id)])
+      .filter(([d, o]) => d?.ok && d.correctRuns > 0 && o?.ok && o.correctRuns > 0);
+    const baseNet = paired.reduce((a, [d]) => a + d.netInput, 0);
+    const net = paired.reduce((a, [, o]) => a + o.netInput, 0);
+    out.push({
+      id,
+      label: STRATEGY_LABELS[id],
+      tasksCorrect: rows.filter((r) => r.ok && r.correctRuns === r.runs).length,
+      tasks: rows.length,
+      correctRuns: rows.reduce((a, r) => a + (r.correctRuns ?? 0), 0),
+      runs: rows.reduce((a, r) => a + (r.runs ?? 0), 0),
+      meanApiCalls: avg(okRows.map((r) => r.apiCalls)),
+      meanLookups: avg(okRows.map((r) => r.lookups)),
+      meanServersStarted: avg(okRows.map((r) => r.serversStarted)),
+      meanNetInput: Math.round(avg(okRows.map((r) => r.netInput))),
+      pairedTasks: paired.length,
+      vsDirectPct: id !== "direct" && baseNet ? ((net - baseNet) / baseNet) * 100 : null,
+    });
+  }
+  return out;
+}
+
+if (tasksOnly) {
   const rounds = Math.max(1, roundsArg || 1);
   console.log(
-    `Runner:  claude (task mode, ${rounds} cold turn${rounds !== 1 ? "s" : ""} per strategy; ` +
+    `Tasks:   ${selectedTasks.length} (${selectedTasks.join(", ")}); catalog holds ${Object.keys(FIXTURE_SERVERS).join(", ")}` +
+      (coldDiscovery ? "; cold discovery — extra turns versus a known-tools run are the discover_tools / describe_tool lookups" : "")
+  );
+  console.log(
+    `Runner:  claude (task mode, ${rounds} cold turn${rounds !== 1 ? "s" : ""} per strategy and task; ` +
       `averages use correct runs only)\n`
   );
   if (estimateOnly) {
     console.log(`Mode:    --estimate: skipping live runs (task mode needs claude -p). Instructions the model would get:\n`);
-    for (const strategy of Object.values(TASK_STRATEGIES)) {
-      console.log(`[${strategy.label}]\n${coldDiscovery ? strategy.coldInstruction : strategy.instruction}\n`);
+    for (const taskId of selectedTasks) {
+      const task = TASKS[taskId];
+      console.log(`Task ${taskId} — ${task.title}`);
+      console.log(`Prompt: ${taskPrompt(taskId, { cold: coldDiscovery })}`);
+      console.log(`Expect: ${task.expected().join(" ")}\n`);
+      for (const strategyId of STRATEGY_IDS) {
+        console.log(`[${STRATEGY_LABELS[strategyId]}]\n${buildInstruction(taskId, strategyId, { cold: coldDiscovery })}\n`);
+      }
     }
     process.exit(0);
   }
   const baselinePerCall = await measureTaskBaseline();
-  const taskRows = [];
-  for (const id of Object.keys(TASK_STRATEGIES)) {
-    const label = TASK_STRATEGIES[id].label;
-    const runs = [];
-    for (let i = 0; i < rounds; i++) {
-      const suffix = rounds > 1 ? ` (round ${i + 1}/${rounds})` : "";
-      process.stdout.write(`  ${label.padEnd(14)} running...${suffix}\n`);
-      const r = await runTaskStrategy(id);
-      if (r.ok) r.correct = answerMatches(r.answer, expected);
-      runs.push(r);
-    }
-    const row = summarizeTaskRuns(id, label, runs);
-    // Input above the fixed per-call overhead: schemas, instructions, calls and results only.
-    if (row.ok) row.netInput = Math.max(0, Math.round(row.totalInput - row.apiCalls * baselinePerCall));
-    taskRows.push(row);
-  }
   console.log(
     baselinePerCall
-      ? `\nFixed overhead: ${fmtNumTask(baselinePerCall)} input tokens per API call (system prompt of this Claude Code install, no MCP). ` +
+      ? `Fixed overhead: ${fmtNumTask(baselinePerCall)} input tokens per API call (system prompt of this Claude Code install, no MCP). ` +
           `"net" removes it, so the strategies are compared on what they add.\n`
-      : `\nCould not measure the fixed per-call overhead; "net" equals the raw input.\n`
+      : `Could not measure the fixed per-call overhead; "net" equals the raw input.\n`
   );
-  for (const r of taskRows) {
-    if (!r.ok) {
-      console.log(`${r.label.padEnd(14)} ERROR  ${r.error}`);
-      continue;
+  const rowsByTask = {};
+  const expectedByTask = {};
+  for (const taskId of selectedTasks) {
+    const expected = TASKS[taskId].expected();
+    expectedByTask[taskId] = expected;
+    console.log(`── ${taskId}: ${TASKS[taskId].title}`);
+    console.log(`   expected answer: ${expected.join(" ")}`);
+    const rows = [];
+    for (const strategyId of STRATEGY_IDS) {
+      const label = STRATEGY_LABELS[strategyId];
+      const runs = [];
+      for (let i = 0; i < rounds; i++) {
+        const suffix = rounds > 1 ? ` (round ${i + 1}/${rounds})` : "";
+        process.stdout.write(`  ${label.padEnd(14)} running...${suffix}\n`);
+        const r = await runTaskStrategy(taskId, strategyId);
+        if (r.ok) r.correct = answerMatches(r.answer, expected);
+        runs.push(r);
+      }
+      const row = summarizeTaskRuns(strategyId, label, runs, taskId);
+      // Input above the fixed per-call overhead: schemas, instructions, calls and results only.
+      if (row.ok) row.netInput = Math.max(0, Math.round(row.totalInput - row.apiCalls * baselinePerCall));
+      rows.push(row);
     }
-    const range =
-      r.correctRuns > 1 ? `  (${fmtNumTask(r.minInput)}–${fmtNumTask(r.maxInput)})` : "";
-    const verdict =
-      rounds > 1 ? `correct ${r.correctRuns}/${r.runs}` : r.correctRuns ? "correct" : "WRONG";
-    console.log(
-      `${r.label.padEnd(14)} net ${fmtNumTask(r.netInput).padStart(8)}  raw ${fmtNumTask(r.totalInput).padStart(9)}  ` +
-        `calls ${fmtTurns(r.apiCalls).padStart(4)}  tool calls ${fmtTurns(r.turns).padStart(4)}  ` +
-        `${(r.durationMs / 1000).toFixed(1).padStart(5)}s  ${verdict}  answer: ${answerSummary(r.answer)}${range}`
-    );
-  }
-  const direct = taskRows.find((r) => r.id === "direct");
-  const callTool = taskRows.find((r) => r.id === "call-tool");
-  const callToolOptimized = taskRows.find((r) => r.id === "call-tool-optimized");
-  const execCode = taskRows.find((r) => r.id === "run-chain");
-  const fair = (r) => r?.ok && r.correctRuns > 0;
-
-  const deltaLine = (label, base, other) => {
-    if (!fair(base) || !fair(other)) return null;
-    const d = other.netInput - base.netInput;
-    const pct = base.netInput ? Math.abs((d / base.netInput) * 100).toFixed(1) : "0.0";
-    const sign = d > 0 ? "+" : d < 0 ? "−" : "±";
-    const rawD = other.totalInput - base.totalInput;
-    return `${label}: ${sign}${fmtNumTask(Math.abs(d))} net input tokens (${sign}${pct}%); ${other.apiCalls - base.apiCalls >= 0 ? "+" : "−"}${fmtTurns(Math.abs(other.apiCalls - base.apiCalls))} API calls; raw ${rawD >= 0 ? "+" : "−"}${fmtNumTask(Math.abs(rawD))}`;
-  };
-
-  const lines = [
-    deltaLine("call_tool vs direct", direct, callTool),
-    deltaLine("call_tool+opt vs direct", direct, callToolOptimized),
-    deltaLine("call_tool+opt vs call_tool", callTool, callToolOptimized),
-    deltaLine("run_chain vs direct", direct, execCode),
-    deltaLine("run_chain vs call_tool", callTool, execCode),
-  ].filter(Boolean);
-
-  if (lines.length) {
+    rowsByTask[taskId] = rows;
     console.log("");
-    for (const line of lines) console.log(line);
-  } else {
-    const status = (r) => (!r ? "missing" : !r.ok ? "ERROR" : r.correctRuns ? "correct" : "WRONG");
+    for (const r of rows) console.log(taskRowLine(r, rounds, expected.length));
+    const by = (id) => rows.find((r) => r.id === id);
+    const lines = [
+      taskDeltaLine("call_tool vs direct", by("direct"), by("call-tool")),
+      taskDeltaLine("call_tool+opt vs direct", by("direct"), by("call-tool-optimized")),
+      taskDeltaLine("call_tool+opt vs call_tool", by("call-tool"), by("call-tool-optimized")),
+      taskDeltaLine("run_chain vs direct", by("direct"), by("run-chain")),
+      taskDeltaLine("run_chain vs call_tool", by("call-tool"), by("run-chain")),
+    ].filter(Boolean);
+    if (lines.length) {
+      console.log("");
+      for (const line of lines) console.log(line);
+    } else {
+      const status = (r) => (!r ? "missing" : !r.ok ? "ERROR" : r.correctRuns ? "correct" : "WRONG");
+      console.log(
+        `\n(Skipping token deltas — need correct runs to compare; direct=${status(by("direct"))}, ` +
+          `call_tool=${status(by("call-tool"))}, call_tool+opt=${status(by("call-tool-optimized"))}, run_chain=${status(by("run-chain"))}.)`
+      );
+    }
+    console.log("");
+  }
+
+  const summary = summarizeAcrossTasks(rowsByTask);
+  console.log(`${"═".repeat(76)}`);
+  console.log(
+    `ACROSS ${selectedTasks.length} TASK${selectedTasks.length !== 1 ? "S" : ""}  ` +
+      `(${coldDiscovery ? "cold discovery" : "known tools"}, ${rounds} round${rounds !== 1 ? "s" : ""} each)`
+  );
+  console.log(`${"═".repeat(76)}`);
+  console.log(
+    `${"strategy".padEnd(14)} ${"correct".padStart(9)} ${"net in".padStart(9)} ${"calls".padStart(6)} ${"lookups".padStart(8)} ${"servers".padStart(8)}  vs direct`
+  );
+  for (const r of summary) {
+    const vs = r.vsDirectPct === null ? "—" : `${r.vsDirectPct <= 0 ? "−" : "+"}${Math.abs(r.vsDirectPct).toFixed(1)}% (${r.pairedTasks} paired task${r.pairedTasks !== 1 ? "s" : ""})`;
     console.log(
-      `\n(Skipping token deltas — need correct runs to compare; ` +
-        `direct=${status(direct)}, call_tool=${status(callTool)}, call_tool+opt=${status(callToolOptimized)}, ` +
-        `run_chain=${status(execCode)}.)`
+      `${r.label.padEnd(14)} ${`${r.correctRuns}/${r.runs}`.padStart(9)} ${fmtNumTask(r.meanNetInput).padStart(9)} ` +
+        `${fmtTurns(Math.round(r.meanApiCalls * 10) / 10).padStart(6)} ${fmtTurns(Math.round(r.meanLookups * 10) / 10).padStart(8)} ` +
+        `${fmtTurns(Math.round(r.meanServersStarted * 10) / 10).padStart(8)}  ${vs}`
     );
   }
   console.log(
-    rounds > 1
-      ? `\nMean of correct runs over ${rounds} cold-cache rounds per strategy.\n`
-      : `\nSingle cold-cache turn per strategy; one sample is noisy. Use --rounds 3 before drawing conclusions.\n`
+    `\n"servers" is how many fixture server processes the run launched (direct starts all ${Object.keys(FIXTURE_SERVERS).length} eagerly; ` +
+      `lazygate starts only what the task touches). "net in" and "calls" are means over strategies' tasks; "vs direct" sums net input over paired tasks.\n`
   );
+
+  if (jsonOut) {
+    const doc = {
+      generatedAt: new Date().toISOString(),
+      mode: coldDiscovery ? "cold" : "known",
+      rounds,
+      includeCatalog,
+      baselineInputPerCall: baselinePerCall,
+      tasks: Object.fromEntries(
+        selectedTasks.map((id) => [id, { title: TASKS[id].title, expected: expectedByTask[id], rows: rowsByTask[id] }])
+      ),
+      summary,
+    };
+    writeFileSync(resolve(jsonOut), JSON.stringify(doc, null, 2) + "\n");
+    console.log(`Wrote ${jsonOut}`);
+  }
+  rmSync(workDir, { recursive: true, force: true });
   process.exit(0);
 }
 

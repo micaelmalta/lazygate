@@ -31,7 +31,9 @@ Then update the numbers in the "What the published run shows" list in `docs/refe
 2. Tag and push: `git tag v1.2.3 && git push origin main --tags`.
 3. `.github/workflows/release.yml` checks that the tag matches `package.json`, runs typecheck, tests,
    the package check and the benchmark gate, then runs `npm publish --provenance --access public`.
-   It needs an `NPM_TOKEN` repository secret (an npm automation token).
+   It needs an `NPM_TOKEN` repository secret (an npm automation token). The package is MIT
+   licensed (`LICENSE`, and `license` in `package.json`); `npm run pack:check` fails if `LICENSE`
+   is missing from the tarball.
 
 Publishing by hand works too: `npm publish --access public` (`prepublishOnly` builds and runs the
 package check; `prepack` rebuilds `dist/` from scratch).

@@ -207,3 +207,45 @@ describe("buildChildEnv", () => {
     expect(env.PATH).toBe("/own");
   });
 });
+
+describe("ToolIndex revision and ranking cache", () => {
+  it("changes only for a server whose tools changed, and when the file is rewritten elsewhere", () => {
+    dir = mkdtempSync(join(tmpdir(), "cb-idx-rev-"));
+    const path = join(dir, "tool-index.json");
+    const idx = new ToolIndex(path);
+    const a = server();
+    const b = server({ args: ["b.js"] });
+    const r0 = idx.revision("a");
+    idx.record("a", a, [{ name: "ping", description: "Ping" }]);
+    const r1 = idx.revision("a");
+    expect(r1).not.toBe(r0);
+    expect(idx.revision("b")).toBe(r0);
+    // Recording the same tools again is not a change.
+    expect(idx.record("a", a, [{ name: "ping", description: "Ping" }])).toBe(false);
+    expect(idx.revision("a")).toBe(r1);
+    idx.record("a", a, [{ name: "ping", description: "Ping the host" }]);
+    expect(idx.revision("a")).not.toBe(r1);
+    idx.record("b", b, [{ name: "pong", description: "Pong" }]);
+    const before = idx.revision("b");
+    idx.rename("b", "c");
+    expect(idx.revision("c")).not.toBe(before);
+    // Another process rewrites the file.
+    const other = new ToolIndex(path);
+    other.record("c", server({ args: ["b.js"] }), [{ name: "pong", description: "Changed elsewhere" }]);
+    utimesSync(path, new Date(), new Date(Date.now() + 5_000));
+    expect(idx.revision("c")).not.toBe(before);
+  });
+
+  it("the router re-ranks as soon as the index records different tools", () => {
+    const cfg = server({ description: "internal console", keywords: [] });
+    const filler = server({ description: "weather forecasts", keywords: ["weather"], args: ["w.js"] });
+    const index = new ToolIndex();
+    index.record("acme", cfg, [{ name: "refund_payment", description: "Refund a payment" }]);
+    const router = new ToolRouter({ acme: cfg, weather: filler }, undefined, index);
+    expect(router.rank("refund payment")[0]?.name).toBe("acme");
+    expect(router.rank("rotate keys")).toEqual([]);
+    index.record("acme", cfg, [{ name: "rotate_keys", description: "Rotate API keys" }]);
+    expect(router.rank("rotate keys")[0]?.name).toBe("acme");
+    expect(router.rank("refund payment")).toEqual([]);
+  });
+});

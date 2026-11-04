@@ -305,6 +305,7 @@ export class ToolRouter {
         keywords: config.keywords,
         tools: learnedFor(name, config),
         sources: [config, learnedFor(name, config)],
+        ...(this.toolIndex ? { version: this.toolIndex.revision(name) } : {}),
       });
     }
     const hits = this.ranker.search(query, entries, { usage: options.usage ?? this.usage });

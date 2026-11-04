@@ -155,3 +155,7 @@ server unless you pass `--include-catalog`. Setup guide: [docs/gateway.md](docs/
 | [Releasing](docs/release.md) | npm package contents, release checks, publishing |
 | [Upgrading from context-broker](docs/reference.md#upgrading-from-context-broker) | The old name still works; installs upgrade in place |
 | [CLAUDE.md](CLAUDE.md) | Source map for contributors |
+
+## License
+
+[MIT](LICENSE) © Micael Malta
