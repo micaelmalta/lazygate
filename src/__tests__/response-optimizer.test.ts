@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
   automaticCandidates,
   estimateTokens,
+  largestFit,
   optimizeToolResult,
   parseResponseOptimizationConfig,
   type OptimizationContext,
@@ -483,6 +484,74 @@ describe("adaptive response optimization", () => {
 
     expect(optimized.result).toBe(original);
     expect(optimized.metrics).toMatchObject({ mode: "adaptive", selectedMode: "off", changed: false });
+  });
+});
+
+describe("budget truncation search", () => {
+  it("finds the same boundary as exhaustive search for any guess, including bad ones", () => {
+    for (let n = 0; n <= 40; n++) {
+      for (let limit = 0; limit <= n; limit++) {
+        const fits = (k: number) => k <= limit;
+        const expected = limit;
+        expect(largestFit(n, fits)).toBe(expected);
+        for (const guess of [undefined, 0, 1, Math.floor(n / 2), n - 1, n, n + 5, limit, limit - 1, limit + 1]) {
+          expect(largestFit(n, fits, guess)).toBe(expected);
+        }
+      }
+    }
+  });
+
+  it("probes near the guess instead of bisecting the whole input", () => {
+    const probes: number[] = [];
+    const limit = 5_000;
+    const found = largestFit(1_000_000, (k) => (probes.push(k), k <= limit), 4_800);
+    expect(found).toBe(limit);
+    expect(probes.length).toBeLessThan(30);
+    expect(Math.max(...probes)).toBeLessThan(50_000);
+  });
+
+  // A word-based counter: tokens do not scale with characters, so the character guess is off.
+  const wordTokenizer: Tokenizer = {
+    name: "word_counter",
+    countTokens: (text) => (text.match(/[A-Za-z0-9]+|[^\sA-Za-z0-9]/g) ?? []).length,
+  };
+
+  it("fills the budget for arrays, objects, and text with a non-linear tokenizer", async () => {
+    const maxTokens = 400;
+    const rows = Array.from({ length: 500 }, (_, i) => ({ id: i, label: `row ${i}`, note: "alpha beta gamma ".repeat(i % 7) }));
+    const cases: Record<string, unknown> = {
+      array: rows,
+      object: Object.fromEntries(rows.map((row) => [`key${row.id}`, row])),
+      text: rows.map((row) => `${row.id}: ${row.note}`).join("\n"),
+    };
+    for (const [name, value] of Object.entries(cases)) {
+      const original =
+        typeof value === "string"
+          ? { content: [{ type: "text", text: value }] }
+          : { content: [], structuredContent: value };
+      const optimized = await optimizeToolResult(original, { mode: "off", maxTokens, includeMetadata: false }, context, undefined, wordTokenizer);
+      const used = estimateTokens(optimized.result, wordTokenizer);
+      expect({ name, fits: used <= maxTokens }).toEqual({ name, fits: true });
+      expect({ name, filled: used >= maxTokens * 0.8 }).toEqual({ name, filled: true });
+      expect(optimized.metrics.complete).toBe(false);
+    }
+  });
+
+  it("keeps the longest array prefix that fits", async () => {
+    const maxTokens = 300;
+    const rows = Array.from({ length: 200 }, (_, i) => ({ id: i, text: "word ".repeat(i % 9) }));
+    const optimized = await optimizeToolResult(
+      { content: [], structuredContent: rows },
+      { mode: "off", maxTokens, includeMetadata: false },
+      context,
+      undefined,
+      wordTokenizer
+    );
+    const kept = (optimized.result.structuredContent as unknown[]).length;
+    const withNext = { ...optimized.result, structuredContent: rows.slice(0, kept + 1) };
+    expect(estimateTokens(optimized.result, wordTokenizer)).toBeLessThanOrEqual(maxTokens);
+    expect(kept).toBeGreaterThan(0);
+    expect(estimateTokens(withNext, wordTokenizer)).toBeGreaterThan(maxTokens - 40);
   });
 });
 
