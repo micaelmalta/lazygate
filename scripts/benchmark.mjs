@@ -1450,6 +1450,13 @@ async function runClaudeTask(mcpConfig, { appendFile, prompt }) {
  * Prefer a final line that is exactly two integers (what we asked for); fall back to
  * finding both numbers anywhere so minor formatting still counts as correct.
  */
+/** The "count total" line the model was asked for, or the start of its first line when it gave prose. */
+function answerSummary(answer) {
+  const lines = String(answer).trim().split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  const numeric = lines.findLast((l) => /^(\d+)\s+(\d+)$/.test(l));
+  return numeric ?? (lines[0] ?? "").slice(0, 60);
+}
+
 function answerMatches(answer, expected) {
   const lines = String(answer)
     .trim()
@@ -1538,7 +1545,7 @@ if (tasksOnly) {
       rounds > 1 ? `correct ${r.correctRuns}/${r.runs}` : r.correctRuns ? "correct" : "WRONG";
     console.log(
       `${r.label.padEnd(14)} input ${fmtNumTask(r.totalInput).padStart(9)}  turns ${fmtTurns(r.turns).padStart(4)}  ` +
-        `${(r.durationMs / 1000).toFixed(1).padStart(5)}s  ${verdict}  answer: ${r.answer.trim().slice(0, 60)}${range}`
+        `${(r.durationMs / 1000).toFixed(1).padStart(5)}s  ${verdict}  answer: ${answerSummary(r.answer)}${range}`
     );
   }
   const direct = taskRows.find((r) => r.id === "direct");
@@ -1549,9 +1556,10 @@ if (tasksOnly) {
 
   const deltaLine = (label, base, other) => {
     if (!fair(base) || !fair(other)) return null;
-    const d = base.totalInput - other.totalInput;
-    const pct = base.totalInput ? ((d / base.totalInput) * 100).toFixed(1) : "0";
-    return `${label}: ${d >= 0 ? "−" + fmtNumTask(d) : "+" + fmtNumTask(-d)} input tokens (${pct}%)`;
+    const d = other.totalInput - base.totalInput;
+    const pct = base.totalInput ? Math.abs((d / base.totalInput) * 100).toFixed(1) : "0.0";
+    const sign = d > 0 ? "+" : d < 0 ? "−" : "±";
+    return `${label}: ${sign}${fmtNumTask(Math.abs(d))} input tokens (${sign}${pct}%)`;
   };
 
   const lines = [

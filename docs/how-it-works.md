@@ -200,7 +200,21 @@ the 654,070 outlier.
 The table predates a fourth strategy, `call_tool+opt`: `call_tool` with response optimization on
 (`defaultMode: "adaptive"`, no per-tool policy) and the model passing `fields` for `get_ticket`.
 It is the end-to-end check for response optimization: the answer must still be correct, and its
-delta against `call_tool` is what optimization saved across the whole task.
+delta against `call_tool` is what optimization saved across the whole task. A fixture-only run
+(`lazygate benchmark --tasks --rounds 3`, no `--include-catalog`, so `direct` carries just the
+tickets server):
+
+| Strategy | Input tokens (range) | Turns | Time |
+|---|---:|---:|---:|
+| `direct` | 223,270 (223,261–223,287) | 10 | 6.2 s |
+| `call_tool` | 228,085 (228,065–228,105) | 10 | 6.0 s |
+| `call_tool+opt` | 210,774 (210,730–210,812) | 10 | 6.2 s |
+| `run_chain` | 208,408 (208,384–208,429) | 3 | 4.4 s |
+
+All 12 runs were correct. Optimization saved 7.6% against `call_tool` with no extra turns and no
+`get_result` follow-ups, since the requested fields were all the task needed. With a single small
+server, `call_tool` costs 2.2% more than `direct` (the meta-tool schemas outweigh one server's
+tools); the schema savings in the table above appear only once there are many servers.
 
 Each run is a single cold-cache turn, so cost figures overstate steady-state savings. Codex keeps a
 large fixed system prompt and does not surface tool schemas the same way, so MCP savings show up
