@@ -2,6 +2,7 @@ import { describe, it, expect } from "@jest/globals";
 import { longestFittingPrefix, type PrefixFitStats } from "../prefix-fit.js";
 import { optimizeToolResult, type Tokenizer } from "../response-optimizer.js";
 import { textWithinBudget } from "../result-handles.js";
+import { loadTokenizer } from "../tokenizers.js";
 
 /** Deterministic stand-in for a BPE tokenizer: word runs and punctuation each cost one token. */
 const wordTokens = (text: string): number => (text.match(/[A-Za-z0-9]+|[^A-Za-z0-9\s]/g) ?? []).length;
@@ -44,6 +45,54 @@ describe("longestFittingPrefix", () => {
     expect(stats.probes).toBeLessThan(30);
     // Plain bisection would start at length / 2; every probe here stays within a small multiple of the answer.
     expect(stats.probedChars).toBeLessThan(best * 30);
+  });
+});
+
+describe("longestFittingPrefix with a non-monotone measure", () => {
+  it("still returns a length that was measured to fit, never one that overshoots", () => {
+    // Every 7th prefix is cheap (as when one more character completes a merge), so the fitting set is not a prefix of the range.
+    const measure = (n: number): number => (n % 7 === 0 ? Math.floor(n / 6) : Math.ceil(n / 3));
+    for (const budget of [3, 10, 40, 333]) {
+      const got = longestFittingPrefix(5_000, budget, measure);
+      expect(measure(got)).toBeLessThanOrEqual(budget);
+      expect(got).toBeLessThanOrEqual(bruteForce(5_000, budget, measure));
+    }
+  });
+});
+
+describe("longestFittingPrefix with the o200k_base tokenizer", () => {
+  const samples: Record<string, string> = {
+    punctuation: Array.from({ length: 20 }, (_, i) => `{"k":${i},"v":[${i},"~!@#$%^&*()"],"p":"a/b?x=${i}&y=%E2%9C%93"}`).join(","),
+    unicode: Array.from({ length: 20 }, (_, i) => `日本語のテキスト ${i} — naïve café 🚀✨ Привет мир 😀👍🏽 العربية`).join("\n"),
+    whitespace: Array.from({ length: 20 }, (_, i) => `x${i}${" ".repeat(i % 9)}\n\n\t${"-".repeat(i % 5)}`).join(""),
+  };
+
+  it("matches an exhaustive search at punctuation, whitespace and multi-byte boundaries", async () => {
+    const tokenizer = await loadTokenizer("o200k_base");
+    expect(tokenizer).toBeDefined();
+    for (const [name, text] of Object.entries(samples)) {
+      const measure = (n: number): number => tokenizer!.countTokens(text.slice(0, n));
+      for (const budget of [1, 5, 20, 60]) {
+        const got = longestFittingPrefix(text.length, budget, measure);
+        expect({ name, budget, fits: measure(got) <= budget }).toEqual({ name, budget, fits: true });
+        expect({ name, budget, got }).toEqual({ name, budget, got: bruteForce(text.length, budget, measure) });
+      }
+    }
+  });
+
+  it("truncates through optimizeToolResult within budget even where a character splits a surrogate pair", async () => {
+    const tokenizer = (await loadTokenizer("o200k_base"))!;
+    const text = "🚀✨😀👍🏽 ".repeat(400);
+    const out = await optimizeToolResult(
+      { content: [{ type: "text", text }] },
+      { mode: "off", maxTokens: 100 },
+      { serverName: "s", toolName: "t", source: "call_tool" as const },
+      undefined,
+      tokenizer
+    );
+    expect(out.metrics.complete).toBe(false);
+    expect(out.metrics.optimizedTokens).toBeLessThanOrEqual(100);
+    expect(out.metrics.optimizedTokens).toBeGreaterThan(60);
   });
 });
 

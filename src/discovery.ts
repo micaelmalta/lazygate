@@ -121,7 +121,20 @@ function buildDoc(entry: DiscoveryEntry): Doc {
 
 interface CachedDoc {
   sources: readonly object[];
+  /** Cheap content fingerprint, so editing a description or keywords in place still rebuilds the document. */
+  shallow: string;
   doc: Doc;
+}
+
+/**
+ * Identity of an entry's searchable text that costs far less than rebuilding the document:
+ * description, keywords and the number of learned tools. Source object identity (the cache's main
+ * key) covers replaced configs and tool lists; this covers the common in-place edits to a config.
+ * Mutating a learned tool's own name or description in place is NOT detected: treat tool lists as
+ * immutable (the ToolIndex always stores a new array when it records tools).
+ */
+function shallowKey(entry: DiscoveryEntry): string {
+  return `${entry.description}\u0000${entry.keywords.join("\u0001")}\u0000${entry.tools.length}`;
 }
 
 export class DiscoveryRanker {
@@ -205,9 +218,10 @@ export class DiscoveryRanker {
 
   private docFor(entry: DiscoveryEntry): Doc {
     const cached = this.docs.get(entry.name);
-    if (cached && sameSources(cached.sources, entry.sources)) return cached.doc;
+    const shallow = shallowKey(entry);
+    if (cached && cached.shallow === shallow && sameSources(cached.sources, entry.sources)) return cached.doc;
     const doc = buildDoc(entry);
-    this.docs.set(entry.name, { sources: entry.sources, doc });
+    this.docs.set(entry.name, { sources: entry.sources, shallow, doc });
     this.stats = undefined;
     return doc;
   }

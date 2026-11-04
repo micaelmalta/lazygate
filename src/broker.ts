@@ -96,9 +96,10 @@ export interface BrokerDeps {
   /** Called when get_result reads a handle, with the tool whose response it holds. */
   onResultHandleRead?: (origin: ResultHandleOrigin) => void;
   /**
-   * `discover_tools` loads the single clearly best server (when it needs no credentials or
-   * interactive login) so the reply can carry its call signatures; default on. The agent was
-   * about to load it anyway, and this saves it the describe round trip.
+   * Default for servers that do not set `previewOnDiscover` themselves: `discover_tools` starts
+   * the single clearly best server (when it needs no credentials or interactive login) so the
+   * reply can carry its call signatures. Default off: discovery never starts a process unless a
+   * server opts in.
    */
   previewOnDiscover?: boolean;
 }
@@ -396,7 +397,7 @@ export function createBroker({
   tokenizer: injectedTokenizer,
   onOptimizationMetrics,
   onResultHandleRead,
-  previewOnDiscover = true,
+  previewOnDiscover = false,
 }: BrokerDeps) {
   // Each broker instance belongs to one stdio client or gateway session; result handles never
   // cross that boundary or survive a process restart.
@@ -705,11 +706,11 @@ export function createBroker({
    * need credentials or an interactive OAuth login; any failure just means no preview.
    */
   async function previewTopServer(ranked: ReturnType<ToolRouter["rank"]>): Promise<void> {
-    if (!previewOnDiscover) return;
     const top = clearTopMatch(ranked);
     if (!top || manager.listActive().includes(top.name)) return;
     const cfg = router.getConfig(top.name);
-    if (!cfg || cfg.oauth || (access?.missing?.(top.name, cfg) ?? []).length > 0) return;
+    if (!cfg || !(cfg.previewOnDiscover ?? previewOnDiscover)) return;
+    if (cfg.oauth || (access?.missing?.(top.name, cfg) ?? []).length > 0) return;
     await ensureActive(top.name, cfg);
   }
 

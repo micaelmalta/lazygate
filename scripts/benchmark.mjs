@@ -1361,6 +1361,8 @@ function ticketsServerEntry() {
     args: [ticketsServer],
     inheritEnv: false,
     toolChain: true,
+    // The fixture is safe to start, so cold discovery can show its signatures in one turn.
+    previewOnDiscover: true,
   };
 }
 

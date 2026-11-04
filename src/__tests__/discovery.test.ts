@@ -63,14 +63,73 @@ describe("DiscoveryRanker", () => {
     expect(ranker.search("report builder", mixed, { usage: { weak: 1_000_000 } })[0]?.name).toBe("strong");
   });
 
-  it("rebuilds a document only when its sources change", () => {
+  it("reuses a document while its sources and text are unchanged", () => {
     const ranker = new DiscoveryRanker();
     const sources = [{}, []];
     const first: DiscoveryEntry = { name: "x", description: "alpha", keywords: [], tools: [], sources };
     expect(ranker.search("alpha", [first])).toHaveLength(1);
-    // Same sources → cached document, even if the description text passed in differs.
-    expect(ranker.search("alpha", [{ ...first, description: "beta" }])).toHaveLength(1);
-    expect(ranker.search("alpha", [{ ...first, description: "beta", sources: [{}, []] }])).toHaveLength(0);
+    expect(ranker.search("alpha", [{ ...first }])).toHaveLength(1);
+    expect(ranker.search("beta", [{ ...first }])).toHaveLength(0);
+  });
+
+  describe("cache invalidation", () => {
+    const peer = (): DiscoveryEntry => entry("peer", "something unrelated", ["other"]);
+
+    it("rebuilds when the sources are replaced", () => {
+      const ranker = new DiscoveryRanker();
+      const first: DiscoveryEntry = { name: "x", description: "alpha", keywords: [], tools: [], sources: [{}, []] };
+      expect(ranker.search("alpha", [first, peer()])).toHaveLength(1);
+      const replaced: DiscoveryEntry = { ...first, description: "beta", sources: [{}, []] };
+      expect(ranker.search("alpha", [replaced, peer()])).toHaveLength(0);
+      expect(ranker.search("beta", [replaced, peer()])).toHaveLength(1);
+    });
+
+    it("notices a description or keyword edited in place, with the same name and sources", () => {
+      const ranker = new DiscoveryRanker();
+      const config = { description: "alpha tracker", keywords: ["alpha"] };
+      const learned: Array<{ name: string; description: string }> = [];
+      const view = (): DiscoveryEntry => ({ name: "x", description: config.description, keywords: config.keywords, tools: learned, sources: [config, learned] });
+      expect(ranker.search("alpha", [view(), peer()]).map((h) => h.name)).toEqual(["x"]);
+      config.description = "gamma tracker";
+      config.keywords = ["gamma"];
+      expect(ranker.search("alpha", [view(), peer()])).toEqual([]);
+      expect(ranker.search("gamma", [view(), peer()]).map((h) => h.name)).toEqual(["x"]);
+    });
+
+    it("notices tools added to a learned list in place, and statistics follow the new corpus", () => {
+      const ranker = new DiscoveryRanker();
+      const config = { description: "ops console", keywords: ["ops"] };
+      const learned: Array<{ name: string; description: string }> = [];
+      const view = (): DiscoveryEntry => ({ name: "x", description: config.description, keywords: config.keywords, tools: learned, sources: [config, learned] });
+      expect(ranker.search("rotate_credentials", [view(), peer()])).toEqual([]);
+      learned.push({ name: "rotate_credentials", description: "Rotate service credentials" });
+      const [hit] = ranker.search("rotate_credentials", [view(), peer()]);
+      expect(hit?.name).toBe("x");
+      expect(hit?.exactTool).toBe(true);
+    });
+
+    it("replacing a learned tool list is always seen, even with the same tool count", () => {
+      const ranker = new DiscoveryRanker();
+      const config = { description: "ops console", keywords: ["ops"] };
+      const make = (toolName: string): DiscoveryEntry => {
+        const tools = [{ name: toolName, description: "Does a thing" }];
+        return { name: "x", description: config.description, keywords: config.keywords, tools, sources: [config, tools] };
+      };
+      expect(ranker.search("rotate_credentials", [make("rotate_credentials"), peer()])[0]?.name).toBe("x");
+      expect(ranker.search("rotate_credentials", [make("flush_cache"), peer()])).toEqual([]);
+    });
+
+    it("recomputes corpus statistics when a document changes without the server set changing", () => {
+      const ranker = new DiscoveryRanker();
+      const noisy = (n: number): DiscoveryEntry[] =>
+        Array.from({ length: n }, (_, i) => ({ name: `s${i}`, description: "report builder", keywords: ["report"], tools: [], sources: [{}, []] }));
+      const catalog = [...noisy(3), entry("target", "report analytics", ["analytics"])];
+      const before = ranker.search("analytics", catalog)[0]!.relevance;
+      // Every other server now also mentions "analytics": the term becomes common, so its weight drops.
+      const widened = catalog.map((e) => (e.name === "target" ? e : { ...e, description: "report builder analytics", sources: [{}, []] }));
+      const after = ranker.search("analytics", widened).find((h) => h.name === "target")!.relevance;
+      expect(after).toBeLessThan(before);
+    });
   });
 });
 

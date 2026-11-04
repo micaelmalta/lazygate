@@ -79,6 +79,7 @@ half-written file keeps the previous config.
 | `autoActivate` | `false` (default): spawned on `activate_server` or auto-activation. `true`: spawned when lazygate starts, in the background after it has connected, so a slow server never delays startup. Use `true` for servers you reach every session; keep heavy ones (`docker build`, `npm install` on first launch) `false` |
 | `expose` | which tools merge into the broker's `tools/list` after activate: omit / `"none"` (default) — none, use `describe_tool` / `call_tool`; `"all"` — every schema (legacy); string array — allowlist of tool names (bare upstream names). **Pin** the few tools an agent uses in nearly every session (with `autoActivate: true`): they are callable by name with no `discover_tools` / `describe_tool` turns, at the price of their schemas in every turn and a `tools/list_changed` prompt-cache hit when the set changes. Leave everything else on `"none"`. See [When to pin](#when-to-pin-expose) |
 | `namespaceTools` | when `true`, expose and accept tools as `server__tool` so identical upstream names across servers do not collide. Default `false`. Gateway-wide: `lazygate serve --namespace-tools` (per-server `true`/`false` overrides) |
+| `previewOnDiscover` | `true` lets `discover_tools` start this server when it is a clear match and has no cached signatures yet, so the reply can show them. Default off: discovery has no side effects. See *Preview of a clear match* under discovery |
 | `toolChain` | lets `run_chain` scripts call this server's tools. `true` allows every tool; an array allows only those bare tool names. Omitted = no script access (use `call_tool`). See [Tool chain](#tool-chain) |
 | `auth`, `groups` | gateway mode only — credential sources and access policy; see [gateway.md](gateway.md) |
 | `local` | gateway mode: hide from remote users / refuse activate (needs the caller's machine) |
@@ -405,18 +406,20 @@ tool name keeps resolving to the same server.
 example `get_order_status(args: { id: string })`, so the agent can `call_tool` right away instead of
 spending a `describe_tool` turn. Tools are chosen by tool-name hits first, then by name/description
 overlap with the query (`matchTools` in `discovery.ts`). The signature comes from the live schema
-when the server is already active, otherwise from the signature learned in `tool-index.json`;
-the signature learned in `tool-index.json`. A server with four tools or fewer shows all of them
+when the server is already active, otherwise from the signature learned in `tool-index.json`. A server with four tools or fewer shows all of them
 (the tools the query matched first), because that is cheaper than another lookup turn.
 
-**Preview of a clear match.** When the best match is clear and the server is inactive,
-`discover_tools` loads it first so the reply can carry its signatures even on a fresh install with an
-empty tool index (the agent was about to load it anyway: `call_tool` and `describe_tool` activate on
-demand). It never does this for a server that needs credentials, uses OAuth, or ties with a
-runner-up, and a failed start just means no signatures. For a tool-chain server the reply also says
-to call `servers.<server>.<tool>(args)` in `run_chain` scripts, so no `describe_tool` turn is needed
-for the stubs. Embedders can switch it off with `previewOnDiscover: false` in `createBroker`.
-Without the preview, a server that has never been activated simply
+**Preview of a clear match (opt-in).** `discover_tools` never starts a server by default: it is a
+read-only lookup, so it answers from the config and `tool-index.json` only. After a server has been
+activated once, its signatures are in the index and discovery shows them with nothing running. To
+show signatures for a server that has never been activated (an empty index, a cold install), set
+`"previewOnDiscover": true` on that server in `servers.json` (or pass `previewOnDiscover: true` to
+`createBroker` for every server; a per-server `false` still wins). With it on, a *clear* match on an
+inactive server (no runner-up within 0.85x of its relevance, no OAuth, no missing credentials) is
+loaded first, which costs the server's startup time and runs its process; a failed start just means
+no signatures. Only enable it for servers that are cheap and safe to start. For a tool-chain server
+the reply also says to call `servers.<server>.<tool>(args)` in `run_chain` scripts, so no
+`describe_tool` turn is needed for the stubs. Without the preview, a server that has never been activated simply
 shows none. Each signature is capped at 360 characters (a longer one ends in `…`).
 
 **Self-correcting `call_tool`.** When the upstream rejects the arguments (an `isError` result or a
@@ -639,8 +642,9 @@ dwarfs the schema and result differences. The benchmark therefore measures that 
 eight `get_ticket` calls into one response still reports ten), and shows **net** input tokens =
 raw − calls × overhead next to the raw figure. Compare strategies on net tokens and API calls.
 
-A run on the fixture server with three rounds per strategy (all answers correct), after the
-discover preview above:
+A run on the fixture server with three rounds per strategy (all answers correct), with the
+fixture entry opted in to the discover preview (`previewOnDiscover: true`; the benchmark sets it
+because the fixture is safe to start):
 
 | Strategy | API calls known tools | API calls cold | Net input cold | vs `direct` |
 |---|--:|--:|--:|--:|
@@ -649,7 +653,7 @@ discover preview above:
 | `call_tool+opt` | 3 | 4 | 14,751 | −38% |
 | `run_chain` | 3 | 3 | 8,695 | −63% |
 
-Before the preview, a cold `run_chain` took 4 API calls and a cold `call_tool` 5, because the model
+Without the preview (the default for other servers; cold discovery then lists no signatures until the server has been used once), a cold `run_chain` took 4 API calls and a cold `call_tool` 5, because the model
 followed the hint to `activate_server`, then `describe_tool`. These are single-machine, three-round
 numbers on a one-server catalog; use `--include-catalog` for a realistic `direct` baseline.
 

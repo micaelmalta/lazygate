@@ -57,6 +57,8 @@ const ServerSchema = z
     namespaceTools: z.boolean().optional(),
     /** Let run_chain scripts call this server's tools (see ServerConfig.toolChain). */
     toolChain: z.union([z.boolean(), z.array(z.string())]).optional(),
+    /** Let discover_tools start this server to show its signatures (see ServerConfig.previewOnDiscover). */
+    previewOnDiscover: z.boolean().optional(),
   })
   .passthrough()
   .refine((c) => Boolean(c.command) || Boolean(c.url), {

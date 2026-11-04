@@ -5,8 +5,14 @@
 // 1 MB response with a 2,000-token budget tokenizes ~500 KB before narrowing in. Here every probe
 // stays near the answer: the first guess comes from a characters-per-token ratio, each later guess
 // is re-aimed with the ratio measured on the previous probe, and once the answer is bracketed the
-// search bisects, so the worst case stays logarithmic. The result is exact for any monotone
-// measure: it is always a length that was measured to fit.
+// search bisects, so the worst case stays logarithmic.
+//
+// Contract: the result is always 0 or a length that was measured to fit the budget, so truncation
+// can never overshoot. It is the exact longest prefix only while the measure is non-decreasing in
+// the prefix length. Real tokenizers are monotone except at merge boundaries (a multi-byte
+// character or a punctuation run can tokenize one token cheaper when one more character
+// completes it); there the search may return a slightly shorter prefix than the true maximum,
+// never a longer one. Tests pin both properties, including against o200k_base.
 
 /** Characters per token assumed before anything has been measured (matches chars_per_4). */
 const INITIAL_CHARS_PER_TOKEN = 4;
@@ -32,8 +38,9 @@ export interface PrefixFitStats {
 }
 
 /**
- * Largest `n` in `[0, length]` with `measure(n) <= budget`, assuming `measure` is non-decreasing in
- * `n`. `measure(0)` is taken to fit (callers check the empty case first); `measure(n)` is called at
+ * Largest `n` in `[0, length]` with `measure(n) <= budget` when `measure` is non-decreasing in `n`;
+ * for any other measure, some `n` that was measured to fit (possibly not the largest) or 0.
+ * `measure(0)` is taken to fit (callers check the empty case first); `measure(n)` is called at
  * most once per distinct `n`.
  *
  * @param seedCharsPerToken optional hint for the first guess (for example a ratio observed while

@@ -261,7 +261,7 @@ describe("createBroker", () => {
 
       describe("preview of the clearly best server", () => {
         it("loads it and shows its signatures even when nothing was indexed yet", async () => {
-          const small = server({ description: "Support tickets: list and fetch", keywords: ["tickets", "support"], command: "node", toolChain: true });
+          const small = server({ description: "Support tickets: list and fetch", keywords: ["tickets", "support"], command: "node", toolChain: true, previewOnDiscover: true });
           router = new ToolRouter({ tickets: small, wiki: server({ description: "Wiki pages", keywords: ["wiki"] }) });
           mk = makeManager();
           mk.manager.activate.mockImplementation(async (name: string) => {
@@ -287,13 +287,13 @@ describe("createBroker", () => {
           const twin = server({ description: "Order management", keywords: ["orders"], command: "node" });
           mk = makeManager();
           router = new ToolRouter({ orders: orders, orders2: twin });
-          broker = createBroker({ router, manager: mk.manager as unknown as ProcessManager, skillRouter: null });
+          broker = createBroker({ router, manager: mk.manager as unknown as ProcessManager, skillRouter: null, previewOnDiscover: true });
           await broker.callTool("discover_tools", { query: "check the status of an order" });
           expect(mk.manager.activate).not.toHaveBeenCalled();
 
           const oauth = server({ description: "Order management", keywords: ["orders"], type: "http", url: "https://example.test/mcp", oauth: true });
           router = new ToolRouter({ orders: oauth });
-          broker = createBroker({ router, manager: mk.manager as unknown as ProcessManager, skillRouter: null });
+          broker = createBroker({ router, manager: mk.manager as unknown as ProcessManager, skillRouter: null, previewOnDiscover: true });
           await broker.callTool("discover_tools", { query: "orders" });
           expect(mk.manager.activate).not.toHaveBeenCalled();
 
@@ -302,6 +302,7 @@ describe("createBroker", () => {
             router,
             manager: mk.manager as unknown as ProcessManager,
             skillRouter: null,
+            previewOnDiscover: true,
             access: { canUse: () => true, prepare: () => undefined, missing: () => ["API_KEY"] } as never,
           });
           const r = await broker.callTool("discover_tools", { query: "orders" });
@@ -309,11 +310,31 @@ describe("createBroker", () => {
           expect(text(r)).toContain("needs credentials");
         });
 
+        it("never starts a server by default, and a server can opt in or out", async () => {
+          const mkBroker = (cfg: ReturnType<typeof server>, previewOnDiscover?: boolean) => {
+            mk = makeManager();
+            router = new ToolRouter({ orders: cfg });
+            broker = createBroker({ router, manager: mk.manager as unknown as ProcessManager, skillRouter: null, ...(previewOnDiscover === undefined ? {} : { previewOnDiscover }) });
+          };
+          mkBroker(server({ description: "Order management", keywords: ["orders"], command: "node" }));
+          const cold = text(await broker.callTool("discover_tools", { query: "orders" }));
+          expect(mk.manager.activate).not.toHaveBeenCalled();
+          expect(cold).toContain("○ inactive | orders");
+
+          mkBroker(server({ description: "Order management", keywords: ["orders"], command: "node", previewOnDiscover: true }));
+          await broker.callTool("discover_tools", { query: "orders" });
+          expect(mk.manager.activate).toHaveBeenCalledTimes(1);
+
+          mkBroker(server({ description: "Order management", keywords: ["orders"], command: "node", previewOnDiscover: false }), true);
+          await broker.callTool("discover_tools", { query: "orders" });
+          expect(mk.manager.activate).not.toHaveBeenCalled();
+        });
+
         it("still answers when the preview activation fails", async () => {
           mk = makeManager();
           mk.manager.activate.mockRejectedValue(new Error("spawn failed"));
           router = new ToolRouter({ orders });
-          broker = createBroker({ router, manager: mk.manager as unknown as ProcessManager, skillRouter: null });
+          broker = createBroker({ router, manager: mk.manager as unknown as ProcessManager, skillRouter: null, previewOnDiscover: true });
           const r = await broker.callTool("discover_tools", { query: "orders" });
           expect(r.isError).toBeUndefined();
           expect(text(r)).toContain("orders");

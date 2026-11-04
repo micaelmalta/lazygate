@@ -106,6 +106,13 @@ export interface ServerConfig {
    * - string[]: allowlist of upstream (bare) tool names
    */
   toolChain?: boolean | string[];
+  /**
+   * Let `discover_tools` start this server (when it is the clearly best, credential-free match) so
+   * the reply can carry its call signatures. Default: off, so a discovery request never starts a
+   * process; set true for servers that are cheap and safe to start. Once the server has run, its
+   * signatures are cached in tool-index.json and discovery shows them without starting anything.
+   */
+  previewOnDiscover?: boolean;
 }
 
 /** Effective credential scope. HTTP servers default to per-user; stdio defaults to shared. */
