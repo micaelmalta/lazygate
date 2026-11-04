@@ -1429,6 +1429,7 @@ export const UI_JS = String.raw`(function () {
     var toolsOut = h("div");
     var usersOut = h("div");
     var usersCard = null;
+    var recsOut = h("div");
     var rangeEl = h("p", { class: "muted" });
 
     function stop() {
@@ -1504,6 +1505,16 @@ export const UI_JS = String.raw`(function () {
         clear(usersOut);
         usersOut.appendChild(table(["User", "Calls", "Used", "Saved", "↓", "Optimizer calls", "Adaptive selections", "Fallbacks", "Incomplete", "Avg time"], bucketRows(u.byUser), "No user traffic yet."));
       }
+      clear(recsOut);
+      recsOut.appendChild(table(["Tool", "Suggestion", "Why", "Calls", "Policy"], (u.recommendations || []).map(function (r) {
+        return [
+          h("code", null, r.tool),
+          r.action.replace(/_/g, " "),
+          r.detail,
+          String(r.calls),
+          r.suggestedPolicy ? h("code", null, JSON.stringify(r.suggestedPolicy)) : "—"
+        ];
+      }), "No suggestions yet (each tool needs at least 5 successful calls in this window)."));
       status.textContent = "Updated " + new Date().toLocaleTimeString();
     }
 
@@ -1527,6 +1538,10 @@ export const UI_JS = String.raw`(function () {
         rangeEl));
       root.appendChild(h("div", { class: "card" }, h("h2", null, "Top servers"), serversOut));
       root.appendChild(h("div", { class: "card" }, h("h2", null, "Top tools"), toolsOut));
+      root.appendChild(h("div", { class: "card" },
+        h("h2", null, "Optimization suggestions"),
+        h("p", { class: "muted" }, "Derived from the audit window above. Add a suggested policy under responseOptimization.tools in servers.json; review it before applying."),
+        recsOut));
       if (everyone) {
         usersCard = h("div", { class: "card" }, h("h2", null, "Top users"), usersOut);
         root.appendChild(usersCard);

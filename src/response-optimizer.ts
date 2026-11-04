@@ -42,17 +42,23 @@ export interface OptimizationPolicy {
   removeFields?: string[];
   sampleSize?: number;
   includeMetadata?: boolean;
-  /** Explicit, bounded transformations to compare when mode is adaptive. */
+  /** Bounded transformations to compare when mode is adaptive; omitted means the automatic set. */
   candidates?: OptimizationCandidate[];
   /** Skip candidate evaluation below this estimated input size (default 128). */
   minInputTokens?: number;
   /** Minimum estimated reduction required to select a candidate (default 10%). */
   minSavingsPercent?: number;
+  /** Automatic candidates add `schema` at or above this estimated input size (default 8000). */
+  schemaMinInputTokens?: number;
 }
+
+export const TOKENIZER_NAMES = ["chars_per_4", "cl100k_base", "o200k_base"] as const;
 
 export interface ResponseOptimizationConfig {
   enabled: boolean;
   defaultMode: OptimizationMode;
+  /** Built-in token counter for estimates and budgets (default chars_per_4). */
+  tokenizer: (typeof TOKENIZER_NAMES)[number];
   maxOutputTokens?: number;
   maxOutputBytes?: number;
   maxInputBytes: number;
@@ -76,6 +82,8 @@ export interface OptimizationMetrics {
   selectedMode?: Exclude<OptimizationMode, "adaptive">;
   /** Token counter used for these measurements; chars_per_4 is the built-in fallback. */
   tokenizer?: string;
+  /** "fields" when the calling agent asked call_tool for specific fields. */
+  intent?: "fields";
   originalTokens: number;
   optimizedTokens: number;
   savedTokens: number;
@@ -157,9 +165,10 @@ const policySchema = z
     removeFields: z.array(z.string().min(1).max(256)).max(100).optional(),
     sampleSize: z.number().int().min(1).max(100).optional(),
     includeMetadata: z.boolean().optional(),
-    candidates: z.array(candidateSchema).max(4).optional(),
+    candidates: z.array(candidateSchema).min(1).max(4).optional(),
     minInputTokens: z.number().int().min(1).max(1_000_000).optional(),
     minSavingsPercent: z.number().min(0).max(100).optional(),
+    schemaMinInputTokens: z.number().int().min(1).max(1_000_000).optional(),
   })
   .strict()
   .superRefine((policy, ctx) => {
@@ -169,15 +178,13 @@ const policySchema = z
     if (policy.mode === "jsonpath" && !policy.jsonPath) {
       ctx.addIssue({ code: "custom", path: ["jsonPath"], message: "jsonpath mode requires a JSONPath expression" });
     }
-    if (policy.mode === "adaptive" && (!policy.candidates || policy.candidates.length === 0)) {
-      ctx.addIssue({ code: "custom", path: ["candidates"], message: "adaptive mode requires at least one candidate" });
-    }
   });
 
 const configSchema = z
   .object({
     enabled: z.boolean().default(false),
     defaultMode: modeSchema.default("off"),
+    tokenizer: z.enum(TOKENIZER_NAMES).default("chars_per_4"),
     maxOutputTokens: z.number().int().positive().max(1_000_000).optional(),
     maxOutputBytes: z.number().int().min(256).max(32_000_000).optional(),
     maxInputBytes: z.number().int().positive().max(16_000_000).default(1_000_000),
@@ -188,20 +195,12 @@ const configSchema = z
     includeMetadata: z.boolean().default(false),
     tools: z.record(z.string().min(1), policySchema).default({}),
   })
-  .strict()
-  .superRefine((config, ctx) => {
-    if (config.defaultMode === "adaptive") {
-      ctx.addIssue({
-        code: "custom",
-        path: ["defaultMode"],
-        message: "adaptive mode must be configured on a tool with explicit candidates",
-      });
-    }
-  });
+  .strict();
 
 const DEFAULT_CONFIG: ResponseOptimizationConfig = {
   enabled: false,
   defaultMode: "off",
+  tokenizer: "chars_per_4",
   maxInputBytes: 1_000_000,
   maxNestingDepth: 100,
   maxHtmlNodes: 100_000,
@@ -822,6 +821,7 @@ function metadataFor(metrics: OptimizationMetrics): Record<string, unknown> {
     mode: metrics.mode,
     ...(metrics.selectedMode ? { selectedMode: metrics.selectedMode } : {}),
     ...(metrics.tokenizer ? { tokenizer: metrics.tokenizer } : {}),
+    ...(metrics.intent ? { intent: metrics.intent } : {}),
     originalTokens: metrics.originalTokens,
     optimizedTokens: metrics.optimizedTokens,
     savedTokens: metrics.savedTokens,
@@ -830,6 +830,21 @@ function metadataFor(metrics: OptimizationMetrics): Record<string, unknown> {
     complete: metrics.complete,
   };
 }
+
+/** Worst-case-sized metrics, used only to measure how much budget response metadata needs. */
+const METADATA_SIZE_PLACEHOLDER: OptimizationMetrics = {
+  mode: "html_markdown",
+  selectedMode: "html_markdown",
+  tokenizer: "t".repeat(64) + "_fallback_chars_per_4",
+  intent: "fields",
+  originalTokens: 99_999_999,
+  optimizedTokens: 99_999_999,
+  savedTokens: 99_999_999,
+  reductionPercent: 100,
+  durationMs: 12_345.678901234567,
+  changed: true,
+  complete: false,
+};
 
 function addMetadata<T extends OptimizableToolResult>(result: T, metrics: OptimizationMetrics): T {
   const rootMeta = result._meta ?? {};
@@ -873,6 +888,24 @@ type RuntimeOptimizationPolicy = OptimizationPolicy & {
 };
 
 const MAX_ADAPTIVE_CANDIDATES = 4;
+const DEFAULT_SCHEMA_MIN_INPUT_TOKENS = 8000;
+
+/**
+ * Candidates used when an adaptive policy lists none (for example `defaultMode: "adaptive"`).
+ * Empty-value pruning and HTML conversion keep the content; `schema` is added only for responses
+ * large enough that a summary plus a result handle beats returning or truncating the payload.
+ */
+export function automaticCandidates(
+  originalTokens: number,
+  schemaMinInputTokens = DEFAULT_SCHEMA_MIN_INPUT_TOKENS
+): OptimizationCandidate[] {
+  const candidates: OptimizationCandidate[] = [
+    { mode: "prune", removeNulls: true, removeEmptyObjects: true, removeEmptyArrays: true, removeEmptyStrings: true },
+    { mode: "html_markdown" },
+  ];
+  if (originalTokens >= schemaMinInputTokens) candidates.push({ mode: "schema" });
+  return candidates;
+}
 
 async function optimizeAdaptively<T extends OptimizableToolResult>(
   original: T,
@@ -883,8 +916,10 @@ async function optimizeAdaptively<T extends OptimizableToolResult>(
 ): Promise<OptimizedToolResult<T>> {
   const estimate = tokenEstimator.estimate;
   const started = performance.now();
-  const candidates = (policy.candidates ?? []).slice(0, MAX_ADAPTIVE_CANDIDATES);
   const originalTokens = estimate(original);
+  const candidates = (
+    policy.candidates?.length ? policy.candidates : automaticCandidates(originalTokens, policy.schemaMinInputTokens)
+  ).slice(0, MAX_ADAPTIVE_CANDIDATES);
   const minInputTokens = policy.minInputTokens ?? 128;
   const minSavingsPercent = policy.minSavingsPercent ?? 10;
   const transformLimitMs = policy.maxTransformMs ?? DEFAULT_CONFIG.maxTransformMs;
@@ -1096,13 +1131,20 @@ async function optimizeToolResultWithEstimator<T extends OptimizableToolResult>(
     const estimateForTruncation = tokenEstimator.hasCustom && policy.maxTokens === undefined
       ? estimateTokens
       : estimate;
-    const overhead = estimateForTruncation({ ...bounded, content: [], structuredContent: undefined });
+    // A truncated result is incomplete, so its metadata will be attached; leave room for it.
+    const metadataReserve = policy.suppressMetadata
+      ? 0
+      : estimateForTruncation(addMetadata({ content: [] }, METADATA_SIZE_PLACEHOLDER));
+    const overhead =
+      estimateForTruncation({ ...bounded, content: [], structuredContent: undefined }) + metadataReserve;
     const payloadTokens = Math.max(1, outputTokenBudget - overhead - 2);
     let remaining = payloadTokens;
     let budgetComplete = true;
-    const truncationEstimator = tokenEstimator.hasCustom && policy.maxTokens !== undefined
+    // Measure candidates the way exceedsBudget does (serialized JSON), so escaped newlines and
+    // quotes in text cannot push a "fitting" prefix over the limit.
+    const truncationEstimator: ValueTokenEstimator = policy.maxTokens !== undefined
       ? estimate
-      : undefined;
+      : (value) => Math.ceil(Buffer.byteLength(serialized(value), "utf8") / 4);
 
     if (bounded.structuredContent !== undefined) {
       const structureBudget = bounded.content.some((block) =>

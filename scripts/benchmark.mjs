@@ -3,7 +3,7 @@
 //
 // Runners:
 //   claude  — `claude -p --output-format json` (default)
-//   codex   — `codex exec --json` (e.g. --model gpt-6-luna via Custom)
+//   codex   — `codex exec --json` (e.g. --model gpt-6-luna via a custom provider)
 //
 // MCP strategies:
 //   baseline     — no MCP servers (system prompt only)
@@ -23,7 +23,7 @@
 // Usage:
 //   lazygate benchmark
 //   lazygate benchmark --runner codex --model gpt-6-luna
-//   lazygate benchmark --servers fetch-mcp,jira --skills loi,writer
+//   lazygate benchmark --servers github,jira --skills loi,writer
 //   lazygate benchmark --mcp-only | --skills-only
 //   lazygate benchmark --rounds 3
 //   lazygate benchmark --estimate   # local chars÷4 preview, no API
@@ -292,6 +292,22 @@ if (liveResponsesOnly) {
     process.exit(1);
   }
   const { estimateTokens, optimizeToolResult } = await import(pathToFileURL(optimizerPath).href);
+  const { loadTokenizer, parseTokenizerFlag, isBuiltinTokenizer } = await import(
+    pathToFileURL(resolve(__dirname, "../dist/tokenizers.js")).href
+  );
+  let tokenizerName;
+  try {
+    tokenizerName = parseTokenizerFlag(get("--tokenizer") ?? undefined);
+  } catch (error) {
+    console.error(error.message);
+    process.exit(1);
+  }
+  if (!tokenizerName && existsSync(configPath)) {
+    const configured = JSON.parse(readFileSync(configPath, "utf-8")).responseOptimization?.tokenizer;
+    if (isBuiltinTokenizer(configured)) tokenizerName = configured;
+  }
+  const tokenizer = await loadTokenizer(tokenizerName);
+  const tokenizerLabel = tokenizer?.name ?? "chars_per_4";
   const allowedModes = new Set(["off", "prune", "project", "jsonpath", "schema", "html_markdown", "html_reader", "adaptive"]);
   const adaptiveCandidateModes = new Set(["prune", "project", "jsonpath", "schema", "html_markdown", "html_reader"]);
   const minimumRecommendationSamples = 3;
@@ -322,8 +338,8 @@ if (liveResponsesOnly) {
       tool: benchmarkCase.tool,
       policy: label,
       mode,
-      ...(mode === "adaptive" && Array.isArray(policy.candidates)
-        ? { candidateModes: policy.candidates.map((candidate) => candidate.mode) }
+      ...(mode === "adaptive"
+        ? { candidateModes: Array.isArray(policy.candidates) ? policy.candidates.map((candidate) => candidate.mode) : "automatic" }
         : {}),
       decision: "insufficient_evidence",
       reason: "too_few_samples",
@@ -477,11 +493,14 @@ if (liveResponsesOnly) {
         process.exit(1);
       }
       if (policy.mode === "adaptive") {
-        if (!Array.isArray(policy.candidates) || policy.candidates.length < 1 || policy.candidates.length > 4) {
-          console.error(`Case ${caseName} adaptive policy must declare one to four candidates.`);
+        if (
+          policy.candidates !== undefined &&
+          (!Array.isArray(policy.candidates) || policy.candidates.length < 1 || policy.candidates.length > 4)
+        ) {
+          console.error(`Case ${caseName} adaptive policy must declare one to four candidates, or omit them for the automatic set.`);
           process.exit(1);
         }
-        const invalidCandidate = policy.candidates.find((candidate) =>
+        const invalidCandidate = (policy.candidates ?? []).find((candidate) =>
           !candidate || typeof candidate !== "object" || Array.isArray(candidate) ||
           !adaptiveCandidateModes.has(candidate.mode) ||
           (candidate.mode === "project" && (!Array.isArray(candidate.fields) || candidate.fields.length === 0)) ||
@@ -538,22 +557,23 @@ if (liveResponsesOnly) {
           arguments: benchmarkCase.args ?? {},
         });
         const upstreamMs = performance.now() - callStarted;
-        const originalTokens = estimateTokens(original);
+        const originalTokens = estimateTokens(original, tokenizer);
 
         for (let policyIndex = 0; policyIndex < policies.length; policyIndex++) {
           const policySpec = policies[policyIndex];
           const label = policySpec.name ?? `${policySpec.mode ?? "off"}-${policyIndex + 1}`;
           const { name: _label, ...policy } = policySpec;
           const transformStarted = performance.now();
-          const optimized = await optimizeToolResult(original, policy, context);
+          const optimized = await optimizeToolResult(original, policy, context, undefined, tokenizer);
           const transformMs = performance.now() - transformStarted;
           const correctness = await checkPreservation(original, optimized.result, benchmarkCase);
           if (correctness === false) failed = true;
+          const optimizedTokens = estimateTokens(optimized.result, tokenizer);
           measurements.get(label).push({
             originalTokens,
-            optimizedTokens: estimateTokens(optimized.result),
-            savedTokens: Math.max(0, originalTokens - estimateTokens(optimized.result)),
-            reductionPercent: originalTokens ? Math.max(0, (originalTokens - estimateTokens(optimized.result)) / originalTokens * 100) : 0,
+            optimizedTokens,
+            savedTokens: Math.max(0, originalTokens - optimizedTokens),
+            reductionPercent: originalTokens ? Math.max(0, (originalTokens - optimizedTokens) / originalTokens * 100) : 0,
             upstreamMs,
             transformMs,
             totalMs: upstreamMs + transformMs,
@@ -594,7 +614,7 @@ if (liveResponsesOnly) {
         setupMs: round(setupMs),
         policy,
         sampleCount: samples.length,
-        tokenEstimate: "serialized JSON characters / 4",
+        tokenEstimate: tokenizer ? `${tokenizerLabel} over serialized JSON` : "serialized JSON characters / 4",
         originalTokens: { median: round(tokensBefore.median), p95: round(tokensBefore.p95) },
         optimizedTokens: { median: round(tokensAfter.median), p95: round(tokensAfter.p95) },
         savedTokens: { median: round(savings.median), p95: round(savings.p95) },
@@ -625,8 +645,11 @@ if (liveResponsesOnly) {
   console.log(JSON.stringify({
     method: "live MCP calls; optimizer policies applied to each captured response; no model calls",
     iterations: liveResponseIterations,
+    tokenizer: tokenizerLabel,
     limitations: [
-      "Token counts are estimates from serialized JSON characters divided by four.",
+      tokenizer
+        ? `Token counts use ${tokenizerLabel}, a public encoding that approximates (but is not) a Claude tokenizer.`
+        : "Token counts are estimates from serialized JSON characters divided by four (pass --tokenizer o200k_base for a real encoding).",
       "Latency includes the upstream tool call and local response transformation, not model inference or full agent task success.",
       "Each case must be a read-only tool call and provide preservation checks.",
     ],
@@ -1161,7 +1184,7 @@ console.log(`${"─".repeat(60)}`);
 if (tasksOnly) {
   // Task mode still uses the tickets fixture for the workload; direct wires the user's catalog too.
   console.log(
-    `Mode:    --tasks (direct | call_tool | run_chain; ${includeCatalog ? "loads your full Lazygate catalog (--include-catalog)" : "fixture server only (pass --include-catalog for the full catalog)"})`
+    `Mode:    --tasks (direct | call_tool | call_tool+opt | run_chain; ${includeCatalog ? "loads your full Lazygate catalog (--include-catalog)" : "fixture server only (pass --include-catalog for the full catalog)"})`
   );
   console.log(
     `Catalog: ${Object.keys(servers).length} runnable` +
@@ -1192,10 +1215,11 @@ const fmtNum = (n) => n.toLocaleString();
 
 // ─── Task mode (--tasks) ───────────────────────────────────────────────────
 //
-// One multi-step task three ways against the same fixture server:
-//   direct        — Claude talks to the tickets MCP server itself (no lazygate)
-//   call-tool     — lazygate; model chains call_tool (one round trip per step)
-//   run-chain     — lazygate; model writes one run_chain script for the chain
+// One multi-step task four ways against the same fixture server:
+//   direct              — Claude talks to the tickets MCP server itself (no lazygate)
+//   call-tool           — lazygate; model chains call_tool (one round trip per step)
+//   call-tool-optimized — call-tool with response optimization (adaptive default + call_tool fields)
+//   run-chain           — lazygate; model writes one run_chain script for the chain
 // Each strategy is one cold-cache `claude -p` turn. Results are checked against the fixture's
 // known answer, so a strategy that returns a wrong number is reported as a failure.
 
@@ -1245,6 +1269,21 @@ const TASK_STRATEGIES = {
       "3) Add the numeric bodyLength fields from those results (do NOT count characters in body).\n" +
       "Your entire final message must be exactly: <count> <sum> — two integers, one space, nothing else.",
   },
+  "call-tool-optimized": {
+    label: "call_tool+opt",
+    mcp: "lazygate",
+    // Response optimization on, with no per-tool policy: adaptive defaults plus agent-requested fields.
+    responseOptimization: { enabled: true, defaultMode: "adaptive", maxOutputTokens: 4000 },
+    instruction:
+      "You have the lazygate MCP server. Upstream server: \"tickets\". Tools: list_tickets, get_ticket.\n" +
+      "There are several matching tickets; get_ticket bodies are large, so ask call_tool for only the fields you need.\n" +
+      "Required sequence (use call_tool only; never run_chain):\n" +
+      "1) call_tool(server=\"tickets\", tool=\"list_tickets\", args={status:\"open\"}) — list includes assignee.\n" +
+      "2) For each open ticket whose assignee is \"ana\", call_tool(server=\"tickets\", tool=\"get_ticket\", " +
+      "args={id}, fields=[\"id\",\"bodyLength\"]) once.\n" +
+      "3) Add the numeric bodyLength fields from those results (do NOT count characters in body).\n" +
+      "Your entire final message must be exactly: <count> <sum> — two integers, one space, nothing else.",
+  },
   "run-chain": {
     label: "run_chain",
     mcp: "lazygate",
@@ -1278,7 +1317,7 @@ function ticketsServerEntry() {
  * fixture. Meta-tools stay the only schemas in tools/list (expose defaults to none); other
  * servers are available if discovered but the task instructions say to use tickets only.
  */
-function taskBrokerConfig(strategyDir) {
+function taskBrokerConfig(strategyDir, strategy) {
   const cfgPath = join(strategyDir, "servers.json");
   // Only the fixture unless --include-catalog: the real catalog can hold destructive tools and
   // --tasks bypasses permission prompts.
@@ -1297,7 +1336,13 @@ function taskBrokerConfig(strategyDir) {
     }
     out[name] = copy;
   }
-  writeFileSync(cfgPath, JSON.stringify({ servers: out }));
+  writeFileSync(
+    cfgPath,
+    JSON.stringify({
+      ...(strategy.responseOptimization ? { responseOptimization: strategy.responseOptimization } : {}),
+      servers: out,
+    })
+  );
   return cfgPath;
 }
 
@@ -1316,7 +1361,7 @@ function taskMcpConfig(strategy, strategyDir) {
     mcp.mcpServers.tickets = { command: process.execPath, args: [ticketsServer] };
     return mcp;
   }
-  const cfgPath = taskBrokerConfig(strategyDir);
+  const cfgPath = taskBrokerConfig(strategyDir, strategy);
   const brokerEntry = resolve(__dirname, "..", "dist", "index.js");
   return {
     mcpServers: {
@@ -1498,6 +1543,7 @@ if (tasksOnly) {
   }
   const direct = taskRows.find((r) => r.id === "direct");
   const callTool = taskRows.find((r) => r.id === "call-tool");
+  const callToolOptimized = taskRows.find((r) => r.id === "call-tool-optimized");
   const execCode = taskRows.find((r) => r.id === "run-chain");
   const fair = (r) => r?.ok && r.correctRuns > 0;
 
@@ -1510,6 +1556,8 @@ if (tasksOnly) {
 
   const lines = [
     deltaLine("call_tool vs direct", direct, callTool),
+    deltaLine("call_tool+opt vs direct", direct, callToolOptimized),
+    deltaLine("call_tool+opt vs call_tool", callTool, callToolOptimized),
     deltaLine("run_chain vs direct", direct, execCode),
     deltaLine("run_chain vs call_tool", callTool, execCode),
   ].filter(Boolean);
@@ -1521,7 +1569,8 @@ if (tasksOnly) {
     const status = (r) => (!r ? "missing" : !r.ok ? "ERROR" : r.correctRuns ? "correct" : "WRONG");
     console.log(
       `\n(Skipping token deltas — need correct runs to compare; ` +
-        `direct=${status(direct)}, call_tool=${status(callTool)}, run_chain=${status(execCode)}.)`
+        `direct=${status(direct)}, call_tool=${status(callTool)}, call_tool+opt=${status(callToolOptimized)}, ` +
+        `run_chain=${status(execCode)}.)`
     );
   }
   console.log(

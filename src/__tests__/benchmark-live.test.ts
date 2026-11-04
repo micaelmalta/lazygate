@@ -163,7 +163,54 @@ describe("live response benchmark", () => {
     }
   });
 
-  it("rejects adaptive benchmark policies without explicit candidates", () => {
+  it("measures automatic adaptive policies with a built-in tokenizer", () => {
+    const tempDir = mkdtempSync(resolve(tmpdir(), "lazygate-live-bench-tokenizer-test-"));
+    try {
+      const serverPath = resolve(repoRoot, "src/__tests__/fixtures/benchmark-response-server.mjs");
+      const configPath = resolve(tempDir, "servers.json");
+      const casesPath = resolve(tempDir, "cases.json");
+      writeFileSync(configPath, JSON.stringify({
+        servers: { fixture: { command: process.execPath, args: [serverPath] } },
+      }));
+      writeFileSync(casesPath, JSON.stringify({
+        cases: [{
+          name: "fixture-search",
+          server: "fixture",
+          tool: "search_records",
+          readOnly: true,
+          preservePaths: ["$.structuredContent.items[*].id"],
+          policies: [
+            { name: "off", mode: "off" },
+            { name: "auto", mode: "adaptive", minInputTokens: 1 },
+          ],
+        }],
+      }));
+
+      const stdout = execFileSync(process.execPath, [
+        resolve(repoRoot, "scripts/benchmark.mjs"),
+        "--responses-live",
+        "--cases",
+        casesPath,
+        "--iterations",
+        "1",
+        "--tokenizer",
+        "o200k_base",
+        "--config",
+        configPath,
+      ], { cwd: repoRoot, encoding: "utf8", timeout: 20_000 });
+      const output = JSON.parse(stdout);
+      expect(output.tokenizer).toBe("o200k_base");
+      const auto = output.measurements.find((m: { policy: string }) => m.policy === "auto");
+      expect(auto.tokenEstimate).toMatch(/o200k_base/);
+      expect(output.recommendations).toEqual([
+        expect.objectContaining({ policy: "auto", candidateModes: "automatic", reason: "too_few_samples" }),
+      ]);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects adaptive benchmark policies with an empty candidate list", () => {
     const tempDir = mkdtempSync(resolve(tmpdir(), "lazygate-live-bench-invalid-adaptive-test-"));
     try {
       const serverPath = resolve(repoRoot, "src/__tests__/fixtures/benchmark-response-server.mjs");
@@ -183,7 +230,7 @@ describe("live response benchmark", () => {
           preservePaths: ["$.structuredContent.items[*].id"],
           policies: [
             { name: "off", mode: "off" },
-            { name: "adaptive", mode: "adaptive" },
+            { name: "adaptive", mode: "adaptive", candidates: [] },
           ],
         }],
       }));

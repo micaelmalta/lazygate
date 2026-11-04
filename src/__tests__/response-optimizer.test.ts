@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  automaticCandidates,
   estimateTokens,
   optimizeToolResult,
   parseResponseOptimizationConfig,
@@ -258,6 +259,15 @@ describe("response optimization budgeting and metadata", () => {
     expect((optimized.result.content[0] as { text: string }).text).toContain("incomplete");
   });
 
+  it("truncates newline-heavy text within budget, leaving room for the incomplete-result metadata", async () => {
+    const text = Array.from({ length: 200 }, (_, i) => `line ${i} of the report "quoted"`).join("\n");
+    const optimized = await optimizeToolResult({ content: [{ type: "text", text }] }, { mode: "off", maxTokens: 400 }, context);
+    expect(optimized.result.isError).not.toBe(true);
+    expect(optimized.metrics.optimizedTokens).toBeLessThanOrEqual(400);
+    expect(optimized.result._meta).toMatchObject({ lazygate: { responseOptimization: { complete: false } } });
+    expect((optimized.result.content[0] as { text: string }).text).toContain("line 0 of the report");
+  });
+
   it("reports per-tool metrics and exposes metadata when a pruning pass loses empty values", async () => {
     const onMetrics = jest.fn();
     const optimized = await optimizeToolResult(
@@ -338,21 +348,29 @@ describe("adaptive response optimization", () => {
     expect(optimized.metrics).toMatchObject({ mode: "adaptive", selectedMode: "off", changed: false, complete: true });
   });
 
-  it("requires candidate policies for adaptive tool configuration and rejects adaptive as the global default", () => {
-    const missingCandidates = parseResponseOptimizationConfig({
+  it("accepts adaptive without candidates (per tool or as the global default) but rejects an empty list", () => {
+    const toolAdaptive = parseResponseOptimizationConfig({
       responseOptimization: {
         enabled: true,
         defaultMode: "off",
-        tools: { "github.search_issues": { mode: "adaptive" } },
+        tools: { "github.search_issues": { mode: "adaptive", schemaMinInputTokens: 500 } },
       },
     });
-    expect(missingCandidates.errors.join(" ")).toMatch(/adaptive mode requires at least one candidate/);
+    expect(toolAdaptive.errors).toEqual([]);
 
     const globalAdaptive = parseResponseOptimizationConfig({
       responseOptimization: { enabled: true, defaultMode: "adaptive" },
     });
-    expect(globalAdaptive.errors.join(" ")).toMatch(/defaultMode.*adaptive/);
-    expect(globalAdaptive.config.enabled).toBe(false);
+    expect(globalAdaptive.errors).toEqual([]);
+    expect(globalAdaptive.config).toMatchObject({ enabled: true, defaultMode: "adaptive", tokenizer: "chars_per_4" });
+
+    const emptyCandidates = parseResponseOptimizationConfig({
+      responseOptimization: {
+        enabled: true,
+        tools: { "github.search_issues": { mode: "adaptive", candidates: [] } },
+      },
+    });
+    expect(emptyCandidates.errors.join(" ")).toMatch(/candidates/);
 
     const valid = parseResponseOptimizationConfig({
       responseOptimization: {
@@ -375,6 +393,47 @@ describe("adaptive response optimization", () => {
       minInputTokens: 200,
       minSavingsPercent: 15,
     });
+  });
+
+  it("validates the built-in tokenizer name", () => {
+    const valid = parseResponseOptimizationConfig({ responseOptimization: { enabled: true, tokenizer: "o200k_base" } });
+    expect(valid.errors).toEqual([]);
+    expect(valid.config.tokenizer).toBe("o200k_base");
+    const typo = parseResponseOptimizationConfig({ responseOptimization: { enabled: true, tokenizer: "claude" } });
+    expect(typo.errors.join(" ")).toMatch(/tokenizer/);
+  });
+
+  it("uses automatic candidates when none are configured: prunes empty values and converts HTML", async () => {
+    const json = {
+      content: [],
+      structuredContent: { items: [{ id: 1, note: null, tags: [], extra: {} }, { id: 2, note: "", tags: [], extra: {} }] },
+    };
+    const pruned = await optimizeToolResult(json, { mode: "adaptive", minInputTokens: 1 }, context);
+    expect(pruned.metrics).toMatchObject({ mode: "adaptive", selectedMode: "prune", complete: false });
+    expect(pruned.result.structuredContent).toEqual({ items: [{ id: 1 }, { id: 2 }] });
+
+    const html = { content: [{ type: "text", text: `<main><h1>Guide</h1><p>${"Body text. ".repeat(40)}</p></main><script>${"x".repeat(400)}</script>` }] };
+    const converted = await optimizeToolResult(html, { mode: "adaptive", minInputTokens: 1 }, context);
+    expect(converted.metrics.selectedMode).toBe("html_markdown");
+    expect((converted.result.content[0] as { text: string }).text).toContain("# Guide");
+  });
+
+  it("adds schema to the automatic candidates only for large responses", async () => {
+    const rows = Array.from({ length: 40 }, (_, i) => ({ id: i, title: `Row ${i}`, body: "z".repeat(60) }));
+    const original = { content: [], structuredContent: rows };
+    expect(automaticCandidates(10_000).map((c) => c.mode)).toEqual(["prune", "html_markdown", "schema"]);
+    expect(automaticCandidates(100).map((c) => c.mode)).toEqual(["prune", "html_markdown"]);
+
+    const small = await optimizeToolResult(original, { mode: "adaptive", minInputTokens: 1 }, context);
+    expect(small.metrics.selectedMode).toBe("off");
+
+    const large = await optimizeToolResult(
+      original,
+      { mode: "adaptive", minInputTokens: 1, schemaMinInputTokens: 100 },
+      context
+    );
+    expect(large.metrics.selectedMode).toBe("schema");
+    expect(large.result.structuredContent).toMatchObject({ _count: 40 });
   });
 
   it("skips adaptive candidates below the configured minimum input size", async () => {

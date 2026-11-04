@@ -27,6 +27,7 @@ import { formatSkillUri, parseSkillUri } from "../skill-router.js";
 import { composePrompt, promptArgumentsForList } from "../prompt-compose.js";
 import { skillProvenance } from "../broker.js";
 import { estimateTokens, type OptimizationMetrics, type Tokenizer } from "../response-optimizer.js";
+import { loadTokenizer } from "../tokenizers.js";
 import type { Registry } from "../registry.js";
 import { APP_NAME } from "../paths.js";
 import { VERSION, LOG_PREFIX } from "../version.js";
@@ -429,7 +430,12 @@ export async function startGateway(opts: GatewayOptions): Promise<Gateway> {
       const innerServer = isProxyMeta && typeof a.server === "string" ? a.server : undefined;
       const innerTool = isProxyMeta && typeof a.tool === "string" ? a.tool.slice(0, 200) : undefined;
       const measured = metricsBag.last;
-      const optimizedTokens = measured?.optimizedTokens ?? estimateTokens(result, opts.tokenizer);
+      const optimizedTokens =
+        measured?.optimizedTokens ??
+        estimateTokens(
+          result,
+          opts.tokenizer ?? (await loadTokenizer(registry.router.getResponseOptimization().tokenizer))
+        );
       const originalTokens = measured?.originalTokens ?? optimizedTokens;
       const savedTokens = measured?.savedTokens ?? Math.max(0, originalTokens - optimizedTokens);
       audit.record({
@@ -451,6 +457,7 @@ export async function startGateway(opts: GatewayOptions): Promise<Gateway> {
         // Keep the audit record aggregate-safe: the failure detail can include upstream text.
         optimizationFallback: measured ? Boolean(measured.failure) : undefined,
         optimizationComplete: measured?.complete,
+        optimizationIntent: measured?.intent,
       });
       return result;
     });

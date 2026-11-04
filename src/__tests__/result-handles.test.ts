@@ -1,5 +1,5 @@
 import { describe, expect, it } from "@jest/globals";
-import { ResultHandleStore, selectResultFields } from "../result-handles.js";
+import { ResultHandleStore, selectResultFields, textWithinBudget } from "../result-handles.js";
 
 describe("result handles", () => {
   it("selects requested fields through nested arrays", () => {
@@ -47,5 +47,28 @@ describe("result handles", () => {
     expect(store.get(second!.handle)).toEqual({ value: "b" });
     expect(store.get(third!.handle)).toEqual({ value: "c" });
     expect(store.create({ value: "x".repeat(100) })).toBeNull();
+  });
+
+  it("stores text separately from JSON and reads it from an offset", () => {
+    const store = new ResultHandleStore();
+    const text = store.createText("hello world");
+    const json = store.create({ a: 1 });
+    expect(text).toMatchObject({ kind: "text" });
+    expect(json).toMatchObject({ kind: "json" });
+    expect(store.kind(text!.handle)).toBe("text");
+    expect(store.readText(text!.handle, 6)).toEqual({ text: "world", offset: 6, totalLength: 11 });
+    expect(store.readText(text!.handle, 99)).toEqual({ text: "", offset: 11, totalLength: 11 });
+    expect(store.readText(json!.handle)).toBeUndefined();
+    expect(() => store.select(text!.handle, ["a"])).toThrow(/holds text/);
+    expect(store.createText("")).toBeNull();
+  });
+
+  it("cuts text to a token budget at a line break and always makes progress", () => {
+    const quarter = (value: string) => Math.ceil(value.length / 4);
+    const text = "first line\nsecond line\nthird line";
+    expect(textWithinBudget(text, 6, quarter)).toBe("first line\nsecond line\n");
+    expect(textWithinBudget(text, 3, quarter)).toBe("first line\n");
+    expect(textWithinBudget(text, 1_000, quarter)).toBe(text);
+    expect(textWithinBudget("abcdef", 0, quarter).length).toBeGreaterThan(0);
   });
 });

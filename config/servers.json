@@ -8,9 +8,6 @@
         "mode": "project",
         "fields": ["id", "title", "state"]
       },
-      "fetch.get_page": {
-        "mode": "html_markdown"
-      },
       "docs.get_documentation": {
         "mode": "html_reader"
       },
@@ -22,13 +19,6 @@
     }
   },
   "servers": {
-    "fetch-mcp": {
-      "description": "Web fetch, search, and HTTP tooling",
-      "keywords": ["web", "http", "fetch", "search", "url", "request", "html", "css", "json"],
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-fetch"],
-      "autoActivate": false
-    },
     "github": {
       "description": "GitHub repositories, issues, pull requests, and code search",
       "keywords": ["github", "git", "repo", "issue", "pr", "pull request", "code", "commit"],

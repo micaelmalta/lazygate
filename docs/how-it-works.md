@@ -178,11 +178,11 @@ npm run build
 lazygate benchmark --estimate                         # free local preview, no model calls
 lazygate benchmark                                    # Claude: MCP schemas and skills
 lazygate benchmark --runner codex --model gpt-6-luna  # skills on Codex
-lazygate benchmark --tasks                            # multi-step task: direct vs call_tool vs run_chain
+lazygate benchmark --tasks                            # multi-step task: direct, call_tool, call_tool+opt, run_chain
 ```
 
 `--tasks` runs one fixture job (`src/__tests__/fixtures/tickets-server.mjs`: count ana's open
-tickets and sum each ticket's `bodyLength`, expected `8 60000`) three ways and only reports token
+tickets and sum each ticket's `bodyLength`, expected `8 60000`) four ways and only reports token
 deltas between strategies that both answered correctly:
 
 | Strategy | What the model sees | Input tokens (range) | Turns | Time |
@@ -196,6 +196,11 @@ all 9 correct. That works out to −58.0% for `call_tool` and −61.6% for `run_
 and −8.7% for `run_chain` against `call_tool`. `direct` is also the noisy one: one of its runs took an
 extra turn (mean 10.3), and every extra turn re-sends all 16 servers' schemas, which likely explains
 the 654,070 outlier.
+
+The table predates a fourth strategy, `call_tool+opt`: `call_tool` with response optimization on
+(`defaultMode: "adaptive"`, no per-tool policy) and the model passing `fields` for `get_ticket`.
+It is the end-to-end check for response optimization: the answer must still be correct, and its
+delta against `call_tool` is what optimization saved across the whole task.
 
 Each run is a single cold-cache turn, so cost figures overstate steady-state savings. Codex keeps a
 large fixed system prompt and does not surface tool schemas the same way, so MCP savings show up

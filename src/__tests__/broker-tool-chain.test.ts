@@ -168,6 +168,34 @@ describe("run_chain", () => {
     );
   });
 
+  it("offers a result handle for an incomplete run_chain return value", async () => {
+    const responseOptimization = parseResponseOptimizationConfig({
+      responseOptimization: {
+        enabled: true,
+        tools: { "lazygate.run_chain": { mode: "project", fields: ["count"] } },
+      },
+    }).config;
+    const broker = createBroker({
+      router,
+      manager: mk.manager as unknown as ProcessManager,
+      skillRouter: null,
+      responseOptimization,
+    });
+
+    const result = await broker.callTool("run_chain", {
+      code: `return { count: 7, description: "${"x".repeat(300)}" };`,
+    });
+
+    expect(result.isError).toBeFalsy();
+    const handle = (result._meta as any).lazygate.responseOptimization.resultHandle;
+    expect(handle).toMatchObject({ kind: "json", tool: "get_result" });
+    const note = (result.content[result.content.length - 1] as { text: string }).text;
+    expect(note).toContain(handle.handle);
+
+    const description = await broker.callTool("get_result", { handle: handle.handle, fields: ["description"] });
+    expect(description.structuredContent).toEqual({ description: "x".repeat(300) });
+  });
+
   it("enforces the output budget against the final formatted run_chain response", async () => {
     const responseOptimization = parseResponseOptimizationConfig({
       responseOptimization: {

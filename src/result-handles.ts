@@ -15,21 +15,33 @@ export interface ResultHandleStoreOptions {
   now?: () => number;
 }
 
+export type ResultHandleKind = "json" | "text";
+
 export interface CreatedResultHandle {
   handle: string;
+  kind: ResultHandleKind;
   expiresAt: number;
 }
 
 interface StoredResult {
-  json: string;
+  kind: ResultHandleKind;
+  /** JSON text for "json" entries, the raw text for "text" entries. */
+  data: string;
   bytes: number;
   expiresAt: number;
 }
 
+export interface TextSlice {
+  text: string;
+  offset: number;
+  totalLength: number;
+}
+
 /**
- * In-memory, per-broker cache for structured tool results. Handles are random, expire, and are
- * never shared between ResultHandleStore instances. Values are retained as JSON strings so the
- * byte cap tracks the stored representation and callers cannot mutate cached objects by reference.
+ * In-memory, per-broker cache for tool results. Handles are random, expire, and are never shared
+ * between ResultHandleStore instances. Structured values are retained as JSON strings so the byte
+ * cap tracks the stored representation and callers cannot mutate cached objects by reference;
+ * text results are kept verbatim and read back by character offset.
  */
 export class ResultHandleStore {
   private readonly entries = new Map<string, StoredResult>();
@@ -56,7 +68,6 @@ export class ResultHandleStore {
 
   /** Store a JSON-compatible value and return an opaque handle, or null when it is too large. */
   create(value: unknown): CreatedResultHandle | null {
-    this.removeExpired();
     let json: string | undefined;
     try {
       json = JSON.stringify(value);
@@ -64,7 +75,47 @@ export class ResultHandleStore {
       return null;
     }
     if (json === undefined) return null;
-    const bytes = Buffer.byteLength(json, "utf8");
+    return this.store("json", json);
+  }
+
+  /** Store a text result (HTML, Markdown, plain text) for offset-based reads. */
+  createText(text: string): CreatedResultHandle | null {
+    if (typeof text !== "string" || text.length === 0) return null;
+    return this.store("text", text);
+  }
+
+  /** The kind of a live handle, or undefined for an unknown or expired one. */
+  kind(handle: string): ResultHandleKind | undefined {
+    this.removeExpired();
+    return this.entries.get(handle)?.kind;
+  }
+
+  /** Return a fresh copy of a stored value (text entries return the string), or undefined. */
+  get(handle: string): unknown | undefined {
+    this.removeExpired();
+    const entry = this.entries.get(handle);
+    if (!entry) return undefined;
+    if (entry.kind === "text") return entry.data;
+    try {
+      return JSON.parse(entry.data) as unknown;
+    } catch {
+      this.remove(handle);
+      return undefined;
+    }
+  }
+
+  /** Text from `offset` to the end of a text entry, or undefined for an unknown/expired/JSON handle. */
+  readText(handle: string, offset = 0): TextSlice | undefined {
+    this.removeExpired();
+    const entry = this.entries.get(handle);
+    if (!entry || entry.kind !== "text") return undefined;
+    const start = Math.min(Math.max(0, Math.floor(offset)), entry.data.length);
+    return { text: entry.data.slice(start), offset: start, totalLength: entry.data.length };
+  }
+
+  private store(kind: ResultHandleKind, data: string): CreatedResultHandle | null {
+    this.removeExpired();
+    const bytes = Buffer.byteLength(data, "utf8");
     if (bytes > this.maxEntryBytes || bytes > this.maxBytes) return null;
 
     while (this.entries.size >= this.maxEntries || this.bytes + bytes > this.maxBytes) this.removeOldest();
@@ -74,22 +125,9 @@ export class ResultHandleStore {
     } while (this.entries.has(handle));
 
     const expiresAt = this.now() + this.ttlMs;
-    this.entries.set(handle, { json, bytes, expiresAt });
+    this.entries.set(handle, { kind, data, bytes, expiresAt });
     this.bytes += bytes;
-    return { handle, expiresAt };
-  }
-
-  /** Return a fresh copy of a stored value, or undefined for an unknown or expired handle. */
-  get(handle: string): unknown | undefined {
-    this.removeExpired();
-    const entry = this.entries.get(handle);
-    if (!entry) return undefined;
-    try {
-      return JSON.parse(entry.json) as unknown;
-    } catch {
-      this.remove(handle);
-      return undefined;
-    }
+    return { handle, kind, expiresAt };
   }
 
   /** Delete a handle when its metadata cannot be returned within the configured output budget. */
@@ -97,8 +135,9 @@ export class ResultHandleStore {
     this.remove(handle);
   }
 
-  /** Return only the requested field paths from a stored result. */
+  /** Return only the requested field paths from a stored structured result. */
   select(handle: string, fields: string[]): unknown | undefined {
+    if (this.kind(handle) === "text") throw new Error("this handle holds text; read it with offset instead of fields");
     const value = this.get(handle);
     if (value === undefined) return undefined;
     return selectResultFields(value, fields);
@@ -122,6 +161,29 @@ export class ResultHandleStore {
     this.bytes -= entry.bytes;
     this.entries.delete(handle);
   }
+}
+
+/**
+ * Longest prefix of `text` whose estimate fits `maxTokens`, preferring a line break in its second
+ * half. Always returns at least one character of non-empty text so offset paging makes progress.
+ */
+export function textWithinBudget(text: string, maxTokens: number, estimate: (value: string) => number): string {
+  if (estimate(text) <= maxTokens) return text;
+  let low = 1;
+  // Tokens rarely span more than 16 characters; the cap keeps every estimate on a short prefix.
+  let high = Math.min(text.length, Math.max(1, maxTokens) * 16);
+  let best = 1;
+  while (low <= high) {
+    const middle = Math.floor((low + high) / 2);
+    if (estimate(text.slice(0, middle)) <= maxTokens) {
+      best = middle;
+      low = middle + 1;
+    } else {
+      high = middle - 1;
+    }
+  }
+  const newline = text.lastIndexOf("\n", best - 1);
+  return text.slice(0, newline > best / 2 ? newline + 1 : best);
 }
 
 /**

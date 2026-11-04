@@ -45,6 +45,170 @@ export interface AuditEvent {
   optimizationFallback?: boolean;
   /** Whether the optimized response retained all source information. */
   optimizationComplete?: boolean;
+  /** "fields" when the agent asked call_tool for specific fields (field names are not logged). */
+  optimizationIntent?: string;
+}
+
+/** A suggested `responseOptimization.tools` change derived from recent audit rows. */
+export interface PolicyRecommendation {
+  /** Policy key in servers.json (`server.tool`). */
+  tool: string;
+  action: "enable_adaptive" | "pin_mode" | "add_projection" | "review_policy" | "disable";
+  reason:
+    | "large_unoptimized_responses"
+    | "stable_adaptive_selection"
+    | "agents_request_fields"
+    | "frequent_fallbacks"
+    | "overhead_high"
+    | "adaptive_never_selected"
+    | "no_savings";
+  detail: string;
+  calls: number;
+  suggestedPolicy?: Record<string, unknown>;
+}
+
+/** Fewer calls than this per tool are not enough evidence for a recommendation. */
+export const RECOMMENDATION_MIN_CALLS = 5;
+const LARGE_RESPONSE_TOKENS = 2000;
+const FALLBACK_RATE_LIMIT = 20;
+const OVERHEAD_SHARE_LIMIT = 0.5;
+const STABLE_SELECTION_SHARE = 0.8;
+const MIN_USEFUL_REDUCTION_PERCENT = 5;
+
+const AUTOMATIC_PRUNE = { mode: "prune", removeNulls: true, removeEmptyObjects: true, removeEmptyArrays: true, removeEmptyStrings: true };
+
+function median(values: number[]): number {
+  if (!values.length) return 0;
+  const sorted = values.slice().sort((a, b) => a - b);
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[middle]! : (sorted[middle - 1]! + sorted[middle]!) / 2;
+}
+
+function mostCommon(counts: Map<string, number>): [string, number] | undefined {
+  return [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0];
+}
+
+/**
+ * Turn proxied-call audit rows into at most one policy suggestion per upstream tool. Problems with
+ * an existing policy (fallbacks, overhead, no savings) outrank tuning (pinning, projection), which
+ * outranks enabling optimization for large unoptimized responses.
+ */
+export function recommendOptimizationPolicies(events: AuditedEvent[], limit = 20): PolicyRecommendation[] {
+  interface ToolStats {
+    calls: number;
+    originalTokens: number[];
+    msTotal: number;
+    policyCalls: number;
+    policyOriginal: number;
+    policySaved: number;
+    policyDurationMs: number;
+    policyMs: number;
+    fallbacks: number;
+    modes: Map<string, number>;
+    selected: Map<string, number>;
+    intentCalls: number;
+  }
+  const byTool = new Map<string, ToolStats>();
+  for (const e of events) {
+    if (!isUsageEvent(e) || !e.server || !e.target || e.ok === false) continue;
+    const key = `${e.server}.${e.target}`;
+    let s = byTool.get(key);
+    if (!s) {
+      s = {
+        calls: 0, originalTokens: [], msTotal: 0, policyCalls: 0, policyOriginal: 0, policySaved: 0,
+        policyDurationMs: 0, policyMs: 0, fallbacks: 0, modes: new Map(), selected: new Map(), intentCalls: 0,
+      };
+      byTool.set(key, s);
+    }
+    s.calls += 1;
+    s.originalTokens.push(e.originalTokens ?? 0);
+    s.msTotal += e.ms ?? 0;
+    if (e.optimizationIntent) {
+      s.intentCalls += 1;
+      continue;
+    }
+    if (!e.optimizationMode || e.optimizationMode === "off") continue;
+    s.policyCalls += 1;
+    s.policyOriginal += e.originalTokens ?? 0;
+    s.policySaved += e.savedTokens ?? 0;
+    s.policyDurationMs += e.optimizationDurationMs ?? 0;
+    s.policyMs += e.ms ?? 0;
+    if (e.optimizationFallback) s.fallbacks += 1;
+    s.modes.set(e.optimizationMode, (s.modes.get(e.optimizationMode) ?? 0) + 1);
+    if (e.optimizationSelectedMode) s.selected.set(e.optimizationSelectedMode, (s.selected.get(e.optimizationSelectedMode) ?? 0) + 1);
+  }
+
+  const out: PolicyRecommendation[] = [];
+  for (const [tool, s] of byTool) {
+    if (s.calls < RECOMMENDATION_MIN_CALLS) continue;
+    const base = { tool, calls: s.calls };
+    if (s.policyCalls >= RECOMMENDATION_MIN_CALLS) {
+      const fallbackRate = Math.round((s.fallbacks / s.policyCalls) * 100);
+      const avgOptimizationMs = s.policyDurationMs / s.policyCalls;
+      const avgCallMs = s.policyMs / s.policyCalls;
+      const mode = mostCommon(s.modes)![0];
+      const reduction = s.policyOriginal ? (s.policySaved / s.policyOriginal) * 100 : 0;
+      const topSelected = mostCommon(s.selected);
+      if (fallbackRate >= FALLBACK_RATE_LIMIT) {
+        out.push({
+          ...base, action: "review_policy", reason: "frequent_fallbacks",
+          detail: `${fallbackRate}% of ${s.policyCalls} optimized calls fell back to the original response (input limits or transform errors).`,
+        });
+        continue;
+      }
+      if (avgOptimizationMs >= 5 && avgOptimizationMs > avgCallMs * OVERHEAD_SHARE_LIMIT) {
+        out.push({
+          ...base, action: "review_policy", reason: "overhead_high",
+          detail: `Optimization averages ${Math.round(avgOptimizationMs)} ms against ${Math.round(avgCallMs)} ms per call.`,
+        });
+        continue;
+      }
+      if (mode === "adaptive" && topSelected?.[0] === "off" && topSelected[1] / s.policyCalls >= 0.9) {
+        out.push({
+          ...base, action: "disable", reason: "adaptive_never_selected", suggestedPolicy: { mode: "off" },
+          detail: `Adaptive optimization kept the original response on ${topSelected[1]} of ${s.policyCalls} calls.`,
+        });
+        continue;
+      }
+      if (mode !== "adaptive" && reduction < MIN_USEFUL_REDUCTION_PERCENT) {
+        out.push({
+          ...base, action: "disable", reason: "no_savings", suggestedPolicy: { mode: "off" },
+          detail: `The ${mode} policy saved ${reduction.toFixed(1)}% of tokens over ${s.policyCalls} calls.`,
+        });
+        continue;
+      }
+      if (
+        mode === "adaptive" && topSelected && topSelected[0] !== "off" &&
+        topSelected[1] / s.policyCalls >= STABLE_SELECTION_SHARE
+      ) {
+        const pinned = topSelected[0];
+        out.push({
+          ...base, action: "pin_mode", reason: "stable_adaptive_selection",
+          suggestedPolicy: pinned === "prune" ? AUTOMATIC_PRUNE : { mode: pinned },
+          detail:
+            `Adaptive selected ${pinned} on ${topSelected[1]} of ${s.policyCalls} calls; pinning it skips candidate evaluation` +
+            (pinned === "project" || pinned === "jsonpath" ? " (copy that candidate's options)." : "."),
+        });
+        continue;
+      }
+    }
+    if (s.intentCalls >= RECOMMENDATION_MIN_CALLS && s.intentCalls * 2 >= s.calls) {
+      out.push({
+        ...base, action: "add_projection", reason: "agents_request_fields",
+        suggestedPolicy: { mode: "project", fields: ["<fields agents request>"] },
+        detail: `Agents passed call_tool fields on ${s.intentCalls} of ${s.calls} calls; a project policy applies the same projection to every call.`,
+      });
+      continue;
+    }
+    const medianTokens = median(s.originalTokens);
+    if (s.policyCalls === 0 && medianTokens >= LARGE_RESPONSE_TOKENS) {
+      out.push({
+        ...base, action: "enable_adaptive", reason: "large_unoptimized_responses", suggestedPolicy: { mode: "adaptive" },
+        detail: `Median response is ~${Math.round(medianTokens).toLocaleString("en-US")} tokens and no optimization policy applied.`,
+      });
+    }
+  }
+  return out.sort((a, b) => b.calls - a.calls || a.tool.localeCompare(b.tool)).slice(0, limit);
 }
 
 export type AuditedEvent = AuditEvent & { ts: string };
@@ -89,6 +253,8 @@ export interface UsageSummary {
   byServer: UsageBucket[];
   byTool: UsageBucket[];
   byUser: UsageBucket[];
+  /** Policy suggestions from the same audit window (see recommendOptimizationPolicies). */
+  recommendations: PolicyRecommendation[];
 }
 
 /** True for MCP session tool traffic (excludes UI admin mutations and auth noise). */
@@ -214,6 +380,7 @@ export function summarizeUsage(events: AuditedEvent[], top = 10): UsageSummary {
     byServer: ranked(byServer, top),
     byTool: ranked(byTool, top),
     byUser: ranked(byUser, top),
+    recommendations: recommendOptimizationPolicies(usage),
   };
 }
 

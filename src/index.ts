@@ -20,6 +20,7 @@ import { META_TOOL_NAMES } from "./meta-tools.js";
 import { loadRegistry } from "./registry.js";
 import { adoptLegacyConfigDir, APP_NAME } from "./paths.js";
 import { loadEnvFile } from "./env-file.js";
+import { loadTokenizer, parseTokenizerFlag } from "./tokenizers.js";
 import { VERSION, LOG_PREFIX } from "./version.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -95,7 +96,11 @@ async function runStdio(): Promise<void> {
     },
   });
 
-  const broker = createBroker({ router, manager, skillRouter, skillHashes });
+  const tokenizerFlag = process.argv.indexOf("--tokenizer");
+  const tokenizer = await loadTokenizer(
+    parseTokenizerFlag(tokenizerFlag !== -1 ? process.argv[tokenizerFlag + 1] : undefined)
+  );
+  const broker = createBroker({ router, manager, skillRouter, skillHashes, tokenizer });
 
   server.setRequestHandler(ListToolsRequestSchema, async () => broker.listTools());
   server.setRequestHandler(CallToolRequestSchema, async (request) => {

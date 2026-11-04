@@ -173,13 +173,16 @@ from remote gateway users (admins still see it labelled).
 ```
 lazygate serve [--host 127.0.0.1] [--port 8787] [--config servers.json] [--skills skills.json]
                [--idle-timeout-min 30] [--max-sessions 100]
-               [--namespace-tools]
+               [--namespace-tools] [--tokenizer chars_per_4|o200k_base|cl100k_base]
                [--allow-remote --allowed-host gw.example.com:443]
                [--public-url https://gw.example.com]
 ```
 
 `--namespace-tools` exposes every activated tool as `server__tool` (unless a server sets
-`namespaceTools: false`), so identical upstream names do not collide.
+`namespaceTools: false`), so identical upstream names do not collide. `--tokenizer` overrides
+`responseOptimization.tokenizer` for token budgets, metrics, and audit rows (see
+[Response optimization](reference.md#response-optimization)). The usage dashboard lists
+optimization policy suggestions derived from the audit log.
 
 - Binds to loopback by default. Any other host needs `--allow-remote`, and you must put TLS in front
   (see [Remote access / TLS](#remote-access--tls)).

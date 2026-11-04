@@ -1,4 +1,74 @@
-import { isUsageEvent, summarizeUsage, type AuditedEvent } from "../gateway/audit.js";
+import {
+  isUsageEvent,
+  recommendOptimizationPolicies,
+  summarizeUsage,
+  type AuditedEvent,
+} from "../gateway/audit.js";
+
+const calls = (count: number, row: Partial<AuditedEvent>): AuditedEvent[] =>
+  Array.from({ length: count }, (_, i) => ({
+    ts: `2026-11-03T12:00:${String(i).padStart(2, "0")}.000Z`,
+    user: "alice",
+    session: "s1",
+    tool: "call_tool",
+    ok: true,
+    ms: 100,
+    ...row,
+  }));
+
+describe("usage-based optimization recommendations", () => {
+  it("suggests adaptive for large unoptimized responses once there is enough evidence", () => {
+    const recs = recommendOptimizationPolicies([
+      ...calls(5, { server: "jira", target: "search", originalTokens: 6000 }),
+      ...calls(4, { server: "jira", target: "get", originalTokens: 9000 }),
+      ...calls(6, { server: "notes", target: "read", originalTokens: 300 }),
+    ]);
+    expect(recs).toEqual([
+      expect.objectContaining({
+        tool: "jira.search",
+        action: "enable_adaptive",
+        reason: "large_unoptimized_responses",
+        suggestedPolicy: { mode: "adaptive" },
+        calls: 5,
+      }),
+    ]);
+  });
+
+  it("flags frequent fallbacks, high overhead, and policies that save nothing", () => {
+    const recs = recommendOptimizationPolicies([
+      ...calls(4, { server: "a", target: "flaky", optimizationMode: "schema", optimizationFallback: true, originalTokens: 100, savedTokens: 0 }),
+      ...calls(2, { server: "a", target: "flaky", optimizationMode: "schema", originalTokens: 100, savedTokens: 80 }),
+      ...calls(5, { server: "a", target: "slow", optimizationMode: "prune", optimizationDurationMs: 90, ms: 100, originalTokens: 100, savedTokens: 50 }),
+      ...calls(5, { server: "a", target: "useless", optimizationMode: "prune", optimizationDurationMs: 1, originalTokens: 1000, savedTokens: 10 }),
+    ]);
+    const byTool = Object.fromEntries(recs.map((r) => [r.tool, r]));
+    expect(byTool["a.flaky"]).toMatchObject({ action: "review_policy", reason: "frequent_fallbacks" });
+    expect(byTool["a.slow"]).toMatchObject({ action: "review_policy", reason: "overhead_high" });
+    expect(byTool["a.useless"]).toMatchObject({ action: "disable", reason: "no_savings", suggestedPolicy: { mode: "off" } });
+  });
+
+  it("pins a stable adaptive choice, drops adaptive that never selects, and notices agent field requests", () => {
+    const recs = recommendOptimizationPolicies([
+      ...calls(5, { server: "b", target: "stable", optimizationMode: "adaptive", optimizationSelectedMode: "prune", originalTokens: 500, savedTokens: 100 }),
+      ...calls(5, { server: "b", target: "idle", optimizationMode: "adaptive", optimizationSelectedMode: "off", originalTokens: 500, savedTokens: 0 }),
+      ...calls(6, { server: "b", target: "fields", optimizationMode: "project", optimizationIntent: "fields", originalTokens: 4000, savedTokens: 3000 }),
+      ...calls(5, { server: "b", target: "failed", ok: false, originalTokens: 9000 }),
+    ]);
+    const byTool = Object.fromEntries(recs.map((r) => [r.tool, r]));
+    expect(byTool["b.stable"]).toMatchObject({
+      action: "pin_mode",
+      suggestedPolicy: expect.objectContaining({ mode: "prune", removeNulls: true }),
+    });
+    expect(byTool["b.idle"]).toMatchObject({ action: "disable", reason: "adaptive_never_selected" });
+    expect(byTool["b.fields"]).toMatchObject({ action: "add_projection", reason: "agents_request_fields" });
+    expect(byTool["b.failed"]).toBeUndefined();
+  });
+
+  it("is included in the usage summary", () => {
+    const s = summarizeUsage(calls(5, { server: "jira", target: "search", originalTokens: 6000 }));
+    expect(s.recommendations).toHaveLength(1);
+  });
+});
 
 describe("usage summary", () => {
   it("ignores UI admin and security noise", () => {
