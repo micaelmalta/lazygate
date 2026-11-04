@@ -374,9 +374,17 @@ export function createBroker({
     const resolved = resolveOptimizationPolicy(currentOptimizationConfig(), context);
     // Fields named by the calling agent are an explicit request, so they apply even when the
     // operator has not enabled response optimization; budgets still come from the config.
+    const declaresOutputSchema = manager
+      .getAllActiveTools()
+      .some(
+        (t) =>
+          t.serverName === context.serverName &&
+          toolNameMatches(context.serverName, t.name, context.toolName) &&
+          Boolean(t.outputSchema)
+      );
     const policy: ReturnType<typeof resolveOptimizationPolicy> = requestedFields
       ? { ...resolved, mode: "project", fields: requestedFields, candidates: undefined }
-      : resolved;
+      : { ...resolved, keepEmptyValues: resolved.keepEmptyValues ?? (declaresOutputSchema || undefined) };
     if (policy.mode === "off" && policy.maxTokens === undefined && policy.maxOutputBytes === undefined) {
       return { result, tokenizer };
     }

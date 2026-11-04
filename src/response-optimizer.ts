@@ -54,6 +54,12 @@ export interface OptimizationPolicy {
    * response is not the most useful one when the agent needs every row.
    */
   allowSummary?: boolean;
+  /**
+   * Leave `prune` out of the automatic candidates, so nulls and empty strings, arrays, and objects
+   * survive. Defaults to true for tools that declare an outputSchema, whose empty values are part
+   * of a contract (null versus missing).
+   */
+  keepEmptyValues?: boolean;
   /** With allowSummary, automatic candidates add `schema` at or above this estimated input size (default 8000). */
   schemaMinInputTokens?: number;
 }
@@ -175,6 +181,7 @@ const policySchema = z
     minInputTokens: z.number().int().min(1).max(1_000_000).optional(),
     minSavingsPercent: z.number().min(0).max(100).optional(),
     allowSummary: z.boolean().optional(),
+    keepEmptyValues: z.boolean().optional(),
     schemaMinInputTokens: z.number().int().min(1).max(1_000_000).optional(),
   })
   .strict()
@@ -899,17 +906,20 @@ const DEFAULT_SCHEMA_MIN_INPUT_TOKENS = 8000;
 
 /**
  * Candidates used when an adaptive policy lists none (for example `defaultMode: "adaptive"`).
- * Empty-value pruning and HTML conversion change the representation, not the information. The
- * lossy `schema` summary joins only when the policy sets `allowSummary` and the response is large.
+ * HTML conversion keeps the content; pruning drops only empty values, which can still carry
+ * meaning, so `keepEmptyValues` removes it. The `schema` summary drops rows and joins only when
+ * the policy sets `allowSummary` and the response is large.
  */
 export function automaticCandidates(
   originalTokens: number,
-  options: { allowSummary?: boolean; schemaMinInputTokens?: number } = {}
+  options: { allowSummary?: boolean; keepEmptyValues?: boolean; schemaMinInputTokens?: number } = {}
 ): OptimizationCandidate[] {
-  const candidates: OptimizationCandidate[] = [
-    { mode: "prune", removeNulls: true, removeEmptyObjects: true, removeEmptyArrays: true, removeEmptyStrings: true },
-    { mode: "html_markdown" },
-  ];
+  const candidates: OptimizationCandidate[] = [{ mode: "html_markdown" }];
+  if (!options.keepEmptyValues) {
+    candidates.unshift({
+      mode: "prune", removeNulls: true, removeEmptyObjects: true, removeEmptyArrays: true, removeEmptyStrings: true,
+    });
+  }
   if (options.allowSummary && originalTokens >= (options.schemaMinInputTokens ?? DEFAULT_SCHEMA_MIN_INPUT_TOKENS)) {
     candidates.push({ mode: "schema" });
   }

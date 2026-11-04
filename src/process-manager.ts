@@ -206,6 +206,8 @@ export interface MCPTool {
   name: string;
   description: string;
   inputSchema: Record<string, unknown>;
+  /** Upstream structured-output contract, when the tool declares one. */
+  outputSchema?: Record<string, unknown>;
   /** Upstream MCP tool annotations (hints only — untrusted, but surfaced to the caller). */
   annotations?: {
     title?: string;

@@ -654,6 +654,33 @@ describe("createBroker", () => {
       expect(result._meta).toMatchObject({ lazygate: { responseOptimization: { selectedMode: "prune" } } });
     });
 
+    it("keeps empty values for tools that declare an outputSchema unless the policy opts back in", async () => {
+      mk.active.set("github", [
+        { name: "github_tool", description: "d", inputSchema: {}, outputSchema: { type: "object" }, serverName: "github" },
+      ]);
+      const rows = Array.from({ length: 100 }, (_, i) => ({
+        id: i, closedAt: null, assignees: [], resolution: "", custom: {}, title: `Issue ${i}`,
+      }));
+      const run = async (tools: Record<string, unknown>) => {
+        broker = createBroker({
+          router,
+          manager: mk.manager as unknown as ProcessManager,
+          skillRouter: null,
+          responseOptimization: parseResponseOptimizationConfig({
+            responseOptimization: { enabled: true, defaultMode: "adaptive", tools },
+          }).config,
+        });
+        mk.manager.callTool.mockResolvedValueOnce({ content: [], structuredContent: { rows } } as never);
+        return broker.callTool("call_tool", { server: "github", tool: "github_tool", args: {} });
+      };
+
+      const strict = await run({});
+      expect(strict.structuredContent).toEqual({ rows });
+
+      const optedIn = await run({ "github.github_tool": { keepEmptyValues: false } });
+      expect(JSON.stringify(optedIn.structuredContent)).not.toContain("closedAt");
+    });
+
     it("drops the handle instead of failing when its pointer would exceed the output budget", async () => {
       const responseOptimization = parseResponseOptimizationConfig({
         responseOptimization: { enabled: true, defaultMode: "off", maxOutputTokens: 200 },

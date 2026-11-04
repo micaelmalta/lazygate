@@ -79,7 +79,10 @@ const FALLBACK_RATE_LIMIT = 20;
 const OVERHEAD_SHARE_LIMIT = 0.5;
 const STABLE_SELECTION_SHARE = 0.8;
 const MIN_USEFUL_REDUCTION_PERCENT = 5;
-/** Share of handle-bearing responses followed by get_result above which the reduction costs turns. */
+/**
+ * Share of handle-bearing responses followed by get_result above which the reduction costs more
+ * than it saves. Counts tool calls: the gateway cannot see whether a read shared a model turn.
+ */
 const RESULT_READ_RATE_LIMIT = 30;
 
 const AUTOMATIC_PRUNE = { mode: "prune", removeNulls: true, removeEmptyObjects: true, removeEmptyArrays: true, removeEmptyStrings: true };
@@ -170,7 +173,7 @@ export function recommendOptimizationPolicies(events: AuditedEvent[], limit = 20
           ...base, action: "review_policy", reason: "frequent_result_reads",
           ...(summarized ? { suggestedPolicy: { mode: "adaptive", allowSummary: false } } : {}),
           detail:
-            `Agents called get_result after ${readRate}% of ${s.handleOffers} reduced responses, so the reduction costs an extra turn. ` +
+            `Agents called get_result after ${readRate}% of ${s.handleOffers} reduced responses, so the reduction costs extra tool calls (and often model turns). ` +
             (summarized
               ? "Adaptive mostly picked the schema summary; turn allowSummary off."
               : "Raise maxTokens or project the fields agents read back."),
@@ -287,7 +290,7 @@ export interface UsageSummary {
   /** Responses that carried a get_result handle, and get_result reads of those handles. */
   resultHandleOffers: number;
   resultHandleReads: number;
-  /** Reads as a percentage of offers: how often a reduction cost the agent another turn. */
+  /** Reads as a percentage of offers: how often a reduction cost the agent another tool call. */
   resultHandleReadRate: number;
   from: string | null;
   to: string | null;

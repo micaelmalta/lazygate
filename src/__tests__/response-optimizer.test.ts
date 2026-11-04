@@ -424,6 +424,7 @@ describe("adaptive response optimization", () => {
     expect(automaticCandidates(10_000).map((c) => c.mode)).toEqual(["prune", "html_markdown"]);
     expect(automaticCandidates(10_000, { allowSummary: true }).map((c) => c.mode)).toEqual(["prune", "html_markdown", "schema"]);
     expect(automaticCandidates(100, { allowSummary: true }).map((c) => c.mode)).toEqual(["prune", "html_markdown"]);
+    expect(automaticCandidates(100, { keepEmptyValues: true }).map((c) => c.mode)).toEqual(["html_markdown"]);
 
     const conservative = await optimizeToolResult(
       original,

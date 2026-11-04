@@ -142,13 +142,18 @@ no candidate meets the threshold, the response is left unchanged apart from any 
 budget.
 
 Adaptive needs no per-tool setup. Without `candidates` (including `defaultMode: "adaptive"`) it
-compares an automatic set that changes the representation but not the information: `prune` of
-nulls and empty strings, arrays and objects, and `html_markdown`. The lossy `schema` summary
-(field shapes plus a few samples) is never chosen automatically, because the smallest response is
-not the most useful one when the agent needs every row: the agent would have to call `get_result`,
-and the extra turn can cost more than the tokens saved. A tool whose callers usually want an
-overview can opt in with `"allowSummary": true`, which adds `schema` for responses of at least
-`schemaMinInputTokens` (default `8000`); listing `schema` in `candidates` does the same explicitly.
+compares an automatic set that keeps every row and every non-empty value: `html_markdown`, and
+`prune` of nulls and empty strings, arrays, and objects. Pruning is still lossy: `null`, `[]`, or
+`{}` can mean something different from a missing field, so a pruned result is marked incomplete
+and offers a result handle. Tools that declare an `outputSchema` keep their empty values by
+default; any tool can opt out of pruning with `"keepEmptyValues": true` (or back in with `false`).
+
+The `schema` summary (field shapes plus a few samples) is never chosen automatically, because the
+smallest response is not the most useful one when the agent needs every row: the agent would have
+to call `get_result`, and the extra call can cost more than the tokens saved. A tool whose callers
+usually want an overview can opt in with `"allowSummary": true`, which adds `schema` for responses
+of at least `schemaMinInputTokens` (default `8000`); listing `schema` in `candidates` does the
+same explicitly.
 
 Candidates are ranked by serialized size; only the original and the winner go through the
 configured tokenizer, which also confirms the winner still meets `minSavingsPercent`. Output
@@ -196,7 +201,9 @@ of calls; add a projection when agents pass `fields` on at least half the calls;
 `adaptive` for tools whose median response is 2,000 tokens or more with no policy. Before any of
 those, it flags tools where agents call `get_result` after 30% or more of the responses that
 offered a handle: the reduction is removing data they need. The dashboard's "Result reads" figure
-is the same rate across all tools. Each suggestion
+is the same rate across all tools. Both count `get_result` tool calls; the gateway cannot see model
+turns, and a read made alongside other calls adds no turn. `lazygate benchmark --tasks` measures
+turns end to end. Each suggestion
 names the `server.tool` key and, where possible, a policy to paste into `responseOptimization.tools`.
 They are prompts for review, not automatic changes.
 
