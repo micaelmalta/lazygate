@@ -233,6 +233,10 @@ Against `direct` that is −52.5% for `call_tool`, −54.9% for `call_tool+opt` 
   one run cost 228,343 tokens, the same as plain `call_tool`, so optimization saved nothing that
   round (most likely the model did not pass `fields`), while the other runs saved about 7.6%.
   Savings from `fields` depend on the agent asking for them.
+- **Optimization saves tokens here, not time.** `call_tool+opt` took 6.3 s against 6.1 s for
+  `call_tool`, with the same 10 turns. The one strategy that is clearly faster is `run_chain`
+  (3 turns, 4.1 s against 5.9 s for `direct`), because it removes agent turns. Times are means
+  of three runs, without a spread, so small differences are noise.
 - **`direct` got one answer wrong** (2/3 correct), and its mean covers the correct runs only. With
   three rounds that is an observation, not a measured error rate.
 
