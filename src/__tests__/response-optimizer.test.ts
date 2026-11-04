@@ -3,10 +3,12 @@ import { mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  estimateTokens,
   optimizeToolResult,
   parseResponseOptimizationConfig,
   type OptimizationContext,
   type OptimizableToolResult,
+  type Tokenizer,
 } from "../response-optimizer.js";
 import { loadRegistry } from "../registry.js";
 
@@ -284,6 +286,229 @@ describe("response optimization budgeting and metadata", () => {
     );
     expect(optimized.result).toBe(original);
     expect(optimized.metrics.failure).toMatch(/maxInputBytes/);
+  });
+});
+
+describe("adaptive response optimization", () => {
+  it("selects the candidate with the greatest savings and reports the selected mode", async () => {
+    const original = {
+      content: [],
+      structuredContent: {
+        issues: [
+          { id: 1, title: "A", state: "open", description: "x".repeat(80) },
+          { id: 2, title: "B", state: "closed", description: "y".repeat(80) },
+        ],
+      },
+    };
+    const optimized = await optimizeToolResult(
+      original,
+      {
+        mode: "adaptive",
+        minInputTokens: 1,
+        minSavingsPercent: 10,
+        candidates: [
+          { mode: "prune", removeNulls: true },
+          { mode: "project", fields: ["issues.id", "issues.title"] },
+        ],
+      },
+      context
+    );
+
+    expect(optimized.metrics).toMatchObject({ mode: "adaptive", selectedMode: "project", changed: true });
+    expect(optimized.result.structuredContent).toEqual({ issues: [{ id: 1, title: "A" }, { id: 2, title: "B" }] });
+    expect(optimized.result._meta).toMatchObject({
+      lazygate: { responseOptimization: { mode: "adaptive", selectedMode: "project" } },
+    });
+  });
+
+  it("returns the original result when no candidate meets the minimum savings threshold", async () => {
+    const original = { content: [], structuredContent: { id: 1, title: "short" } };
+    const optimized = await optimizeToolResult(
+      original,
+      {
+        mode: "adaptive",
+        minInputTokens: 1,
+        minSavingsPercent: 90,
+        candidates: [{ mode: "project", fields: ["id", "title"] }],
+      },
+      context
+    );
+
+    expect(optimized.result).toBe(original);
+    expect(optimized.metrics).toMatchObject({ mode: "adaptive", selectedMode: "off", changed: false, complete: true });
+  });
+
+  it("requires candidate policies for adaptive tool configuration and rejects adaptive as the global default", () => {
+    const missingCandidates = parseResponseOptimizationConfig({
+      responseOptimization: {
+        enabled: true,
+        defaultMode: "off",
+        tools: { "github.search_issues": { mode: "adaptive" } },
+      },
+    });
+    expect(missingCandidates.errors.join(" ")).toMatch(/adaptive mode requires at least one candidate/);
+
+    const globalAdaptive = parseResponseOptimizationConfig({
+      responseOptimization: { enabled: true, defaultMode: "adaptive" },
+    });
+    expect(globalAdaptive.errors.join(" ")).toMatch(/defaultMode.*adaptive/);
+    expect(globalAdaptive.config.enabled).toBe(false);
+
+    const valid = parseResponseOptimizationConfig({
+      responseOptimization: {
+        enabled: true,
+        defaultMode: "off",
+        tools: {
+          "github.search_issues": {
+            mode: "adaptive",
+            candidates: [{ mode: "project", fields: ["issues.id", "issues.title"] }],
+            minInputTokens: 200,
+            minSavingsPercent: 15,
+          },
+        },
+      },
+    });
+    expect(valid.errors).toEqual([]);
+    expect(valid.config.tools["github.search_issues"]).toMatchObject({
+      mode: "adaptive",
+      candidates: [{ mode: "project", fields: ["issues.id", "issues.title"] }],
+      minInputTokens: 200,
+      minSavingsPercent: 15,
+    });
+  });
+
+  it("skips adaptive candidates below the configured minimum input size", async () => {
+    const original = { content: [{ type: "text", text: "<main><p>A short page</p></main>" }] };
+    const optimized = await optimizeToolResult(
+      original,
+      {
+        mode: "adaptive",
+        minInputTokens: 10_000,
+        candidates: [{ mode: "html_reader" }],
+      },
+      context
+    );
+
+    expect(optimized.result).toBe(original);
+    expect(optimized.metrics).toMatchObject({ mode: "adaptive", selectedMode: "off", changed: false });
+  });
+});
+
+describe("tokenizer-aware response measurement", () => {
+  const serializedLengthTokenizer: Tokenizer = {
+    name: "test_serialized_length",
+    countTokens: (serializedValue) => serializedValue.length,
+  };
+
+  it("uses an injected tokenizer for measurements and response metadata", async () => {
+    const original = { content: [], structuredContent: { id: 1, title: "A title", detail: "omit me" } };
+    const optimized = await optimizeToolResult(
+      original,
+      { mode: "project", fields: ["id", "title"], includeMetadata: true },
+      context,
+      undefined,
+      serializedLengthTokenizer
+    );
+
+    expect(estimateTokens(original, serializedLengthTokenizer)).toBe(JSON.stringify(original).length);
+    expect(optimized.metrics).toMatchObject({
+      tokenizer: "test_serialized_length",
+      originalTokens: JSON.stringify(original).length,
+    });
+    expect(optimized.result._meta).toMatchObject({
+      lazygate: { responseOptimization: { tokenizer: "test_serialized_length" } },
+    });
+  });
+
+  it("uses the injected tokenizer for adaptive candidate selection and output budgets", async () => {
+    const bodyAwareTokenizer: Tokenizer = {
+      name: "test_body_aware",
+      countTokens: (serializedValue) => serializedValue.includes("detail") ? 10_000 : serializedValue.length,
+    };
+    const original = { content: [], structuredContent: { id: 1, detail: "x".repeat(500) } };
+    const adaptive = await optimizeToolResult(
+      original,
+      {
+        mode: "adaptive",
+        minInputTokens: 1,
+        minSavingsPercent: 10,
+        candidates: [{ mode: "project", fields: ["id"] }],
+      },
+      context,
+      undefined,
+      bodyAwareTokenizer
+    );
+    expect(adaptive.metrics).toMatchObject({
+      tokenizer: "test_body_aware",
+      originalTokens: 10_000,
+      selectedMode: "project",
+    });
+
+    const budgeted = await optimizeToolResult(
+      { content: [{ type: "text", text: "x".repeat(200) }] },
+      { mode: "off", maxTokens: 40 },
+      context,
+      undefined,
+      serializedLengthTokenizer
+    );
+    expect(budgeted.metrics.tokenizer).toBe("test_serialized_length");
+    expect(budgeted.metrics.originalTokens).toBeGreaterThan(40);
+    expect(budgeted.result.isError).toBe(true);
+  });
+
+  it("uses the injected tokenizer when truncating structured content to a token budget", async () => {
+    const xCountingTokenizer: Tokenizer = {
+      name: "test_x_counter",
+      countTokens: (serializedValue) => serializedValue.match(/x{5}/g)?.length ?? 0,
+    };
+    const original = {
+      content: [],
+      structuredContent: ["x".repeat(80), "x".repeat(80)],
+    };
+    const optimized = await optimizeToolResult(
+      original,
+      { mode: "off", maxTokens: 20 },
+      context,
+      undefined,
+      xCountingTokenizer
+    );
+
+    expect(optimized.result.isError).not.toBe(true);
+    expect(optimized.result.structuredContent).toEqual(["x".repeat(80)]);
+    expect(optimized.metrics.optimizedTokens).toBeLessThanOrEqual(20);
+    expect(optimized.metrics.complete).toBe(false);
+  });
+
+  it("uses the injected tokenizer when truncating text content to a token budget", async () => {
+    const xCountingTokenizer: Tokenizer = {
+      name: "test_x_counter",
+      countTokens: (serializedValue) => serializedValue.match(/x{5}/g)?.length ?? 0,
+    };
+    const optimized = await optimizeToolResult(
+      { content: [{ type: "text", text: "x".repeat(200) }] },
+      { mode: "off", maxTokens: 25 },
+      context,
+      undefined,
+      xCountingTokenizer
+    );
+
+    expect(optimized.result.isError).not.toBe(true);
+    expect(optimized.result.content[0]).toMatchObject({
+      type: "text",
+      text: expect.stringContaining("[Output incomplete: truncated to configured budget.]"),
+    });
+    expect((optimized.result.content[0] as { text: string }).text.length).toBeGreaterThan(100);
+    expect(optimized.metrics.optimizedTokens).toBeLessThanOrEqual(25);
+    expect(optimized.metrics.complete).toBe(false);
+  });
+
+  it("falls back to the documented estimate when a custom tokenizer returns an invalid count", async () => {
+    const invalidTokenizer: Tokenizer = { name: "test_invalid", countTokens: () => Number.NaN };
+    const original = { content: [{ type: "text", text: "some response text" }] };
+    const optimized = await optimizeToolResult(original, { mode: "off" }, context, undefined, invalidTokenizer);
+
+    expect(optimized.metrics.tokenizer).toBe("test_invalid_fallback_chars_per_4");
+    expect(optimized.metrics.originalTokens).toBe(estimateTokens(original));
   });
 });
 

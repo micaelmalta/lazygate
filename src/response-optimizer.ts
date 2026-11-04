@@ -12,9 +12,23 @@ export const OPTIMIZATION_MODES = [
   "schema",
   "html_markdown",
   "html_reader",
+  "adaptive",
 ] as const;
 
 export type OptimizationMode = (typeof OPTIMIZATION_MODES)[number];
+export type OptimizationCandidateMode = Exclude<OptimizationMode, "off" | "adaptive">;
+
+export interface OptimizationCandidate {
+  mode: OptimizationCandidateMode;
+  fields?: string[];
+  jsonPath?: string;
+  removeNulls?: boolean;
+  removeEmptyObjects?: boolean;
+  removeEmptyArrays?: boolean;
+  removeEmptyStrings?: boolean;
+  removeFields?: string[];
+  sampleSize?: number;
+}
 
 export interface OptimizationPolicy {
   mode?: OptimizationMode;
@@ -28,6 +42,12 @@ export interface OptimizationPolicy {
   removeFields?: string[];
   sampleSize?: number;
   includeMetadata?: boolean;
+  /** Explicit, bounded transformations to compare when mode is adaptive. */
+  candidates?: OptimizationCandidate[];
+  /** Skip candidate evaluation below this estimated input size (default 128). */
+  minInputTokens?: number;
+  /** Minimum estimated reduction required to select a candidate (default 10%). */
+  minSavingsPercent?: number;
 }
 
 export interface ResponseOptimizationConfig {
@@ -52,6 +72,10 @@ export interface OptimizationContext {
 
 export interface OptimizationMetrics {
   mode: OptimizationMode;
+  /** Candidate mode chosen by adaptive optimization, or "off" when no transform was selected. */
+  selectedMode?: Exclude<OptimizationMode, "adaptive">;
+  /** Token counter used for these measurements; chars_per_4 is the built-in fallback. */
+  tokenizer?: string;
   originalTokens: number;
   optimizedTokens: number;
   savedTokens: number;
@@ -80,7 +104,45 @@ export type OptimizationMetricsSink = (
   metrics: OptimizationMetrics
 ) => void;
 
+/** Counts tokens in the serialized JSON value passed to the optimizer. */
+export interface Tokenizer {
+  /** Stable, safe label surfaced in optimization metrics and response metadata. */
+  name: string;
+  /** Return a non-negative integer token count for serialized JSON text. */
+  countTokens(serializedValue: string): number;
+}
+
 const modeSchema = z.enum(OPTIMIZATION_MODES);
+const candidateModeSchema = z.enum([
+  "prune",
+  "project",
+  "jsonpath",
+  "schema",
+  "html_markdown",
+  "html_reader",
+]);
+
+const candidateSchema = z
+  .object({
+    mode: candidateModeSchema,
+    fields: z.array(z.string().min(1).max(256)).max(100).optional(),
+    jsonPath: z.string().min(1).max(512).optional(),
+    removeNulls: z.boolean().optional(),
+    removeEmptyObjects: z.boolean().optional(),
+    removeEmptyArrays: z.boolean().optional(),
+    removeEmptyStrings: z.boolean().optional(),
+    removeFields: z.array(z.string().min(1).max(256)).max(100).optional(),
+    sampleSize: z.number().int().min(1).max(100).optional(),
+  })
+  .strict()
+  .superRefine((policy, ctx) => {
+    if (policy.mode === "project" && (!policy.fields || policy.fields.length === 0)) {
+      ctx.addIssue({ code: "custom", path: ["fields"], message: "project mode requires at least one field" });
+    }
+    if (policy.mode === "jsonpath" && !policy.jsonPath) {
+      ctx.addIssue({ code: "custom", path: ["jsonPath"], message: "jsonpath mode requires a JSONPath expression" });
+    }
+  });
 
 const policySchema = z
   .object({
@@ -95,6 +157,9 @@ const policySchema = z
     removeFields: z.array(z.string().min(1).max(256)).max(100).optional(),
     sampleSize: z.number().int().min(1).max(100).optional(),
     includeMetadata: z.boolean().optional(),
+    candidates: z.array(candidateSchema).max(4).optional(),
+    minInputTokens: z.number().int().min(1).max(1_000_000).optional(),
+    minSavingsPercent: z.number().min(0).max(100).optional(),
   })
   .strict()
   .superRefine((policy, ctx) => {
@@ -103,6 +168,9 @@ const policySchema = z
     }
     if (policy.mode === "jsonpath" && !policy.jsonPath) {
       ctx.addIssue({ code: "custom", path: ["jsonPath"], message: "jsonpath mode requires a JSONPath expression" });
+    }
+    if (policy.mode === "adaptive" && (!policy.candidates || policy.candidates.length === 0)) {
+      ctx.addIssue({ code: "custom", path: ["candidates"], message: "adaptive mode requires at least one candidate" });
     }
   });
 
@@ -120,7 +188,16 @@ const configSchema = z
     includeMetadata: z.boolean().default(false),
     tools: z.record(z.string().min(1), policySchema).default({}),
   })
-  .strict();
+  .strict()
+  .superRefine((config, ctx) => {
+    if (config.defaultMode === "adaptive") {
+      ctx.addIssue({
+        code: "custom",
+        path: ["defaultMode"],
+        message: "adaptive mode must be configured on a tool with explicit candidates",
+      });
+    }
+  });
 
 const DEFAULT_CONFIG: ResponseOptimizationConfig = {
   enabled: false,
@@ -208,13 +285,46 @@ function serialized(value: unknown): string {
   return result;
 }
 
-/** Approximation for budgeting only: one token per four UTF-16 code units. */
-export function estimateTokens(value: unknown): number {
-  try {
-    return Math.ceil(serialized(value).length / 4);
-  } catch {
-    return 0;
-  }
+interface TokenEstimator {
+  hasCustom: boolean;
+  estimate(value: unknown): number;
+  label(): string;
+}
+
+const TOKENIZER_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+
+function createTokenEstimator(tokenizer?: Tokenizer): TokenEstimator {
+  const name = tokenizer && TOKENIZER_NAME_PATTERN.test(tokenizer.name) ? tokenizer.name : "custom";
+  let fallbackUsed = false;
+  return {
+    hasCustom: Boolean(tokenizer),
+    estimate(value: unknown): number {
+      let encoded: string;
+      try {
+        encoded = serialized(value);
+      } catch {
+        return 0;
+      }
+      if (!tokenizer) return Math.ceil(encoded.length / 4);
+      try {
+        const count = tokenizer.countTokens(encoded);
+        if (Number.isSafeInteger(count) && count >= 0) return count;
+      } catch {
+        // A tokenizer is advisory. Keep budgeting available if an injected counter fails.
+      }
+      fallbackUsed = true;
+      return Math.ceil(encoded.length / 4);
+    },
+    label(): string {
+      if (!tokenizer) return "chars_per_4";
+      return fallbackUsed ? name + "_fallback_chars_per_4" : name;
+    },
+  };
+}
+
+/** Approximation by default; embedding hosts may inject a tokenizer for model-aware counts. */
+export function estimateTokens(value: unknown, tokenizer?: Tokenizer): number {
+  return createTokenEstimator(tokenizer).estimate(value);
 }
 
 function assertInputLimits(value: unknown, maxBytes: number, maxDepth: number): void {
@@ -584,7 +694,56 @@ function transformValue(
 
 const TRUNCATION_MARKER = "\n\n[Output incomplete: truncated to configured budget.]";
 
-function truncateText(text: string, maxTokens: number): { text: string; complete: boolean } {
+type ValueTokenEstimator = (value: unknown) => number;
+
+function truncateStringByEstimator(
+  value: string,
+  maxTokens: number,
+  estimate: ValueTokenEstimator,
+  render: (prefix: string) => string
+): { value: string; complete: boolean } {
+  if (estimate(value) <= maxTokens) return { value, complete: true };
+
+  const minimum = render("");
+  if (estimate(minimum) > maxTokens) {
+    return {
+      value: "Output incomplete: configured token budget is too small to return content.",
+      complete: false,
+    };
+  }
+
+  let low = 0;
+  let high = value.length;
+  let best = 0;
+  while (low <= high) {
+    const middle = Math.floor((low + high) / 2);
+    if (estimate(render(value.slice(0, middle))) <= maxTokens) {
+      best = middle;
+      low = middle + 1;
+    } else {
+      high = middle - 1;
+    }
+  }
+  return { value: render(value.slice(0, best)), complete: false };
+}
+
+function truncateText(
+  text: string,
+  maxTokens: number,
+  estimate?: ValueTokenEstimator
+): { text: string; complete: boolean } {
+  if (estimate) {
+    const render = (prefix: string): string => {
+      const boundary = Math.max(prefix.lastIndexOf("\n\n"), prefix.lastIndexOf("\n"));
+      let safe = boundary > prefix.length * 0.55 ? prefix.slice(0, boundary) : prefix;
+      const fences = (safe.match(/^\s*```/gm) ?? []).length;
+      if (fences % 2 === 1) safe = safe.replace(/\s*$/, "\n```");
+      return `${safe.trimEnd()}${TRUNCATION_MARKER}`;
+    };
+    const truncated = truncateStringByEstimator(text, maxTokens, estimate, render);
+    return { text: truncated.value, complete: truncated.complete };
+  }
+
   const maxChars = Math.max(0, maxTokens * 4);
   if (text.length <= maxChars) return { text, complete: true };
   const available = maxChars - TRUNCATION_MARKER.length;
@@ -599,7 +758,38 @@ function truncateText(text: string, maxTokens: number): { text: string; complete
   return { text: `${safe.trimEnd()}${TRUNCATION_MARKER}`, complete: false };
 }
 
-function truncateStructured(value: unknown, maxTokens: number): { value: unknown; complete: boolean } {
+function truncateStructured(
+  value: unknown,
+  maxTokens: number,
+  estimate?: ValueTokenEstimator
+): { value: unknown; complete: boolean } {
+  if (estimate) {
+    if (estimate(value) <= maxTokens) return { value, complete: true };
+    if (Array.isArray(value)) {
+      const out: unknown[] = [];
+      for (const item of value) {
+        const candidate = [...out, item];
+        if (estimate(candidate) > maxTokens) break;
+        out.push(item);
+      }
+      return { value: out, complete: false };
+    }
+    if (value && typeof value === "object") {
+      const out: JsonObject = {};
+      for (const [key, item] of Object.entries(value as JsonObject)) {
+        const candidate = { ...out, [key]: item };
+        if (estimate(candidate) > maxTokens) break;
+        Object.defineProperty(out, key, { value: item, enumerable: true, configurable: true, writable: true });
+      }
+      return { value: out, complete: false };
+    }
+    if (typeof value === "string") {
+      const marker = "…[incomplete]";
+      return truncateStringByEstimator(value, maxTokens, estimate, (prefix) => prefix + marker);
+    }
+    return { value, complete: false };
+  }
+
   const maxChars = Math.max(0, maxTokens * 4);
   if (serialized(value).length <= maxChars) return { value, complete: true };
   if (Array.isArray(value)) {
@@ -630,6 +820,8 @@ function truncateStructured(value: unknown, maxTokens: number): { value: unknown
 function metadataFor(metrics: OptimizationMetrics): Record<string, unknown> {
   return {
     mode: metrics.mode,
+    ...(metrics.selectedMode ? { selectedMode: metrics.selectedMode } : {}),
+    ...(metrics.tokenizer ? { tokenizer: metrics.tokenizer } : {}),
     originalTokens: metrics.originalTokens,
     optimizedTokens: metrics.optimizedTokens,
     savedTokens: metrics.savedTokens,
@@ -668,23 +860,166 @@ function errorResult<T extends OptimizableToolResult>(result: T, message: string
   return bounded as T;
 }
 
-export async function optimizeToolResult<T extends OptimizableToolResult>(
+type RuntimeOptimizationPolicy = OptimizationPolicy & {
+  mode?: OptimizationMode;
+  /** Internal: suppress per-candidate metadata while adaptive policy selection is in progress. */
+  suppressMetadata?: boolean;
+  maxTokens?: number;
+  maxInputBytes?: number;
+  maxNestingDepth?: number;
+  maxHtmlNodes?: number;
+  maxTransformMs?: number;
+  maxOutputBytes?: number;
+};
+
+const MAX_ADAPTIVE_CANDIDATES = 4;
+
+async function optimizeAdaptively<T extends OptimizableToolResult>(
   original: T,
-  policy: OptimizationPolicy & {
-    mode?: OptimizationMode;
-    maxTokens?: number;
-    maxInputBytes?: number;
-    maxNestingDepth?: number;
-    maxHtmlNodes?: number;
-    maxTransformMs?: number;
-    maxOutputBytes?: number;
-  },
+  policy: RuntimeOptimizationPolicy,
   context: OptimizationContext,
-  onMetrics?: OptimizationMetricsSink
+  onMetrics: OptimizationMetricsSink | undefined,
+  tokenEstimator: TokenEstimator
 ): Promise<OptimizedToolResult<T>> {
+  const estimate = tokenEstimator.estimate;
+  const started = performance.now();
+  const candidates = (policy.candidates ?? []).slice(0, MAX_ADAPTIVE_CANDIDATES);
+  const originalTokens = estimate(original);
+  const minInputTokens = policy.minInputTokens ?? 128;
+  const minSavingsPercent = policy.minSavingsPercent ?? 10;
+  const transformLimitMs = policy.maxTransformMs ?? DEFAULT_CONFIG.maxTransformMs;
+  let best: { result: T; mode: OptimizationCandidateMode; metrics: OptimizationMetrics } | undefined;
+  let lastFailure: string | undefined;
+
+  if (!original.isError && originalTokens >= minInputTokens) {
+    for (const candidate of candidates) {
+      const remainingMs = transformLimitMs - (performance.now() - started);
+      if (remainingMs <= 1) break;
+      const candidateResult = await optimizeToolResultWithEstimator(
+        original,
+        {
+          ...policy,
+          ...candidate,
+          mode: candidate.mode,
+          candidates: undefined,
+          minInputTokens: undefined,
+          minSavingsPercent: undefined,
+          includeMetadata: false,
+          suppressMetadata: true,
+          maxTransformMs: Math.max(1, Math.floor(remainingMs)),
+        },
+        context,
+        undefined,
+        tokenEstimator
+      );
+      if (candidateResult.metrics.failure) lastFailure = candidateResult.metrics.failure;
+      if (candidateResult.result.isError || candidateResult.metrics.failure || !candidateResult.metrics.changed) continue;
+      const savingsPercent = originalTokens
+        ? ((originalTokens - estimate(candidateResult.result)) / originalTokens) * 100
+        : 0;
+      if (savingsPercent <= 0 || savingsPercent < minSavingsPercent) continue;
+      if (
+        !best ||
+        estimate(candidateResult.result) < estimate(best.result) ||
+        (estimate(candidateResult.result) === estimate(best.result) &&
+          candidateResult.metrics.durationMs < best.metrics.durationMs)
+      ) {
+        best = { result: candidateResult.result, mode: candidate.mode, metrics: candidateResult.metrics };
+      }
+    }
+  }
+
+  // Even when no candidate wins, retain the normal hard output budget behavior.
+  const base = best
+    ? { result: best.result, metrics: best.metrics }
+    : await optimizeToolResultWithEstimator(
+        original,
+        { ...policy, mode: "off", candidates: undefined, minInputTokens: undefined, minSavingsPercent: undefined, includeMetadata: false },
+        context,
+        undefined,
+        tokenEstimator
+      );
+  let result = base.result;
+  let metrics: OptimizationMetrics = {
+    ...base.metrics,
+    mode: "adaptive",
+    selectedMode: best?.mode ?? "off",
+    tokenizer: tokenEstimator.label(),
+    durationMs: performance.now() - started,
+    ...(!best && lastFailure && !base.metrics.failure ? { failure: lastFailure } : {}),
+  };
+  const hasOptimizationMetadata = Boolean(
+    (result._meta?.lazygate as Record<string, unknown> | undefined)?.responseOptimization
+  );
+  const metadataRequested = policy.includeMetadata || !metrics.complete || hasOptimizationMetadata;
+  const measure = (): OptimizationMetrics => {
+    const optimizedTokens = estimate(result);
+    const savedTokens = Math.max(0, originalTokens - optimizedTokens);
+    return {
+      ...metrics,
+      tokenizer: tokenEstimator.label(),
+      originalTokens,
+      optimizedTokens,
+      savedTokens,
+      reductionPercent: originalTokens ? Math.round((savedTokens / originalTokens) * 100) : 0,
+    };
+  };
+  if (metadataRequested) {
+    result = addMetadata(result, metrics);
+    metrics = measure();
+    result = addMetadata(result, metrics);
+    metrics = measure();
+  }
+
+  const overBudget =
+    (policy.maxTokens !== undefined && estimate(result) > policy.maxTokens) ||
+    (policy.maxOutputBytes !== undefined && Buffer.byteLength(serialized(result), "utf8") > policy.maxOutputBytes);
+  if (overBudget) {
+    const message = policy.maxOutputBytes !== undefined && Buffer.byteLength(serialized(result), "utf8") > policy.maxOutputBytes
+      ? "Response exceeded the configured output byte limit; output is incomplete."
+      : "Response exceeded the configured output budget; output is incomplete.";
+    result = errorResult(original, message);
+    const optimizedTokens = estimate(result);
+    const savedTokens = Math.max(0, originalTokens - optimizedTokens);
+    metrics = {
+      ...metrics,
+      tokenizer: tokenEstimator.label(),
+      optimizedTokens,
+      savedTokens,
+      reductionPercent: originalTokens
+        ? Math.round((savedTokens / originalTokens) * 100)
+        : 0,
+      changed: true,
+      complete: false,
+    };
+    if (metadataRequested) {
+      const withMetadata = addMetadata(result, metrics);
+      if (!policy.maxOutputBytes || Buffer.byteLength(serialized(withMetadata), "utf8") <= policy.maxOutputBytes) {
+        result = withMetadata;
+        metrics = measure();
+      }
+    }
+  }
+  try {
+    onMetrics?.(context, metrics);
+  } catch {
+    // Metrics are advisory and must never make a downstream MCP call fail.
+  }
+  return { result, metrics };
+}
+
+async function optimizeToolResultWithEstimator<T extends OptimizableToolResult>(
+  original: T,
+  policy: RuntimeOptimizationPolicy,
+  context: OptimizationContext,
+  onMetrics: OptimizationMetricsSink | undefined,
+  tokenEstimator: TokenEstimator
+): Promise<OptimizedToolResult<T>> {
+  const estimate = tokenEstimator.estimate;
+  if (policy.mode === "adaptive") return optimizeAdaptively(original, policy, context, onMetrics, tokenEstimator);
   const started = performance.now();
   const mode = policy.mode ?? "off";
-  const originalTokens = estimateTokens(original);
+  const originalTokens = estimate(original);
   let result = original;
   let changed = false;
   let complete = true;
@@ -747,25 +1082,36 @@ export async function optimizeToolResult<T extends OptimizableToolResult>(
   }
 
   const byteTokenBudget = policy.maxOutputBytes ? Math.floor(policy.maxOutputBytes / 4) : undefined;
-  const outputTokenBudget = policy.maxTokens && byteTokenBudget
-    ? Math.min(policy.maxTokens, byteTokenBudget)
-    : policy.maxTokens ?? byteTokenBudget;
+  const outputTokenBudget = policy.maxTokens !== undefined
+    ? (byteTokenBudget !== undefined && !tokenEstimator.hasCustom ? Math.min(policy.maxTokens, byteTokenBudget) : policy.maxTokens)
+    : byteTokenBudget;
+  const exceedsBudget = (value: unknown): boolean =>
+    Boolean(
+      (policy.maxTokens !== undefined && estimate(value) > policy.maxTokens) ||
+        (policy.maxOutputBytes !== undefined && Buffer.byteLength(serialized(value), "utf8") > policy.maxOutputBytes)
+    );
 
-  if (outputTokenBudget && estimateTokens(result) > outputTokenBudget) {
+  if (outputTokenBudget && exceedsBudget(result)) {
     const bounded: OptimizableToolResult = { ...result };
-    const overhead = estimateTokens({ ...bounded, content: [], structuredContent: undefined });
+    const estimateForTruncation = tokenEstimator.hasCustom && policy.maxTokens === undefined
+      ? estimateTokens
+      : estimate;
+    const overhead = estimateForTruncation({ ...bounded, content: [], structuredContent: undefined });
     const payloadTokens = Math.max(1, outputTokenBudget - overhead - 2);
     let remaining = payloadTokens;
     let budgetComplete = true;
+    const truncationEstimator = tokenEstimator.hasCustom && policy.maxTokens !== undefined
+      ? estimate
+      : undefined;
 
     if (bounded.structuredContent !== undefined) {
       const structureBudget = bounded.content.some((block) =>
         block && typeof block === "object" && (block as { type?: unknown }).type === "text"
       ) ? Math.max(1, Math.floor(remaining / 2)) : remaining;
       try {
-        const truncated = truncateStructured(bounded.structuredContent, structureBudget);
+        const truncated = truncateStructured(bounded.structuredContent, structureBudget, truncationEstimator);
         bounded.structuredContent = truncated.value;
-        remaining = Math.max(1, remaining - estimateTokens(truncated.value));
+        remaining = Math.max(1, remaining - estimateForTruncation(truncated.value));
         budgetComplete &&= truncated.complete;
       } catch {
         budgetComplete = false;
@@ -775,15 +1121,15 @@ export async function optimizeToolResult<T extends OptimizableToolResult>(
     const updated: unknown[] = [];
     for (const block of bounded.content) {
       if (block && typeof block === "object" && (block as { type?: unknown }).type === "text" && typeof (block as { text?: unknown }).text === "string") {
-        const boundedText = truncateText((block as { text: string }).text, remaining);
+        const boundedText = truncateText((block as { text: string }).text, remaining, truncationEstimator);
         updated.push({ ...(block as Record<string, unknown>), text: boundedText.text });
-        remaining = Math.max(1, remaining - estimateTokens(boundedText.text));
+        remaining = Math.max(1, remaining - estimateForTruncation(boundedText.text));
         budgetComplete &&= boundedText.complete;
       } else updated.push(block);
     }
     bounded.content = updated;
 
-    if (estimateTokens(bounded) > outputTokenBudget) {
+    if (exceedsBudget(bounded)) {
       result = errorResult(original, "Response exceeded the configured output budget; output is incomplete.");
       complete = false;
       changed = true;
@@ -802,10 +1148,11 @@ export async function optimizeToolResult<T extends OptimizableToolResult>(
 
   const durationMs = performance.now() - started;
   const makeMetrics = (): OptimizationMetrics => {
-    const optimizedTokens = estimateTokens(result);
+    const optimizedTokens = estimate(result);
     const savedTokens = Math.max(0, originalTokens - optimizedTokens);
     return {
       mode,
+      tokenizer: tokenEstimator.label(),
       originalTokens,
       optimizedTokens,
       savedTokens,
@@ -816,14 +1163,10 @@ export async function optimizeToolResult<T extends OptimizableToolResult>(
       ...(failure ? { failure } : {}),
     };
   };
-  const overBudget = (value: T): boolean =>
-    Boolean(
-      (outputTokenBudget && estimateTokens(value) > outputTokenBudget) ||
-        (policy.maxOutputBytes && Buffer.byteLength(serialized(value), "utf8") > policy.maxOutputBytes)
-    );
+  const overBudget = (value: T): boolean => exceedsBudget(value);
 
   let metrics = makeMetrics();
-  const metadataRequested = policy.includeMetadata || !metrics.complete;
+  const metadataRequested = !policy.suppressMetadata && (policy.includeMetadata || !metrics.complete);
   if (metadataRequested) {
     result = addMetadata(result, metrics);
     metrics = makeMetrics();
@@ -853,4 +1196,14 @@ export async function optimizeToolResult<T extends OptimizableToolResult>(
     // Metrics are advisory and must never make a downstream MCP call fail.
   }
   return { result, metrics };
+}
+
+export async function optimizeToolResult<T extends OptimizableToolResult>(
+  original: T,
+  policy: RuntimeOptimizationPolicy,
+  context: OptimizationContext,
+  onMetrics?: OptimizationMetricsSink,
+  tokenizer?: Tokenizer
+): Promise<OptimizedToolResult<T>> {
+  return optimizeToolResultWithEstimator(original, policy, context, onMetrics, createTokenEstimator(tokenizer));
 }

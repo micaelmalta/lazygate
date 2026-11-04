@@ -65,6 +65,7 @@ describe("createBroker", () => {
         "activate_server",
         "describe_tool",
         "call_tool",
+        "get_result",
         "discover_skill",
         "load_skill",
       ])
@@ -73,10 +74,10 @@ describe("createBroker", () => {
     expect(names).not.toContain("disconnect_server");
     expect(names).toContain("read_skill_file");
     expect(names).toContain("run_chain");
-    expect(names).toHaveLength(10);
+    expect(names).toHaveLength(11);
 
     await broker.callTool("activate_server", { server_name: "github" });
-    expect(broker.listTools().tools).toHaveLength(10);
+    expect(broker.listTools().tools).toHaveLength(11);
     expect(broker.listTools().tools.map((t) => t.name)).not.toContain("github_tool");
   });
 
@@ -142,7 +143,7 @@ describe("createBroker", () => {
     const names = withGateway.listTools().tools.map((t) => t.name);
     expect(names).toContain("connect_server");
     expect(names).toContain("disconnect_server");
-    expect(names).toHaveLength(12);
+    expect(names).toHaveLength(13);
   });
 
   describe("argument validation", () => {
@@ -363,6 +364,117 @@ describe("createBroker", () => {
         { serverName: "github", toolName: "github_tool", source: "call_tool" },
         expect.objectContaining({ changed: true, complete: false })
       );
+    });
+
+    it("uses an injected tokenizer throughout call_tool optimization and metrics", async () => {
+      const onOptimizationMetrics = jest.fn();
+      const tokenizer = {
+        name: "broker_test_tokenizer",
+        countTokens: (serializedValue: string) => serializedValue.length,
+      };
+      const responseOptimization = parseResponseOptimizationConfig({
+        responseOptimization: { enabled: true, defaultMode: "schema" },
+      }).config;
+      broker = createBroker({
+        router,
+        manager: mk.manager as unknown as ProcessManager,
+        skillRouter: null,
+        responseOptimization,
+        tokenizer,
+        onOptimizationMetrics,
+      });
+      const original = {
+        content: [],
+        structuredContent: { issues: [{ id: 1, title: "Issue", details: "x".repeat(150) }] },
+      };
+      mk.manager.callTool.mockResolvedValueOnce(original as never);
+
+      const result = await broker.callTool("call_tool", { server: "github", tool: "github_tool", args: {} });
+
+      expect(result._meta).toMatchObject({
+        lazygate: { responseOptimization: { tokenizer: "broker_test_tokenizer" } },
+      });
+      expect(onOptimizationMetrics).toHaveBeenCalledWith(
+        { serverName: "github", toolName: "github_tool", source: "call_tool" },
+        expect.objectContaining({
+          tokenizer: "broker_test_tokenizer",
+          originalTokens: JSON.stringify(original).length,
+        })
+      );
+    });
+
+    it("stores incomplete structured results behind a session-scoped handle and returns requested fields", async () => {
+      const responseOptimization = parseResponseOptimizationConfig({
+        responseOptimization: { enabled: true, defaultMode: "schema" },
+      }).config;
+      broker = createBroker({
+        router,
+        manager: mk.manager as unknown as ProcessManager,
+        skillRouter: null,
+        responseOptimization,
+      });
+      mk.manager.callTool.mockResolvedValueOnce({
+        content: [],
+        structuredContent: {
+          issues: [
+            { id: 1, title: "First", body: "private detail" },
+            { id: 2, title: "Second", body: "more private detail" },
+          ],
+          total: 2,
+        },
+      } as never);
+
+      const summary = await broker.callTool("call_tool", { server: "github", tool: "github_tool", args: {} });
+      const resultHandle = (summary._meta as any)?.lazygate?.responseOptimization?.resultHandle;
+      expect(resultHandle).toMatchObject({ tool: "get_result", fields: "dot-separated field paths" });
+      expect(typeof resultHandle.handle).toBe("string");
+
+      const details = await broker.callTool("get_result", {
+        handle: resultHandle.handle,
+        fields: ["issues.id", "issues.title"],
+      });
+      expect(details.structuredContent).toEqual({
+        issues: [{ id: 1, title: "First" }, { id: 2, title: "Second" }],
+      });
+      expect(text(details)).toContain('"title": "Second"');
+      expect(text(details)).not.toContain("private detail");
+
+      const otherBroker = createBroker({
+        router,
+        manager: mk.manager as unknown as ProcessManager,
+        skillRouter: null,
+        responseOptimization,
+      });
+      const isolated = await otherBroker.callTool("get_result", {
+        handle: resultHandle.handle,
+        fields: ["issues.id"],
+      });
+      expect(isolated.isError).toBe(true);
+      expect(text(isolated)).toMatch(/unknown or expired/);
+    });
+
+    it("rejects unsafe result field paths", async () => {
+      const responseOptimization = parseResponseOptimizationConfig({
+        responseOptimization: { enabled: true, defaultMode: "schema" },
+      }).config;
+      broker = createBroker({
+        router,
+        manager: mk.manager as unknown as ProcessManager,
+        skillRouter: null,
+        responseOptimization,
+      });
+      mk.manager.callTool.mockResolvedValueOnce({
+        content: [],
+        structuredContent: { value: { id: 1, title: "A" } },
+      } as never);
+      const summary = await broker.callTool("call_tool", { server: "github", tool: "github_tool", args: {} });
+      const resultHandle = (summary._meta as any)?.lazygate?.responseOptimization?.resultHandle?.handle;
+      const invalid = await broker.callTool("get_result", {
+        handle: resultHandle,
+        fields: ["value.__proto__.title"],
+      });
+      expect(invalid.isError).toBe(true);
+      expect(text(invalid)).toMatch(/unsafe field path/);
     });
 
     it("call_tool defaults args to {} and surfaces proxy errors", async () => {

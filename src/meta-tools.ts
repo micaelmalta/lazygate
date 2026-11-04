@@ -1,6 +1,6 @@
 // src/meta-tools.ts
-// Meta-tool definitions the broker advertises (11 total), plus their argument schemas.
-// Stdio lists 9; gateway-only connect/disconnect are filtered when access.connect is absent.
+// Meta-tool definitions the broker advertises (13 total), plus their argument schemas.
+// Stdio lists 11; gateway-only connect/disconnect are filtered when access.connect is absent.
 // Prefer describe_tool / call_tool when the client ignores notifications/tools/list_changed.
 
 import { z } from "zod";
@@ -97,6 +97,33 @@ export const META_TOOLS: Tool[] = [
         },
       },
       required: ["server", "tool"],
+    },
+  },
+  {
+    name: "get_result",
+    description:
+      "Retrieve selected fields from an incomplete structured result returned by call_tool. " +
+      "Use the opaque handle in responseOptimization.resultHandle and request dot-separated field paths. " +
+      "Handles are private to this session and expire after a short time.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        handle: { type: "string", description: "Opaque handle from responseOptimization.resultHandle" },
+        fields: {
+          type: "array",
+          minItems: 1,
+          maxItems: 100,
+          items: { type: "string", description: "A dot-separated field path, such as issues.id" },
+        },
+        maxTokens: {
+          type: "integer",
+          minimum: 1,
+          maximum: 16000,
+          default: 4000,
+          description: "Approximate output token limit (default 4000)",
+        },
+      },
+      required: ["handle", "fields"],
     },
   },
   {
@@ -224,4 +251,9 @@ export const CallToolSchema = z.object({
   server: z.string().min(1, "`server` must be a non-empty string"),
   tool: z.string().min(1, "`tool` must be a non-empty string"),
   args: z.record(z.string(), z.unknown()).optional().default({}),
+});
+export const GetResultSchema = z.object({
+  handle: z.string().min(1).max(128),
+  fields: z.array(z.string().min(1).max(256)).min(1).max(100),
+  maxTokens: z.number().int().positive().max(16_000).default(4_000),
 });

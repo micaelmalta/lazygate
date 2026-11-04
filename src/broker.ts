@@ -15,6 +15,7 @@ import {
   ReadSkillFileSchema,
   DescribeToolSchema,
   CallToolSchema,
+  GetResultSchema,
   RunChainSchema,
 } from "./meta-tools.js";
 import { formatSkillUri, parseSkillUri } from "./skill-router.js";
@@ -22,6 +23,7 @@ import { composePrompt, type SecretLookup } from "./prompt-compose.js";
 import { bareToolName, parseNamespacedTool } from "./tool-names.js";
 import { LOG_PREFIX } from "./version.js";
 import { runCode, serverStubs, toScriptResult, type CodeBinding } from "./tool-chain/index.js";
+import { ResultHandleStore } from "./result-handles.js";
 import {
   estimateTokens,
   optimizeToolResult,
@@ -30,6 +32,7 @@ import {
   type OptimizationMetrics,
   type OptimizableToolResult,
   type ResponseOptimizationConfig,
+  type Tokenizer,
 } from "./response-optimizer.js";
 
 export interface ToolResult {
@@ -78,6 +81,8 @@ export interface BrokerDeps {
   skillHashes?: SkillHashStore;
   /** Opt-in JSON/HTML response transformations from the top-level servers.json section. */
   responseOptimization?: ResponseOptimizationConfig;
+  /** Optional provider-specific tokenizer for response measurements and token budgets. */
+  tokenizer?: Tokenizer;
   /** Receives per-tool timing and estimated-token measurements when optimization is enabled. */
   onOptimizationMetrics?: (context: OptimizationContext, metrics: OptimizationMetrics) => void;
 }
@@ -100,8 +105,21 @@ function fail(t: string): ToolResult {
 }
 
 function attachOptimizationMetadata<T extends ToolResult>(result: T, metrics: OptimizationMetrics): T {
+  const rootMeta = result._meta && typeof result._meta === "object" && !Array.isArray(result._meta)
+    ? (result._meta as Record<string, unknown>)
+    : {};
+  const currentLazyGate = rootMeta.lazygate;
+  const lazygate = currentLazyGate && typeof currentLazyGate === "object" && !Array.isArray(currentLazyGate)
+    ? (currentLazyGate as Record<string, unknown>)
+    : {};
+  const current = lazygate.responseOptimization;
   const responseOptimization = {
+    ...(current && typeof current === "object" && !Array.isArray(current)
+      ? (current as Record<string, unknown>)
+      : {}),
     mode: metrics.mode,
+    ...(metrics.selectedMode ? { selectedMode: metrics.selectedMode } : {}),
+    ...(metrics.tokenizer ? { tokenizer: metrics.tokenizer } : {}),
     originalTokens: metrics.originalTokens,
     optimizedTokens: metrics.optimizedTokens,
     savedTokens: metrics.savedTokens,
@@ -109,18 +127,47 @@ function attachOptimizationMetadata<T extends ToolResult>(result: T, metrics: Op
     durationMs: metrics.durationMs,
     complete: metrics.complete,
   };
-  const rootMeta = result._meta && typeof result._meta === "object" && !Array.isArray(result._meta)
-    ? (result._meta as Record<string, unknown>)
-    : {};
-  const current = rootMeta.lazygate;
-  if (current !== undefined && (!current || typeof current !== "object" || Array.isArray(current))) {
-    return { ...result, _meta: { ...rootMeta, responseOptimization } };
-  }
   return {
     ...result,
     _meta: {
       ...rootMeta,
-      lazygate: { ...((current as Record<string, unknown> | undefined) ?? {}), responseOptimization },
+      lazygate: { ...lazygate, responseOptimization },
+    },
+  };
+}
+
+function attachResultHandle<T extends ToolResult>(
+  result: T,
+  handle: { handle: string; expiresAt: number }
+): T {
+  const rootMeta = result._meta && typeof result._meta === "object" && !Array.isArray(result._meta)
+    ? (result._meta as Record<string, unknown>)
+    : {};
+  const currentLazyGate = rootMeta.lazygate;
+  const lazygate = currentLazyGate && typeof currentLazyGate === "object" && !Array.isArray(currentLazyGate)
+    ? (currentLazyGate as Record<string, unknown>)
+    : {};
+  const currentOptimization = lazygate.responseOptimization;
+  const responseOptimization = currentOptimization && typeof currentOptimization === "object" && !Array.isArray(currentOptimization)
+    ? (currentOptimization as Record<string, unknown>)
+    : {};
+  return {
+    ...result,
+    _meta: {
+      ...rootMeta,
+      lazygate: {
+        ...lazygate,
+        responseOptimization: {
+          ...responseOptimization,
+          resultHandle: {
+            handle: handle.handle,
+            tool: "get_result",
+            expiresAt: new Date(handle.expiresAt).toISOString(),
+            fields: "dot-separated field paths",
+            maxTokens: 4_000,
+          },
+        },
+      },
     },
   };
 }
@@ -232,13 +279,25 @@ export function createBroker({
   secrets,
   skillHashes,
   responseOptimization,
+  tokenizer,
   onOptimizationMetrics,
 }: BrokerDeps) {
+  // Each broker instance belongs to one stdio client or gateway session; result handles never
+  // cross that boundary or survive a process restart.
+  const resultHandles = new ResultHandleStore();
   const currentOptimizationConfig = (): ResponseOptimizationConfig =>
     responseOptimization ?? router.getResponseOptimization();
-  const optimize = async (result: ToolResult, context: OptimizationContext): Promise<ToolResult> => {
+  const optimize = async (
+    result: ToolResult,
+    context: OptimizationContext
+  ): Promise<{
+    result: ToolResult;
+    metrics?: OptimizationMetrics;
+    policy?: ReturnType<typeof resolveOptimizationPolicy>;
+    recordMetrics?: (metrics: OptimizationMetrics) => void;
+  }> => {
     const policy = resolveOptimizationPolicy(currentOptimizationConfig(), context);
-    if (policy.mode === "off" && policy.maxTokens === undefined && policy.maxOutputBytes === undefined) return result;
+    if (policy.mode === "off" && policy.maxTokens === undefined && policy.maxOutputBytes === undefined) return { result };
     const sink = onOptimizationMetrics ?? ((event, metrics) => {
       console.error(
         `${LOG_PREFIX} response optimization ${JSON.stringify({
@@ -249,7 +308,19 @@ export function createBroker({
         })}`
       );
     });
-    return (await optimizeToolResult(result, policy, context, sink)).result as ToolResult;
+    const optimized = await optimizeToolResult(result, policy, context, undefined, tokenizer);
+    return {
+      result: optimized.result as ToolResult,
+      metrics: optimized.metrics,
+      policy,
+      recordMetrics: (metrics) => {
+        try {
+          sink(context, metrics);
+        } catch {
+          // Metrics are advisory and must not make a downstream MCP call fail.
+        }
+      },
+    };
   };
   /** Servers this caller may see. Hidden servers behave exactly like unknown ones. */
   const visible = (name: string): boolean => {
@@ -545,7 +616,78 @@ export function createBroker({
         }
         try {
           const raw = (await manager.callTool(a.server, a.tool, a.args ?? {})) as ToolResult;
-          const res = await optimize(raw, { serverName: a.server, toolName: a.tool, source: "call_tool" });
+          const optimized = await optimize(raw, { serverName: a.server, toolName: a.tool, source: "call_tool" });
+          let res = optimized.result;
+          let metrics = optimized.metrics;
+          if (
+            metrics?.complete === false &&
+            !res.isError &&
+            raw.structuredContent !== null &&
+            typeof raw.structuredContent === "object"
+          ) {
+            const handle = resultHandles.create(raw.structuredContent);
+            if (handle) {
+              const withHandle = attachResultHandle(res, handle);
+              const policy = optimized.policy!;
+              const serializedBytes = Buffer.byteLength(JSON.stringify(withHandle), "utf8");
+              const overByteBudget = policy.maxOutputBytes !== undefined && serializedBytes > policy.maxOutputBytes;
+              const overTokenBudget = policy.maxTokens !== undefined && estimateTokens(withHandle, tokenizer) > policy.maxTokens;
+              if (overByteBudget || overTokenBudget) {
+                resultHandles.delete(handle.handle);
+                res = fail(
+                  overByteBudget
+                    ? "Response exceeded the configured output byte limit after adding result-handle metadata."
+                    : "Response exceeded the configured output token budget after adding result-handle metadata."
+                );
+                const optimizedTokens = estimateTokens(res, tokenizer);
+                const savedTokens = Math.max(0, metrics.originalTokens - optimizedTokens);
+                metrics = {
+                  ...metrics,
+                  optimizedTokens,
+                  savedTokens,
+                  reductionPercent: metrics.originalTokens ? Math.round((savedTokens / metrics.originalTokens) * 100) : 0,
+                  changed: true,
+                  complete: false,
+                };
+              } else {
+                res = withHandle;
+                const optimizedTokens = estimateTokens(res, tokenizer);
+                const savedTokens = Math.max(0, metrics.originalTokens - optimizedTokens);
+                metrics = {
+                  ...metrics,
+                  optimizedTokens,
+                  savedTokens,
+                  reductionPercent: metrics.originalTokens ? Math.round((savedTokens / metrics.originalTokens) * 100) : 0,
+                };
+              }
+              if (!res.isError && metrics) {
+                res = attachOptimizationMetadata(res, metrics);
+                const finalBytes = Buffer.byteLength(JSON.stringify(res), "utf8");
+                const exceedsFinalLimit =
+                  (policy.maxOutputBytes !== undefined && finalBytes > policy.maxOutputBytes) ||
+                  (policy.maxTokens !== undefined && estimateTokens(res, tokenizer) > policy.maxTokens);
+                if (exceedsFinalLimit) {
+                  resultHandles.delete(handle.handle);
+                  res = fail(
+                    policy.maxOutputBytes !== undefined && finalBytes > policy.maxOutputBytes
+                      ? "Response exceeded the configured output byte limit after adding result-handle metadata."
+                      : "Response exceeded the configured output token budget after adding result-handle metadata."
+                  );
+                  const optimizedTokens = estimateTokens(res, tokenizer);
+                  const savedTokens = Math.max(0, metrics.originalTokens - optimizedTokens);
+                  metrics = {
+                    ...metrics,
+                    optimizedTokens,
+                    savedTokens,
+                    reductionPercent: metrics.originalTokens ? Math.round((savedTokens / metrics.originalTokens) * 100) : 0,
+                    changed: true,
+                    complete: false,
+                  };
+                }
+              }
+            }
+          }
+          if (metrics) optimized.recordMetrics?.(metrics);
           // Surface the upstream hints on the result too (kept in _meta so content is untouched).
           const hinted = manager
             .getAllActiveTools()
@@ -563,6 +705,28 @@ export function createBroker({
           };
         } catch (err) {
           return fail(`Error calling ${a.tool}: ${(err as Error).message}`);
+        }
+      }
+
+      case "get_result": {
+        const a = parseArgs(GetResultSchema, rawArgs);
+        if (isResult(a)) return a;
+        try {
+          const selected = resultHandles.select(a.handle, a.fields);
+          if (selected === undefined) return fail("Result handle is unknown or expired. Call the original tool again to create a new handle.");
+          const bounded = await optimizeToolResult(
+            {
+              content: [{ type: "text", text: JSON.stringify(selected, null, 2) }],
+              structuredContent: selected,
+            },
+            { mode: "off", maxTokens: a.maxTokens, includeMetadata: false },
+            { serverName: "lazygate", toolName: "get_result", source: "call_tool" },
+            undefined,
+            tokenizer
+          );
+          return bounded.result as ToolResult;
+        } catch (err) {
+          return fail(`Could not retrieve result fields: ${(err as Error).message}`);
         }
       }
 
@@ -735,7 +899,9 @@ export function createBroker({
           const boundedError = await optimizeToolResult(
             errorResponse,
             { mode: "off", maxTokens: policy.maxTokens, maxOutputBytes: policy.maxOutputBytes, includeMetadata: false },
-            context
+            context,
+            undefined,
+            tokenizer
           );
           reportMetrics({ ...boundedError.metrics, mode: policy.mode });
           return boundedError.result as ToolResult;
@@ -750,7 +916,9 @@ export function createBroker({
           const optimized = await optimizeToolResult<OptimizableToolResult>(
             { content: [], structuredContent: run.value },
             transformPolicy,
-            context
+            context,
+            undefined,
+            tokenizer
           );
           finalValue = optimized.result.structuredContent;
           transformationMetrics = optimized.metrics;
@@ -778,20 +946,24 @@ export function createBroker({
           const bounded = await optimizeToolResult(
             response,
             { mode: "off", maxTokens: policy.maxTokens, maxOutputBytes: policy.maxOutputBytes, includeMetadata: false },
-            context
+            context,
+            undefined,
+            tokenizer
           );
           response = bounded.result as ToolResult;
           budgetMetrics = bounded.metrics;
         }
 
-        const originalTokens = estimateTokens(rawResponse);
+        const originalTokens = estimateTokens(rawResponse, tokenizer);
         let metrics: OptimizationMetrics = {
           mode: policy.mode,
+          ...(transformationMetrics?.selectedMode ? { selectedMode: transformationMetrics.selectedMode } : {}),
+          tokenizer: transformationMetrics?.tokenizer ?? budgetMetrics?.tokenizer ?? (tokenizer?.name ?? "chars_per_4"),
           originalTokens,
-          optimizedTokens: estimateTokens(response),
-          savedTokens: Math.max(0, originalTokens - estimateTokens(response)),
+          optimizedTokens: estimateTokens(response, tokenizer),
+          savedTokens: Math.max(0, originalTokens - estimateTokens(response, tokenizer)),
           reductionPercent: originalTokens
-            ? Math.round((Math.max(0, originalTokens - estimateTokens(response)) / originalTokens) * 100)
+            ? Math.round((Math.max(0, originalTokens - estimateTokens(response, tokenizer)) / originalTokens) * 100)
             : 0,
           durationMs: (transformationMetrics?.durationMs ?? 0) + (budgetMetrics?.durationMs ?? 0),
           changed: (transformationMetrics?.changed ?? false) || (budgetMetrics?.changed ?? false),
@@ -803,7 +975,7 @@ export function createBroker({
         if (policy.includeMetadata || !metrics.complete) response = attachOptimizationMetadata(response, metrics);
 
         const exceedsFinalLimit =
-          (policy.maxTokens !== undefined && estimateTokens(response) > policy.maxTokens) ||
+          (policy.maxTokens !== undefined && estimateTokens(response, tokenizer) > policy.maxTokens) ||
           (policy.maxOutputBytes !== undefined && Buffer.byteLength(JSON.stringify(response), "utf8") > policy.maxOutputBytes);
         if (exceedsFinalLimit) {
           response = fail(
@@ -813,10 +985,10 @@ export function createBroker({
           );
           metrics = {
             ...metrics,
-            optimizedTokens: estimateTokens(response),
-            savedTokens: Math.max(0, originalTokens - estimateTokens(response)),
+            optimizedTokens: estimateTokens(response, tokenizer),
+            savedTokens: Math.max(0, originalTokens - estimateTokens(response, tokenizer)),
             reductionPercent: originalTokens
-              ? Math.round((Math.max(0, originalTokens - estimateTokens(response)) / originalTokens) * 100)
+              ? Math.round((Math.max(0, originalTokens - estimateTokens(response, tokenizer)) / originalTokens) * 100)
               : 0,
             changed: true,
             complete: false,
