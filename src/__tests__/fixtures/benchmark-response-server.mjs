@@ -4,7 +4,7 @@ const tools = [
   {
     name: "search_records",
     description: "Read-only fixture search",
-    inputSchema: { type: "object", properties: {} },
+    inputSchema: { type: "object", properties: { intermittentDepth: { type: "boolean" } } },
   },
 ];
 
@@ -18,9 +18,10 @@ const result = {
     })),
   },
 };
+let searchCalls = 0;
 
 const send = (message) => process.stdout.write(`${JSON.stringify(message)}\n`);
-createInterface({ input: process.stdin }).on("line", (line) => {
+createInterface({ input: process.stdin }).on("line", async (line) => {
   let message;
   try {
     message = JSON.parse(line);
@@ -41,7 +42,19 @@ createInterface({ input: process.stdin }).on("line", (line) => {
   } else if (message.method === "tools/list") {
     send({ jsonrpc: "2.0", id: message.id, result: { tools } });
   } else if (message.method === "tools/call" && message.params?.name === "search_records") {
-    send({ jsonrpc: "2.0", id: message.id, result });
+    // Keep upstream latency visibly above optimizer cost so recommendation thresholds are stable.
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    searchCalls += 1;
+    const response = message.params?.arguments?.intermittentDepth && searchCalls % 3 === 2
+      ? {
+          ...result,
+          structuredContent: {
+            ...result.structuredContent,
+            depthTrap: { one: { two: { three: { four: { five: { six: "too deep" } } } } } },
+          },
+        }
+      : result;
+    send({ jsonrpc: "2.0", id: message.id, result: response });
   } else {
     send({ jsonrpc: "2.0", id: message.id, error: { code: -32601, message: "unknown request" } });
   }

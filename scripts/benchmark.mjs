@@ -292,7 +292,10 @@ if (liveResponsesOnly) {
     process.exit(1);
   }
   const { estimateTokens, optimizeToolResult } = await import(pathToFileURL(optimizerPath).href);
-  const allowedModes = new Set(["off", "prune", "project", "jsonpath", "schema", "html_markdown", "html_reader"]);
+  const allowedModes = new Set(["off", "prune", "project", "jsonpath", "schema", "html_markdown", "html_reader", "adaptive"]);
+  const adaptiveCandidateModes = new Set(["prune", "project", "jsonpath", "schema", "html_markdown", "html_reader"]);
+  const minimumRecommendationSamples = 3;
+  const maximumOptimizationOverheadPercent = 50;
   const percentile = (values, p) => {
     const sorted = values.slice().sort((a, b) => a - b);
     return sorted[Math.min(sorted.length - 1, Math.ceil(sorted.length * p) - 1)];
@@ -309,6 +312,79 @@ if (liveResponsesOnly) {
     };
   };
   const round = (value, digits = 3) => Number(value.toFixed(digits));
+  const recommendPolicy = (benchmarkCase, policy, label, sampleCount, samples) => {
+    const mode = policy.mode ?? "off";
+    if (mode === "off") return null;
+
+    const result = {
+      case: benchmarkCase.name ?? `${benchmarkCase.server}.${benchmarkCase.tool}`,
+      server: benchmarkCase.server,
+      tool: benchmarkCase.tool,
+      policy: label,
+      mode,
+      ...(mode === "adaptive" && Array.isArray(policy.candidates)
+        ? { candidateModes: policy.candidates.map((candidate) => candidate.mode) }
+        : {}),
+      decision: "insufficient_evidence",
+      reason: "too_few_samples",
+      sampleCount,
+      requiredSampleCount: minimumRecommendationSamples,
+      maximumOptimizationOverheadPercent,
+      optimizationFallbacks: samples.filter((sample) => sample.optimizationFallback).length,
+      optimizationFallbackRate: sampleCount
+        ? round((samples.filter((sample) => sample.optimizationFallback).length / sampleCount) * 100, 1)
+        : 0,
+    };
+    if (sampleCount < minimumRecommendationSamples) return result;
+    if (samples.some((sample) => sample.isError)) {
+      result.reason = "upstream_errors";
+      return result;
+    }
+    if (samples.some((sample) => sample.correctness === null)) {
+      result.reason = "correctness_not_checked";
+      return result;
+    }
+    if (samples.some((sample) => sample.correctness === false)) {
+      result.decision = "keep_off";
+      result.reason = "correctness_failed";
+      return result;
+    }
+    const savedTokens = stats(samples.map((sample) => sample.savedTokens)).median;
+    const optimizationLatencyMs = stats(samples.map((sample) => sample.transformMs)).median;
+    const upstreamLatencyMs = stats(samples.map((sample) => sample.upstreamMs)).median;
+    const overheadPercent = upstreamLatencyMs > 0
+      ? (optimizationLatencyMs / upstreamLatencyMs) * 100
+      : (optimizationLatencyMs === 0 ? 0 : null);
+    Object.assign(result, {
+      medianSavedTokens: round(savedTokens),
+      medianOptimizationLatencyMs: round(optimizationLatencyMs),
+      medianUpstreamLatencyMs: round(upstreamLatencyMs),
+      optimizationOverheadPercent: overheadPercent === null ? null : round(overheadPercent, 1),
+      ...(mode === "adaptive"
+        ? { selectedModes: [...new Set(samples.map((sample) => sample.selectedMode).filter(Boolean))] }
+        : {}),
+    });
+
+    if (result.optimizationFallbacks > 0) {
+      result.decision = "keep_off";
+      result.reason = "optimization_fallback";
+      return result;
+    }
+    if (savedTokens <= 0) {
+      result.decision = "keep_off";
+      result.reason = "no_token_savings";
+      return result;
+    }
+    if (overheadPercent === null || overheadPercent > maximumOptimizationOverheadPercent) {
+      result.decision = "keep_off";
+      result.reason = "optimization_overhead_too_high";
+      return result;
+    }
+
+    result.decision = "recommend";
+    result.reason = "correctness_passed_savings_positive_overhead_within_budget";
+    return result;
+  };
   const stable = (value) => {
     if (Array.isArray(value)) return `[${value.map(stable).join(",")}]`;
     if (value && typeof value === "object") {
@@ -362,6 +438,7 @@ if (liveResponsesOnly) {
   };
 
   const report = [];
+  const recommendations = [];
   let failed = false;
   for (const [caseIndex, benchmarkCase] of benchmarkCases.entries()) {
     const caseName = benchmarkCase?.name ?? `${benchmarkCase?.server ?? "unknown"}.${benchmarkCase?.tool ?? "unknown"}`;
@@ -393,10 +470,35 @@ if (liveResponsesOnly) {
       process.exit(1);
     }
     const labels = new Set();
+    const policyLabels = new Map();
     for (const policy of policies) {
-      if (!policy || !allowedModes.has(policy.mode ?? "off")) {
+      if (!policy || typeof policy !== "object" || Array.isArray(policy) || !allowedModes.has(policy.mode ?? "off")) {
         console.error(`Case ${caseName} contains an invalid optimizer mode.`);
         process.exit(1);
+      }
+      if (policy.mode === "adaptive") {
+        if (!Array.isArray(policy.candidates) || policy.candidates.length < 1 || policy.candidates.length > 4) {
+          console.error(`Case ${caseName} adaptive policy must declare one to four candidates.`);
+          process.exit(1);
+        }
+        const invalidCandidate = policy.candidates.find((candidate) =>
+          !candidate || typeof candidate !== "object" || Array.isArray(candidate) ||
+          !adaptiveCandidateModes.has(candidate.mode) ||
+          (candidate.mode === "project" && (!Array.isArray(candidate.fields) || candidate.fields.length === 0)) ||
+          (candidate.mode === "jsonpath" && (typeof candidate.jsonPath !== "string" || candidate.jsonPath.length === 0))
+        );
+        if (invalidCandidate) {
+          console.error(`Case ${caseName} adaptive policy contains an invalid candidate.`);
+          process.exit(1);
+        }
+        if (policy.minInputTokens !== undefined && (!Number.isInteger(policy.minInputTokens) || policy.minInputTokens < 1 || policy.minInputTokens > 1_000_000)) {
+          console.error(`Case ${caseName} adaptive policy minInputTokens must be a positive integer up to 1000000.`);
+          process.exit(1);
+        }
+        if (policy.minSavingsPercent !== undefined && (typeof policy.minSavingsPercent !== "number" || !Number.isFinite(policy.minSavingsPercent) || policy.minSavingsPercent < 0 || policy.minSavingsPercent > 100)) {
+          console.error(`Case ${caseName} adaptive policy minSavingsPercent must be between 0 and 100.`);
+          process.exit(1);
+        }
       }
       const label = policy.name ?? `${policy.mode ?? "off"}-${labels.size + 1}`;
       if (labels.has(label)) {
@@ -404,6 +506,7 @@ if (liveResponsesOnly) {
         process.exit(1);
       }
       labels.add(label);
+      policyLabels.set(label, policy);
     }
     if (!policies.some((policy) => (policy.mode ?? "off") === "off") || !policies.some((policy) => (policy.mode ?? "off") !== "off")) {
       console.error(`Case ${caseName} must compare mode "off" with at least one optimizer mode.`);
@@ -455,6 +558,8 @@ if (liveResponsesOnly) {
             transformMs,
             totalMs: upstreamMs + transformMs,
             complete: optimized.metrics.complete,
+            selectedMode: optimized.metrics.selectedMode,
+            optimizationFallback: Boolean(optimized.metrics.failure),
             correctness,
             isError: Boolean(original.isError),
           });
@@ -470,6 +575,9 @@ if (liveResponsesOnly) {
 
     if (!measurements.size) continue;
     for (const [policy, samples] of measurements) {
+      const policySpec = policyLabels.get(policy);
+      const recommendation = recommendPolicy(benchmarkCase, policySpec, policy, samples.length, samples);
+      if (recommendation) recommendations.push(recommendation);
       if (samples.length === 0) continue;
       const upstream = stats(samples.map((sample) => sample.upstreamMs));
       const transform = stats(samples.map((sample) => sample.transformMs));
@@ -501,6 +609,10 @@ if (liveResponsesOnly) {
           median: round(total.median), p95: round(total.p95), stdDev: round(total.stdDev),
         },
         completeSamples: samples.filter((sample) => sample.complete).length,
+        optimizationFallbacks: samples.filter((sample) => sample.optimizationFallback).length,
+        optimizationFallbackRate: samples.length
+          ? round((samples.filter((sample) => sample.optimizationFallback).length / samples.length) * 100, 1)
+          : 0,
         correctness: correctnessSamples.length
           ? { passed: correctnessSamples.filter((sample) => sample.correctness).length, checked: correctnessSamples.length }
           : "not checked",
@@ -519,6 +631,7 @@ if (liveResponsesOnly) {
       "Each case must be a read-only tool call and provide preservation checks.",
     ],
     measurements: report,
+    recommendations,
   }, null, 2));
   if (failed) process.exit(1);
   process.exit(0);
