@@ -725,6 +725,51 @@ const TRUNCATION_MARKER = "\n\n[Output incomplete: truncated to configured budge
 
 type ValueTokenEstimator = (value: unknown) => number;
 
+/**
+ * Largest k in [0, n] with fits(k), assuming fits is monotonic and fits(0) holds. `guess` is a
+ * predicted answer: probing near it first, then expanding in growing steps, needs a handful of
+ * probes of about budget size, where plain bisection would probe prefixes up to the full input
+ * (costly for model tokenizers, and quadratic when each probe re-serializes a growing prefix).
+ */
+export function largestFit(n: number, fits: (k: number) => boolean, guess?: number): number {
+  let low = 0;
+  let high = n;
+  if (guess !== undefined && guess > 0 && guess < n) {
+    const start = Math.floor(guess);
+    let step = Math.max(1, Math.ceil(start * 0.1));
+    if (fits(start)) {
+      low = start;
+      while (low < high) {
+        const probe = Math.min(high, low + step);
+        if (fits(probe)) {
+          low = probe;
+          step *= 2;
+        } else {
+          high = probe - 1;
+          break;
+        }
+      }
+    } else {
+      high = start - 1;
+      while (high > low) {
+        const probe = Math.max(low, high - step);
+        if (fits(probe)) {
+          low = probe;
+          break;
+        }
+        high = probe - 1;
+        step *= 2;
+      }
+    }
+  }
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    if (fits(middle)) low = middle;
+    else high = middle - 1;
+  }
+  return low;
+}
+
 function truncateStringByEstimator(
   value: string,
   maxTokens: number,
