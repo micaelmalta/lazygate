@@ -11,7 +11,8 @@ export const META_TOOLS: Tool[] = [
     name: "discover_tools",
     description:
       "Find which tool servers are available and relevant for a task. " +
-      "Call this first when you need a capability you don't have yet.",
+      "Call this first when you need a capability you don't have yet. " +
+      "A clear match lists call signatures, so call_tool can follow directly.",
     inputSchema: {
       type: "object",
       properties: {
@@ -67,9 +68,11 @@ export const META_TOOLS: Tool[] = [
     name: "run_chain",
     description:
       "Run a short JavaScript workflow that calls tool-chain tools as servers.<name>.<tool>(args). " +
-      "Use it for multi-step chains; intermediate results stay in the script and only logs and the " +
-      "return value come back. Write the body only: use await and return (no imports, require, fetch " +
-      "or fs). Each run is a fresh scope. Single or destructive calls: use call_tool.",
+      "Prefer it for deterministic multi-step work: two or more dependent calls, loops over a list, " +
+      "filtering or totalling results. Intermediate results stay in the script; only logs and the " +
+      "return value come back, so return just the answer. Use call_tool instead for one lookup, " +
+      "an unknown argument shape, or any destructive call. Write the body only: use await and return " +
+      "(no imports, require, fetch or fs). Each run is a fresh scope.",
     inputSchema: {
       type: "object",
       properties: {
@@ -84,8 +87,10 @@ export const META_TOOLS: Tool[] = [
   {
     name: "call_tool",
     description:
-      "Call a tool on a server without adding its schema to tools/list. " +
-      "Activates the server if needed. Use describe_tool first when you need the argument shape.",
+      "Call one tool on a server without adding its schema to tools/list. " +
+      "Best for a single lookup or action. Activates the server if needed. Use the signature from " +
+      "discover_tools (or describe_tool) for the argument shape; an argument error returns the input schema. " +
+      "For several dependent calls over the same data, use run_chain.",
     inputSchema: {
       type: "object",
       properties: {

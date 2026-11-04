@@ -25,6 +25,31 @@ afterEach(() => {
   dir = undefined;
 });
 
+describe("ToolIndex signatures", () => {
+  it("learns a compact signature from the input schema and persists it", () => {
+    dir = mkdtempSync(join(tmpdir(), "cb-idx-sig-"));
+    const path = join(dir, "tool-index.json");
+    const cfg = server();
+    const a = new ToolIndex(path);
+    a.record("acme", cfg, [
+      { name: "create_invoice", description: "Create an invoice", inputSchema: { type: "object", properties: { amount: { type: "number" } }, required: ["amount"] } },
+      { name: "ping", description: "Ping" },
+    ]);
+    const tools = new ToolIndex(path).get("acme", cfg);
+    expect(tools[0]!.signature).toBe("create_invoice(args: { amount: number })");
+    expect(tools[1]!.signature).toBeUndefined();
+    // Re-recording identical data (schema included) is not a change; a changed schema is.
+    expect(a.record("acme", cfg, [
+      { name: "create_invoice", description: "Create an invoice", inputSchema: { type: "object", properties: { amount: { type: "number" } }, required: ["amount"] } },
+      { name: "ping", description: "Ping" },
+    ])).toBe(false);
+    expect(a.record("acme", cfg, [
+      { name: "create_invoice", description: "Create an invoice", inputSchema: { type: "object", properties: { amount: { type: "string" } } } },
+      { name: "ping", description: "Ping" },
+    ])).toBe(true);
+  });
+});
+
 describe("ToolIndex", () => {
   it("records, persists and reloads a server's tools", () => {
     dir = mkdtempSync(join(tmpdir(), "cb-idx-"));

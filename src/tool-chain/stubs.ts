@@ -127,6 +127,25 @@ export function toolSignature(tool: Pick<MCPTool, "name" | "description" | "inpu
   return `${name}(args: ${argType}): Promise<unknown>${doc ? ` // ${doc}` : ""}`;
 }
 
+/** Longest compact signature kept in the ToolIndex / shown inline by discover_tools. */
+export const MAX_COMPACT_SIGNATURE_CHARS = 360;
+
+/**
+ * Argument shape only, without the description: `get_order(args: { id: string; verbose?: boolean })`.
+ * Bounded (`maxChars`); an over-long signature ends in `…` so it is never mistaken for complete.
+ */
+export function compactSignature(
+  tool: Pick<MCPTool, "name" | "inputSchema">,
+  maxChars = MAX_COMPACT_SIGNATURE_CHARS
+): string {
+  const schema = isObject(tool.inputSchema) ? tool.inputSchema : {};
+  const hasProps = isObject(schema.properties) && Object.keys(schema.properties).length > 0;
+  const argType = hasProps ? objectType(schema, 0) : "{}";
+  const name = IDENT.test(tool.name) ? tool.name : JSON.stringify(tool.name);
+  const sig = `${name}(args: ${argType})`;
+  return sig.length > maxChars ? `${sig.slice(0, maxChars - 1).trimEnd()}…` : sig;
+}
+
 /** Header shared by every stub block: how results and errors look inside a script. */
 export const STUB_HEADER = [
   "// Results: structured content as an object, JSON text parsed, or plain text as a string.",

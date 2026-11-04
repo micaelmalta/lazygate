@@ -5,7 +5,8 @@ import { readFileSync, statSync } from "fs";
 import type { OAuthConfig } from "./oauth.js";
 import { parseServersConfig, reportConfigErrors } from "./config.js";
 import { scoreEntry } from "./scoring.js";
-import { ToolIndex, toolText } from "./tool-index.js";
+import { DiscoveryRanker, type DiscoveryEntry } from "./discovery.js";
+import { ToolIndex, toolText, type IndexedTool } from "./tool-index.js";
 import { LOG_PREFIX } from "./version.js";
 import { parseResponseOptimizationConfig, type ResponseOptimizationConfig } from "./response-optimizer.js";
 
@@ -18,6 +19,8 @@ function fileMtimeMs(path: string): number {
 }
 
 export type { OAuthConfig };
+
+const NO_TOOLS: IndexedTool[] = [];
 
 /**
  * Where a server's credentials come from (gateway mode; ignored by plain stdio mode unless
@@ -131,7 +134,59 @@ export interface RouterResult {
   descriptionMatches: string[];
   /** Words from the server's (learned) tool names/descriptions that matched. */
   toolMatches: string[];
+  /**
+   * Hybrid relevance (0–1 within one ranking): the order `rank` returns. `score` stays the
+   * integer keyword/word count so thresholds and displays keep their meaning.
+   */
+  relevance: number;
+  /** Upstream tool names the query matched, best first (needs a learned tool index). */
+  toolNameMatches: string[];
+  /** The query contains a whole multi-word upstream tool identifier. */
+  exactTool: boolean;
+  /** First result of a BM25 / hybrid ranking. */
+  best?: boolean;
 }
+
+/**
+ * How `rank` orders servers.
+ * - `lexical`: keyword / description / tool-word counts only (the original scorer)
+ * - `bm25`: BM25 over weighted fields plus tool-name matches
+ * - `hybrid` (default): both, each normalized to its best hit in the query
+ */
+export type RankStrategy = "lexical" | "bm25" | "hybrid";
+
+export interface RankOptions {
+  strategy?: RankStrategy;
+  /** Calls per server (optional tie-break signal). Defaults to the router's usage signal. */
+  usage?: Readonly<Record<string, number>>;
+}
+
+/** Strategy used when the caller does not pick one. */
+export const DEFAULT_RANK_STRATEGY: RankStrategy = "bm25";
+
+/** Servers (best BM25 first) that also get keyword/word-count detail for display and thresholds. */
+const BM25_LEXICAL_DETAIL = 10;
+
+/** Require at least one keyword match or two description-word matches (or a tool-name match). */
+export const MIN_DISCOVERY_SCORE = 2;
+
+/**
+ * True when a ranked server is strong enough to show: enough keyword/word matches, a tool-name
+ * hit, or the single best BM25 hit with at least one keyword/word match.
+ */
+export function isConfidentMatch(
+  r: Pick<RouterResult, "score" | "exactTool" | "toolNameMatches"> & { best?: boolean }
+): boolean {
+  return (
+    r.score >= MIN_DISCOVERY_SCORE ||
+    r.exactTool ||
+    r.toolNameMatches.length > 0 ||
+    Boolean(r.best && r.score > 0)
+  );
+}
+
+/** Weight of the BM25 side in the hybrid order (the remainder goes to the lexical counts). */
+const HYBRID_BM25_WEIGHT = 0.5;
 
 export class ToolRouter {
   private servers: Record<string, ServerConfig>;
@@ -140,6 +195,8 @@ export class ToolRouter {
   private configMtime = -1;
 
   private readonly toolIndex?: ToolIndex;
+  private readonly ranker = new DiscoveryRanker();
+  private usage?: Readonly<Record<string, number>>;
   private responseOptimization: ResponseOptimizationConfig;
 
   constructor(
@@ -195,35 +252,130 @@ export class ToolRouter {
    * Score all servers against a query.
    * Returns ranked list with scores and match reasons.
    */
-  rank(query: string): RouterResult[] {
-    const results: RouterResult[] = [];
+  rank(query: string, options: RankOptions = {}): RouterResult[] {
+    const strategy = options.strategy ?? DEFAULT_RANK_STRATEGY;
+    const entries: DiscoveryEntry[] = [];
 
-    for (const [name, config] of Object.entries(this.servers)) {
-      const learned = this.toolIndex?.get(name, config) ?? [];
+    const lexicalScore = (name: string, config: ServerConfig, learned: IndexedTool[]): RouterResult | undefined => {
       const s = scoreEntry(query, {
         description: config.description,
         keywords: config.keywords,
         toolText: learned.length ? toolText(learned) : undefined,
       });
-      if (s.score > 0) {
-        results.push({
-          name,
-          score: s.score,
-          reason: s.keywords,
-          descriptionMatches: s.descriptionWords,
-          toolMatches: s.toolWords,
-        });
+      if (s.score <= 0) return undefined;
+      return {
+        name,
+        score: s.score,
+        reason: s.keywords,
+        descriptionMatches: s.descriptionWords,
+        toolMatches: s.toolWords,
+        relevance: 0,
+        toolNameMatches: [],
+        exactTool: false,
+      };
+    };
+    const learnedFor = (name: string, config: ServerConfig): IndexedTool[] => {
+      const tools = this.toolIndex?.get(name, config);
+      // One shared empty array keeps the ranker's per-server document cache valid.
+      return tools && tools.length ? tools : NO_TOOLS;
+    };
+
+    if (strategy === "lexical") {
+      const out: RouterResult[] = [];
+      for (const [name, config] of Object.entries(this.servers)) {
+        const r = lexicalScore(name, config, learnedFor(name, config));
+        if (r) out.push(r);
       }
+      const best = Math.max(1, ...out.map((r) => r.score));
+      for (const r of out) r.relevance = r.score / best;
+      return out.sort((a, b) => b.score - a.score);
     }
 
-    return results.sort((a, b) => b.score - a.score);
+    for (const [name, config] of Object.entries(this.servers)) {
+      entries.push({
+        name,
+        description: config.description,
+        keywords: config.keywords,
+        tools: learnedFor(name, config),
+        sources: [config, learnedFor(name, config)],
+      });
+    }
+    const hits = this.ranker.search(query, entries, { usage: options.usage ?? this.usage });
+    const topBm25 = hits[0]?.relevance ?? 0;
+
+    // "bm25" scores keyword/word counts only for the hits it can return (they feed `score`, the
+    // thresholds and the "Matched …" lines); "hybrid" scores every server so it can blend the two.
+    const lexical = new Map<string, RouterResult>();
+    if (strategy === "hybrid") {
+      for (const [name, config] of Object.entries(this.servers)) {
+        const r = lexicalScore(name, config, learnedFor(name, config));
+        if (r) lexical.set(name, r);
+      }
+    } else {
+      for (const hit of hits.slice(0, BM25_LEXICAL_DETAIL)) {
+        const config = this.servers[hit.name]!;
+        const r = lexicalScore(hit.name, config, learnedFor(hit.name, config));
+        if (r) lexical.set(hit.name, r);
+      }
+    }
+    const topLexical = Math.max(1, ...[...lexical.values()].map((r) => r.score));
+
+    const merged = new Map<string, RouterResult>();
+    for (const hit of hits) {
+      const base = lexical.get(hit.name) ?? {
+        name: hit.name,
+        score: 0,
+        reason: [],
+        descriptionMatches: [],
+        toolMatches: [],
+        relevance: 0,
+        toolNameMatches: [],
+        exactTool: false,
+      };
+      base.toolNameMatches = hit.toolMatches;
+      base.exactTool = hit.exactTool;
+      const bm25 = topBm25 > 0 ? hit.relevance / topBm25 : 0;
+      base.relevance =
+        strategy === "hybrid"
+          ? HYBRID_BM25_WEIGHT * bm25 + (1 - HYBRID_BM25_WEIGHT) * (base.score / topLexical)
+          : bm25;
+      merged.set(hit.name, base);
+    }
+    if (strategy === "hybrid") {
+      // Lexical-only hits (BM25 found nothing) still count, at the lexical share of the blend.
+      for (const [name, r] of lexical) {
+        if (merged.has(name)) continue;
+        r.relevance = (1 - HYBRID_BM25_WEIGHT) * (r.score / topLexical);
+        merged.set(name, r);
+      }
+    }
+    const ordered = [...merged.values()].sort(
+      (a, b) => b.relevance - a.relevance || b.score - a.score || a.name.localeCompare(b.name)
+    );
+    if (ordered[0]) ordered[0].best = true;
+    return ordered;
+  }
+
+  /** Optional per-server call counts used as a small tie-break (see DiscoveryOptions.usage). */
+  setUsageSignal(usage: Readonly<Record<string, number>> | undefined): void {
+    this.usage = usage;
   }
 
   /**
    * Select top-k servers for a query.
    */
   select(query: string, topK = 3): string[] {
-    return this.rank(query).slice(0, topK).map((r) => r.name);
+    // Auto-activation looks a bare tool name up after the exact tool-index lookup missed; it keeps
+    // the keyword/word-count order (ties in configuration order) rather than BM25 field weighting.
+    return this.rank(query, { strategy: "lexical" })
+      .slice(0, topK)
+      .map((r) => r.name);
+  }
+
+  /** Tools learned for a server (names, descriptions, compact signatures); [] when unknown or stale. */
+  indexedTools(name: string): IndexedTool[] {
+    const config = this.servers[name];
+    return config ? this.toolIndex?.get(name, config) ?? [] : [];
   }
 
   /** Servers whose learned tool index lists this exact tool name (signature-fresh). */

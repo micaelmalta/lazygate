@@ -21,3 +21,13 @@ jobs:
       - run: npm run typecheck
       - run: npm run build
       - run: npm test
+      - run: npm run pack:check
+      # Reproducible end-to-end suite compared with benchmarks/baseline.json: fails on lost
+      # correctness, extra turns, token growth, worse discovery, or more optimizer tokenizing.
+      - run: npm run benchmark:ci -- --out-dir benchmark-results
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: benchmark-suite-node${{ matrix.node }}
+          path: benchmark-results/
+          if-no-files-found: ignore

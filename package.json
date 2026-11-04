@@ -9,8 +9,11 @@
     },
     "files": [
         "dist",
+        "!dist/**/__tests__",
+        "!dist/**/*.map",
         "config",
-        "scripts"
+        "scripts",
+        "docs"
     ],
     "repository": {
         "type": "git",
@@ -21,13 +24,21 @@
         "url": "https://github.com/micaelmalta/lazygate/issues"
     },
     "scripts": {
+        "clean": "node --eval \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
         "build": "tsc",
         "dev": "tsx src/index.ts",
         "start": "node dist/index.js",
         "migrate": "node dist/index.js migrate",
         "revert-migration": "node dist/index.js revert",
         "benchmark": "node dist/index.js benchmark",
-        "prepublishOnly": "npm run build",
+        "benchmark:suite": "node dist/index.js benchmark --suite",
+        "benchmark:ci": "node dist/index.js benchmark --suite --quick --baseline benchmarks/baseline.json",
+        "benchmark:baseline": "node dist/index.js benchmark --suite --quick --write-baseline benchmarks/baseline.json",
+        "benchmark:suite:merged": "node dist/index.js benchmark --suite --merged-discovery",
+        "benchmark:tasks:cold": "node dist/index.js benchmark --tasks --cold-discovery",
+        "pack:check": "node scripts/check-pack.mjs",
+        "prepack": "npm run clean && npm run build",
+        "prepublishOnly": "npm run build && npm run pack:check",
         "pretest": "tsc",
         "test": "node --experimental-vm-modules --no-warnings=ExperimentalWarning node_modules/.bin/jest",
         "typecheck": "tsc --noEmit"
@@ -57,5 +68,19 @@
     "overrides": {
         "minimatch": "^11.0.4",
         "glob": "^14.0.3"
+    },
+    "keywords": [
+        "mcp",
+        "model-context-protocol",
+        "mcp-gateway",
+        "mcp-proxy",
+        "claude-code",
+        "cursor",
+        "context",
+        "lazy-loading",
+        "tool-discovery"
+    ],
+    "publishConfig": {
+        "access": "public"
     }
 }

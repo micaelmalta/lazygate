@@ -99,8 +99,18 @@ them through `describe_tool` / `call_tool`. Two reasons:
 - Changing `tools/list` mid-session invalidates the prompt cache for everything after the tools
   block.
 
-You can opt in per server with `expose: "all"` or an allowlist of tool names in `servers.json`. See
-[Routing](reference.md#routing).
+You can opt in per server with `expose: "all"` or an allowlist of tool names in `servers.json`.
+That is **pinning**: worth it for the few tools an agent uses in almost every session (no lookup
+turns, but their schemas ride along in every turn); not for long-tail servers. See
+[When to pin](reference.md#when-to-pin-expose).
+
+### Starting cold: fewer lookup turns
+
+A cold agent used to need `discover_tools` → `describe_tool` → call. Now a clear `discover_tools`
+match carries the call signature of the best-matching tool(s) (from the live schema, or from the
+signature learned in `tool-index.json`; nothing is activated for it), so the agent can call
+straight away, and a `call_tool` argument error returns the tool's input schema so a wrong guess
+is fixed in one retry. The suite reports cold, merged-discovery and known-tools turns side by side.
 
 ## Tool chain
 
@@ -121,6 +131,15 @@ return stale.map((i) => ({ key: i.key, summary: i.fields.summary }));
 - **Same checks as `call_tool`.** Every nested call goes through visibility, allowlist and lazy
   activation. The gateway audits each one with `via: "run_chain"` and redacts credentials.
 - **Keep `call_tool` for single or destructive calls,** so the client approves each one on its own.
+
+**When to chain.** Chain two or more dependent calls, loops, and filtering or totalling over many
+results. Use `call_tool` for a single lookup, when you don't yet know a tool's argument shape (read
+`describe_tool` first), or for anything destructive. In the benchmark suite `run_chain` is the
+cheapest strategy on dependent chains, large JSON aggregation and HTML retrieval, and it takes about
+as long as `call_tool` for many independent calls (script concurrency is capped at eight). `discover_tools`
+hints at the stubs (`describe_tool(server)` without a tool) when a result supports chaining, and the
+audit summary reports chain adoption and success. See
+[End-to-end suite](reference.md#end-to-end-suite---suite).
 
 Limits and the full security model: [Tool chain](reference.md#tool-chain).
 
@@ -179,7 +198,17 @@ lazygate benchmark --estimate                         # free local preview, no m
 lazygate benchmark                                    # Claude: MCP schemas and skills
 lazygate benchmark --runner codex --model gpt-6-luna  # skills on Codex
 lazygate benchmark --tasks                            # multi-step task: direct, call_tool, call_tool+opt, run_chain
+lazygate benchmark --tasks --cold-discovery           # same, lazygate starts cold (live model, not run in CI)
+lazygate benchmark --suite                            # reproducible, model-free suite (JSON + Markdown reports)
 ```
+
+`--suite` needs no API key: five workloads at 20 / 100 / 250 / 500 catalog tools, six strategies
+(direct, direct with a client output cap, call_tool, call_tool_opt, run_chain, pinned), three lookup
+modes (cold, merged discovery, known tools), correctness, turns, tokens (raw and with a modeled
+prompt cache), measured tool latency and modeled model time with a turn-time sweep, plus
+discovery (tuned and held-out sets) and truncation sections. CI compares a quick run with
+`benchmarks/baseline.json`. See [End-to-end suite](reference.md#end-to-end-suite---suite)
+and the [published results](../benchmarks/results/suite.md).
 
 `--tasks` runs one fixture job (`src/__tests__/fixtures/tickets-server.mjs`: count ana's open
 tickets and sum each ticket's `bodyLength`, expected `8 60000`) four ways and only reports token

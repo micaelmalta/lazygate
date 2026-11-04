@@ -1,4 +1,5 @@
 import { randomBytes } from "crypto";
+import { longestFittingPrefix, MAX_PLAUSIBLE_CHARS_PER_TOKEN } from "./prefix-fit.js";
 
 const DEFAULT_TTL_MS = 5 * 60 * 1000;
 const DEFAULT_MAX_ENTRIES = 100;
@@ -182,20 +183,20 @@ export class ResultHandleStore {
  * half. Always returns at least one character of non-empty text so offset paging makes progress.
  */
 export function textWithinBudget(text: string, maxTokens: number, estimate: (value: string) => number): string {
-  if (estimate(text) <= maxTokens) return text;
-  let low = 1;
-  // Tokens rarely span more than 16 characters; the cap keeps every estimate on a short prefix.
-  let high = Math.min(text.length, Math.max(1, maxTokens) * 16);
-  let best = 1;
-  while (low <= high) {
-    const middle = Math.floor((low + high) / 2);
-    if (estimate(text.slice(0, middle)) <= maxTokens) {
-      best = middle;
-      low = middle + 1;
-    } else {
-      high = middle - 1;
-    }
-  }
+  const mayFit = text.length <= maxTokens * MAX_PLAUSIBLE_CHARS_PER_TOKEN;
+  const wholeTokens = mayFit ? estimate(text) : undefined;
+  if (wholeTokens !== undefined && wholeTokens <= maxTokens) return text;
+  // At least one character, so offset paging always makes progress.
+  const best = Math.max(
+    1,
+    longestFittingPrefix(
+      text.length,
+      maxTokens,
+      (length) => estimate(text.slice(0, length)),
+      wholeTokens ? text.length / wholeTokens : undefined
+    )
+  );
+  if (best >= text.length && !mayFit && estimate(text) <= maxTokens) return text;
   const newline = text.lastIndexOf("\n", best - 1);
   return text.slice(0, newline > best / 2 ? newline + 1 : best);
 }

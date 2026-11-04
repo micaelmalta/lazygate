@@ -5,6 +5,7 @@ import { jest, describe, it, expect, beforeEach } from "@jest/globals";
 import { createBroker, summarizeDescription } from "../broker.js";
 import { ToolRouter, type ServerConfig } from "../router.js";
 import { SkillRouter } from "../skill-router.js";
+import { ToolIndex } from "../tool-index.js";
 import type { ProcessManager, MCPTool } from "../process-manager.js";
 import { estimateTokens, parseResponseOptimizationConfig } from "../response-optimizer.js";
 
@@ -174,6 +175,151 @@ describe("createBroker", () => {
       const r = await broker.callTool("discover_tools", { query: "repositories issues" });
       expect(text(r)).toMatch(/description:.*repositories/);
       expect(text(r)).toContain("github");
+    });
+
+    it("names the upstream tool a query matched and points multi-step work at run_chain", async () => {
+      const cfg = { description: "Issue tracker", keywords: ["tracker"], command: "node", autoActivate: false, toolChain: true };
+      const index = new ToolIndex();
+      index.record("tracker", cfg, [{ name: "close_stale_issues", description: "Close issues that have gone quiet" }]);
+      router = new ToolRouter({ tracker: server(cfg), wiki: server({ description: "Wiki pages", keywords: ["wiki"] }) }, undefined, index);
+      broker = createBroker({ router, manager: mk.manager as unknown as ProcessManager, skillRouter: null, previewOnDiscover: false });
+      const r = await broker.callTool("discover_tools", { query: "close_stale_issues now" });
+      expect(text(r)).toContain("tracker");
+      expect(text(r)).toContain("Likely tools: close_stale_issues");
+      expect(text(r)).toContain("run_chain stubs");
+      expect(text(r)).not.toContain("wiki");
+    });
+
+    describe("inline signatures", () => {
+      const orders = server({ description: "Order management", keywords: ["orders"], command: "node" });
+      const tools = [
+        { name: "get_order_status", description: "Get the current status of one order.", inputSchema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] } },
+        { name: "list_orders", description: "List recent orders.", inputSchema: { type: "object", properties: { limit: { type: "integer" } } } },
+        { name: "cancel_order", description: "Cancel an order.", inputSchema: { type: "object", properties: { id: { type: "string" }, reason: { type: "string" } }, required: ["id"] } },
+        // Enough tools that the server is not "tiny" (a tiny server shows every signature).
+        { name: "export_orders", description: "Export orders to a file.", inputSchema: { type: "object", properties: { format: { type: "string" } } } },
+        { name: "archive_orders", description: "Archive old orders.", inputSchema: { type: "object", properties: {} } },
+      ];
+      const build = (opts: { record?: boolean; active?: boolean; preview?: boolean } = {}) => {
+        const index = new ToolIndex();
+        if (opts.record !== false) index.record("orders", orders, tools);
+        router = new ToolRouter(
+          { orders, wiki: server({ description: "Wiki pages", keywords: ["wiki"] }) },
+          undefined,
+          index
+        );
+        mk = makeManager();
+        if (opts.active) mk.active.set("orders", tools.map((t) => ({ ...t, serverName: "orders" })));
+        broker = createBroker({
+          router,
+          manager: mk.manager as unknown as ProcessManager,
+          skillRouter: null,
+          previewOnDiscover: opts.preview ?? false,
+        });
+      };
+
+      it("includes the signature of the best-matching tool from the ToolIndex without activating anything", async () => {
+        build();
+        const r = await broker.callTool("discover_tools", { query: "check the status of an order" });
+        expect(text(r)).toContain("Call signatures");
+        expect(text(r)).toContain("get_order_status(args: { id: string })");
+        expect(text(r)).not.toContain("cancel_order(");
+        expect(mk.manager.activate).not.toHaveBeenCalled();
+      });
+
+      it("uses the live schema when the server is already active, and bounds the number of signatures", async () => {
+        build({ active: true, record: false });
+        const r = await broker.callTool("discover_tools", { query: "list orders and cancel order status" });
+        const signatures = text(r).split("\n").filter((line) => /^\s+\w+\(args:/.test(line));
+        expect(signatures.length).toBeGreaterThan(0);
+        expect(signatures.length).toBeLessThanOrEqual(2);
+      });
+
+      it("lists every tool of a tiny server, but adds nothing for a larger one when none matches", async () => {
+        const tiny = new ToolIndex();
+        tiny.record("orders", orders, tools.slice(0, 3));
+        router = new ToolRouter({ orders }, undefined, tiny);
+        broker = createBroker({ router, manager: mk.manager as unknown as ProcessManager, skillRouter: null, previewOnDiscover: false });
+        const small = text(await broker.callTool("discover_tools", { query: "orders" }));
+        expect(small).toContain("get_order_status(args: { id: string })");
+        expect(small).toContain("cancel_order(");
+        build();
+        expect(text(await broker.callTool("discover_tools", { query: "orders" }))).not.toContain("Call signatures");
+      });
+
+      it("adds nothing when nothing is indexed or the top two servers are tied", async () => {
+        build({ record: false });
+        expect(text(await broker.callTool("discover_tools", { query: "check the status of an order" }))).not.toContain("Call signatures");
+        const twin = server({ description: "Order management", keywords: ["orders"], command: "node" });
+        const index = new ToolIndex();
+        index.record("orders", orders, tools);
+        index.record("orders2", twin, tools);
+        router = new ToolRouter({ orders, orders2: twin }, undefined, index);
+        broker = createBroker({ router, manager: mk.manager as unknown as ProcessManager, skillRouter: null, previewOnDiscover: false });
+        expect(text(await broker.callTool("discover_tools", { query: "check the status of an order" }))).not.toContain("Call signatures");
+      });
+
+      describe("preview of the clearly best server", () => {
+        it("loads it and shows its signatures even when nothing was indexed yet", async () => {
+          const small = server({ description: "Support tickets: list and fetch", keywords: ["tickets", "support"], command: "node", toolChain: true });
+          router = new ToolRouter({ tickets: small, wiki: server({ description: "Wiki pages", keywords: ["wiki"] }) });
+          mk = makeManager();
+          mk.manager.activate.mockImplementation(async (name: string) => {
+            const t: MCPTool[] = [
+              { name: "list_tickets", description: "List tickets", inputSchema: { type: "object", properties: { status: { type: "string" } } }, serverName: name },
+              { name: "get_ticket", description: "Fetch one ticket", inputSchema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] }, serverName: name },
+            ];
+            mk.active.set(name, t);
+            return t;
+          });
+          broker = createBroker({ router, manager: mk.manager as unknown as ProcessManager, skillRouter: null });
+          const r = await broker.callTool("discover_tools", { query: "open support tickets for ana" });
+          expect(mk.manager.activate).toHaveBeenCalledTimes(1);
+          expect(text(r)).toContain("Call signatures");
+          expect(text(r)).toContain("list_tickets(args: { status?: string })");
+          expect(text(r)).toContain("get_ticket(args: { id: string })");
+          expect(text(r)).toContain("servers.tickets.<tool>(args)");
+          expect(text(r)).not.toContain("run_chain stubs");
+          expect(text(r)).not.toContain("Use activate_server");
+        });
+
+        it("does not load anything when the match is ambiguous, needs credentials, or uses OAuth", async () => {
+          const twin = server({ description: "Order management", keywords: ["orders"], command: "node" });
+          mk = makeManager();
+          router = new ToolRouter({ orders: orders, orders2: twin });
+          broker = createBroker({ router, manager: mk.manager as unknown as ProcessManager, skillRouter: null });
+          await broker.callTool("discover_tools", { query: "check the status of an order" });
+          expect(mk.manager.activate).not.toHaveBeenCalled();
+
+          const oauth = server({ description: "Order management", keywords: ["orders"], type: "http", url: "https://example.test/mcp", oauth: true });
+          router = new ToolRouter({ orders: oauth });
+          broker = createBroker({ router, manager: mk.manager as unknown as ProcessManager, skillRouter: null });
+          await broker.callTool("discover_tools", { query: "orders" });
+          expect(mk.manager.activate).not.toHaveBeenCalled();
+
+          router = new ToolRouter({ orders });
+          broker = createBroker({
+            router,
+            manager: mk.manager as unknown as ProcessManager,
+            skillRouter: null,
+            access: { canUse: () => true, prepare: () => undefined, missing: () => ["API_KEY"] } as never,
+          });
+          const r = await broker.callTool("discover_tools", { query: "orders" });
+          expect(mk.manager.activate).not.toHaveBeenCalled();
+          expect(text(r)).toContain("needs credentials");
+        });
+
+        it("still answers when the preview activation fails", async () => {
+          mk = makeManager();
+          mk.manager.activate.mockRejectedValue(new Error("spawn failed"));
+          router = new ToolRouter({ orders });
+          broker = createBroker({ router, manager: mk.manager as unknown as ProcessManager, skillRouter: null });
+          const r = await broker.callTool("discover_tools", { query: "orders" });
+          expect(r.isError).toBeUndefined();
+          expect(text(r)).toContain("orders");
+          expect(text(r)).not.toContain("Call signatures");
+        });
+      });
     });
 
     it("on zero matches lists names only (no descriptions)", async () => {
@@ -598,7 +744,8 @@ describe("createBroker", () => {
         skillRouter: null,
         onResultHandleRead,
       });
-      const incidents = Array.from({ length: 12 }, (_, i) => ({
+      // Large enough that projecting ids saves more than the handle pointer costs.
+      const incidents = Array.from({ length: 60 }, (_, i) => ({
         id: `INC-${i}`,
         severity: ["sev1", "sev2", "sev3"][i % 3],
         summary: `Incident ${i}`,
@@ -620,7 +767,7 @@ describe("createBroker", () => {
       for (const { severity } of (severities.structuredContent as { incidents: { severity: string }[] }).incidents) {
         counts[severity] = (counts[severity] ?? 0) + 1;
       }
-      expect(counts).toEqual({ sev1: 4, sev2: 4, sev3: 4 });
+      expect(counts).toEqual({ sev1: 20, sev2: 20, sev3: 20 });
       expect(onResultHandleRead).toHaveBeenCalledWith({ serverName: "github", toolName: "github_tool" });
     });
 
@@ -718,6 +865,135 @@ describe("createBroker", () => {
         expect.anything(),
         expect.objectContaining({ tokenizer: "o200k_base" })
       );
+    });
+
+    describe("call_tool self-correction", () => {
+      const schema = { type: "object", properties: { id: { type: "string" }, limit: { type: "integer" } }, required: ["id"] };
+      beforeEach(() => {
+        mk.active.set("github", [
+          { name: "get_issue", description: "Fetch one issue by id", inputSchema: schema, serverName: "github" },
+          { name: "list_issues", description: "List repository issues", inputSchema: { type: "object", properties: {} }, serverName: "github" },
+        ]);
+      });
+
+      it("appends the input schema when the upstream rejects the arguments (isError result)", async () => {
+        mk.manager.callTool.mockResolvedValueOnce({
+          isError: true,
+          content: [{ type: "text", text: "Invalid arguments: id is required" }],
+        } as never);
+        const r = await broker.callTool("call_tool", { server: "github", tool: "get_issue", args: {} });
+        expect(r.isError).toBe(true);
+        expect(r.content).toHaveLength(2);
+        expect(text(r)).toContain("Invalid arguments");
+        const hint = (r.content[1] as { text: string }).text;
+        expect(hint).toContain('Input schema for "get_issue"');
+        expect(hint).toContain(JSON.stringify(schema));
+      });
+
+      it("appends the schema when the upstream answers with a JSON-RPC invalid-params error", async () => {
+        const err = Object.assign(new Error("Params did not match"), { code: -32602 });
+        mk.manager.callTool.mockRejectedValueOnce(err);
+        const r = await broker.callTool("call_tool", { server: "github", tool: "get_issue", args: { id: 3 } });
+        expect(r.isError).toBe(true);
+        expect(text(r)).toContain("Error calling get_issue: Params did not match");
+        expect(text(r)).toContain(JSON.stringify(schema));
+      });
+
+      it("does not attach the schema to unrelated failures", async () => {
+        mk.manager.callTool.mockResolvedValueOnce({ isError: true, content: [{ type: "text", text: "rate limit hit" }] } as never);
+        const r = await broker.callTool("call_tool", { server: "github", tool: "get_issue", args: { id: "1" } });
+        expect(r.content).toHaveLength(1);
+        mk.manager.callTool.mockRejectedValueOnce(new Error("timed out"));
+        const t = await broker.callTool("call_tool", { server: "github", tool: "get_issue", args: { id: "1" } });
+        expect(text(t)).not.toContain("Input schema");
+      });
+
+      it("bounds the schema: a large one falls back to a compact signature", async () => {
+        const props = Object.fromEntries(Array.from({ length: 80 }, (_, i) => [`field_${i}`, { type: "string", description: "x".repeat(40) }]));
+        mk.active.set("github", [
+          { name: "big", description: "d", inputSchema: { type: "object", properties: props }, serverName: "github" },
+        ]);
+        mk.manager.callTool.mockResolvedValueOnce({ isError: true, content: [{ type: "text", text: "missing required field" }] } as never);
+        const r = await broker.callTool("call_tool", { server: "github", tool: "big", args: {} });
+        const hint = (r.content[1] as { text: string }).text;
+        expect(hint).toContain("is large");
+        expect(hint.length).toBeLessThan(1500);
+        expect(hint).toContain("describe_tool");
+      });
+
+      it("suggests close matches with their signatures for an unknown tool", async () => {
+        const r = await broker.callTool("call_tool", { server: "github", tool: "fetch issue", args: {} });
+        expect(r.isError).toBe(true);
+        expect(text(r)).toContain("not found on server");
+        expect(text(r)).toContain("Closest matches:");
+        expect(text(r)).toContain("get_issue(args: { id: string; limit?: number })");
+        expect(mk.manager.callTool).not.toHaveBeenCalled();
+      });
+    });
+
+    describe("optimization overhead on small results", () => {
+      const optimizing = (overrides: Record<string, unknown> = {}) =>
+        createBroker({
+          router,
+          manager: mk.manager as unknown as ProcessManager,
+          skillRouter: null,
+          responseOptimization: parseResponseOptimizationConfig({
+            responseOptimization: { enabled: true, defaultMode: "adaptive", ...overrides },
+          }).config,
+        });
+
+      it("returns a tiny result untouched under the adaptive default (no metadata, no handle)", async () => {
+        const tiny = { region: "us-east", requests: 10000, errors: null, tags: [] };
+        mk.manager.callTool.mockResolvedValue({ content: [{ type: "text", text: JSON.stringify(tiny) }] } as never);
+        await broker.callTool("activate_server", { server_name: "github" });
+        const plain = await broker.callTool("call_tool", { server: "github", tool: "github_tool", args: {} });
+        const opt = await optimizing().callTool("call_tool", { server: "github", tool: "github_tool", args: {} });
+        expect(opt).toEqual(plain);
+        expect(opt._meta).toBeUndefined();
+      });
+
+      it("projects requested fields on a tiny result without metadata or a handle pointer", async () => {
+        const tiny = { region: "us-east", requests: 10000, errors: 0, p95Ms: 120 };
+        mk.manager.callTool.mockResolvedValue({ content: [{ type: "text", text: JSON.stringify(tiny) }] } as never);
+        const opt = optimizing();
+        await opt.callTool("activate_server", { server_name: "github" });
+        const plain = await optimizing().callTool("call_tool", { server: "github", tool: "github_tool", args: {} });
+        const r = await opt.callTool("call_tool", { server: "github", tool: "github_tool", args: {}, fields: ["requests"] });
+        expect(JSON.parse(text(r))).toEqual({ requests: 10000 });
+        expect(r.content).toHaveLength(1);
+        expect(r._meta).toBeUndefined();
+        expect(estimateTokens(r)).toBeLessThanOrEqual(estimateTokens(plain));
+      });
+
+      it("returns the original when a projection of a mid-size result saves less than the pointer costs", async () => {
+        const row = { id: 1, title: "t".repeat(300), body: "b".repeat(450) };
+        mk.manager.callTool.mockResolvedValue({ content: [{ type: "text", text: JSON.stringify(row) }] } as never);
+        const opt = optimizing();
+        const r = await opt.callTool("call_tool", { server: "github", tool: "github_tool", args: {}, fields: ["id", "title"] });
+        expect(JSON.parse(text(r))).toEqual(row);
+        expect(r._meta).toBeUndefined();
+      });
+
+      it("still projects and offers a handle when the saving is material, and still applies budgets", async () => {
+        const big = { id: 1, body: "x".repeat(6000) };
+        mk.manager.callTool.mockResolvedValue({ content: [{ type: "text", text: JSON.stringify(big) }] } as never);
+        const r = await optimizing().callTool("call_tool", { server: "github", tool: "github_tool", args: {}, fields: ["id"] });
+        expect(JSON.parse(text(r))).toEqual({ id: 1 });
+        expect((r._meta as any).lazygate.responseOptimization.resultHandle).toBeDefined();
+
+        mk.manager.callTool.mockResolvedValue({ content: [{ type: "text", text: "word ".repeat(400) }] } as never);
+        const budgeted = await optimizing({ maxOutputTokens: 100 }).callTool("call_tool", { server: "github", tool: "github_tool", args: {} });
+        expect(text(budgeted)).toMatch(/incomplete/);
+      });
+
+      it("leaves operator-configured projections alone even on tiny results", async () => {
+        mk.manager.callTool.mockResolvedValue({ content: [], structuredContent: { id: 7, token: "sensitive" } } as never);
+        const r = await optimizing({
+          defaultMode: "off",
+          tools: { "github.github_tool": { mode: "project", fields: ["id"] } },
+        }).callTool("call_tool", { server: "github", tool: "github_tool", args: {} });
+        expect(r.structuredContent).toEqual({ id: 7 });
+      });
     });
 
     it("call_tool defaults args to {} and surfaces proxy errors", async () => {

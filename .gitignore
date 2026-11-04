@@ -9,3 +9,4 @@ node_modules/
 !.env.example
 *.bak-*
 security-report-*.md
+benchmark-results/

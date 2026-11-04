@@ -77,6 +77,7 @@ export async function warmSharedToolIndex(opts: {
         const bare = tools.map((t) => ({
           name: bareToolName(name, t.name),
           description: t.description,
+          inputSchema: t.inputSchema,
         }));
         registry.toolIndex.record(name, cfg, bare);
         result.indexed.push({ name, tools: bare.length });

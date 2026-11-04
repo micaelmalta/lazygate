@@ -68,6 +68,8 @@ Measure it on your own setup:
 ```bash
 lazygate benchmark --estimate    # free local preview, no model calls
 lazygate benchmark --tasks       # the multi-step task above (needs a logged-in `claude`)
+lazygate benchmark --tasks --cold-discovery  # same, lazygate starts cold (needs `claude`; not run in CI)
+lazygate benchmark --suite       # reproducible, model-free suite (no API key)
 lazygate benchmark --responses-live --cases benchmark-cases.json --iterations 5
 ```
 
@@ -80,7 +82,8 @@ task success. See [the benchmark case format](docs/reference.md#live-response-be
 
 ## Install
 
-lazygate isn't on npm yet. Build it from source (Node.js 20 or later):
+lazygate needs Node.js 22 or later. The package is set up for npm (`npm install -g lazygate`;
+[release process](docs/release.md)), but no release has been published yet, so build it from source:
 
 ```bash
 git clone https://github.com/micaelmalta/lazygate.git
@@ -148,5 +151,7 @@ server unless you pass `--include-catalog`. Setup guide: [docs/gateway.md](docs/
 | [How it works](docs/how-it-works.md) | Architecture, meta-tools, skill split, tool chain, manual setup, development |
 | [Gateway guide](docs/gateway.md) | HTTP gateway, web UI, tokens, vault, TLS |
 | [Reference](docs/reference.md) | Every server and skill setting, routing, migration, benchmark |
+| [Benchmarks](benchmarks/results/suite.md) | Reproducible end-to-end results (cold start, merged discovery, pinned tools, cache and output-cap models, held-out discovery): `lazygate benchmark --suite` ([how to run and read it](docs/reference.md#end-to-end-suite---suite)) |
+| [Releasing](docs/release.md) | npm package contents, release checks, publishing |
 | [Upgrading from context-broker](docs/reference.md#upgrading-from-context-broker) | The old name still works; installs upgrade in place |
 | [CLAUDE.md](CLAUDE.md) | Source map for contributors |
