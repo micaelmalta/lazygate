@@ -58,7 +58,15 @@ export function buildManifest(
     lines.push(line);
     used += line.length + 1;
   }
-  if (lines.length === 0) return undefined;
-  const more = omitted ? `\n(${omitted} more server${omitted === 1 ? "" : "s"} omitted to keep this short.)` : "";
-  return `${head}\n${lines.join("\n")}${more}\n${tail}`;
+
+  const assemble = (): string => {
+    const more = omitted ? `\n(${omitted} more server${omitted === 1 ? "" : "s"} omitted to keep this short.)` : "";
+    return `${head}\n${lines.join("\n")}${more}\n${tail}`;
+  };
+  // The omission note counts against the cap too: drop whole servers until the text fits.
+  while (lines.length > 0 && assemble().length > maxChars) {
+    lines.pop();
+    omitted += 1;
+  }
+  return lines.length === 0 ? undefined : assemble();
 }

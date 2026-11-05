@@ -210,7 +210,7 @@ export function strategyResponseOptimization(strategyId) {
 }
 
 /** The system-prompt addendum the model gets for one task and strategy. */
-export function buildInstruction(taskId, strategyId, { cold = false, manifest = false } = {}) {
+export function buildInstruction(taskId, strategyId, { cold = false } = {}) {
   const task = TASKS[taskId];
   const rule = ANSWER_RULE(task.format);
   const names = serverList(task);
@@ -232,27 +232,12 @@ export function buildInstruction(taskId, strategyId, { cold = false, manifest = 
     );
   }
 
-  if (manifest && strategyId !== "direct") {
-    // The tool signatures reach the model through the broker's MCP instructions, not this text.
-    const listed =
-      "You have the lazygate MCP server. Its instructions list the tools of some upstream servers with their call signatures; " +
-      "use those directly and call discover_tools only for something that is not listed.\n";
-    if (strategyId === "call-tool") return `${listed}Use call_tool only (never run_chain).\n${task.coldBulk}\n${rule}`;
-    if (strategyId === "call-tool-optimized") {
-      return (
-        `${listed}Use call_tool only (never run_chain).\n` +
-        `${task.coldBulk} Ask call_tool for only the fields you need: pass fields=[...] (for example ${task.fields}).\n${rule}`
-      );
-    }
-    return (
-      `${listed}Write ONE run_chain script that fetches, filters and totals, calling servers.<server>.<tool>(args) per the listed signatures; ` +
-      `the records are large, so keep them inside the script (never use call_tool).\n${rule}`
-    );
-  }
-
+  // Neutral on purpose: it does not tell the model to call discover_tools first, so a manifest in the
+  // MCP instructions (or cached signatures) is measured on its own, with the same words in every
+  // cold variant.
   const discover =
     "You have the lazygate MCP server and do not know which upstream servers or tools exist.\n" +
-    "Start with discover_tools to find the right server" + (plural ? "s" : "") + ", learn the tool names and argument shapes from its answer (use describe_tool only if you need more), then ";
+    `Work out which server${plural ? "s" : ""} and tools you need and how to call them through lazygate, then `;
 
   if (strategyId === "call-tool") {
     if (cold) return `${discover}use call_tool only (never run_chain).\n${task.coldBulk}\n${rule}`;
@@ -280,8 +265,8 @@ export function buildInstruction(taskId, strategyId, { cold = false, manifest = 
     if (cold) {
       return (
         "You have the lazygate MCP server and do not know which upstream servers or tools exist.\n" +
-        "Start with discover_tools to find the right server" + (plural ? "s" : "") + "; a clear match lists call signatures, and inside run_chain you call servers.<server>.<tool>(args). " +
-        "Use describe_tool with that server and NO tool argument only if you need the tool-chain stubs.\n" +
+        `Work out which server${plural ? "s" : ""} and tools you need and how to call them through lazygate. ` +
+        "Inside run_chain you call servers.<server>.<tool>(args); describe_tool with a server and NO tool argument returns its tool-chain stubs.\n" +
         "Then write ONE run_chain script that fetches, filters and totals; the records are large, so keep them inside the script (never use call_tool).\n" +
         rule
       );

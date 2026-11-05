@@ -477,8 +477,20 @@ trade-off is a fixed cost on every turn (about 400 tokens at most: the whole man
 one model call per cold task. Use it for the few servers most sessions need; keep the long tail on
 `discover_tools`. Limits: the signatures come from the learned index, so a server must have run once
 (`lazygate` records it on first activation), and the text is read at startup, so a change shows up in
-the next session. It applies to stdio mode; gateway sessions do not send it yet. A client that
-ignores server `instructions` falls back to `discover_tools`.
+the next session. It applies to stdio mode; gateway sessions do not send it yet. A client that ignores server
+`instructions` falls back to `discover_tools`.
+
+What it is for: a **returning** session whose index already knows the server, not a first-ever run
+(there is nothing to list until a server has run once). The cold-path benchmark variants
+(`--cold-discovery` with `--index fresh | warm`, `--preview`, `--manifest`) compare those cases with
+identical agent instructions, so the manifest is measured on its own.
+
+**Staleness.** The text is built once at startup. If a server's tools change mid-session, the
+manifest keeps the old signatures until the next session. A call with outdated arguments is not
+silent: `call_tool` returns the server's error together with the current input schema (or the
+closest signatures for an unknown tool), so the model can correct itself without a lookup. A client
+may also not propagate `instructions` to the model; check with the `lookups` column of
+`benchmark --tasks` (a manifest that works shows none).
 
 ### When to pin (`expose`)
 

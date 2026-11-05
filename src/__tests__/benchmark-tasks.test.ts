@@ -53,7 +53,9 @@ describe("task catalog", () => {
         expect(known).toContain("Your entire final message must be exactly");
         expect(cold).toContain("Your entire final message must be exactly");
         if (strategy !== "direct") {
-          expect(cold).toContain("discover_tools");
+          // Same neutral words in every cold variant: no hint to call discover_tools first.
+          expect(cold).toContain("do not know which upstream servers or tools exist");
+          expect(cold).not.toContain("discover_tools");
           for (const server of tasks.TASKS[id]!.servers) {
             expect(known).toContain(`"${server}"`);
             expect(cold).not.toContain(`"${server}"`);

@@ -1437,7 +1437,7 @@ async function runTaskStrategy(taskId, strategyId) {
   const startLog = join(dir, "starts.log");
   const mcpConfig = await taskMcpConfig(strategyId, dir, startLog);
   const appendFile = join(dir, "instruction.md");
-  writeFileSync(appendFile, buildInstruction(taskId, strategyId, { cold: coldDiscovery, manifest: manifestFlag }));
+  writeFileSync(appendFile, buildInstruction(taskId, strategyId, { cold: coldDiscovery }));
   const result = await runClaudeTask(mcpConfig, { appendFile, prompt: taskPrompt(taskId, { cold: coldDiscovery }) });
   return { taskId, id: strategyId, label: STRATEGY_LABELS[strategyId], ...result, serversStarted: countServerStarts(startLog) };
 }
@@ -1711,7 +1711,7 @@ if (tasksOnly) {
       console.log(`Prompt: ${taskPrompt(taskId, { cold: coldDiscovery })}`);
       console.log(`Expect: ${task.expected().join(" ")}\n`);
       for (const strategyId of activeStrategies()) {
-        console.log(`[${STRATEGY_LABELS[strategyId]}]\n${buildInstruction(taskId, strategyId, { cold: coldDiscovery, manifest: manifestFlag })}\n`);
+        console.log(`[${STRATEGY_LABELS[strategyId]}]\n${buildInstruction(taskId, strategyId, { cold: coldDiscovery })}\n`);
       }
     }
     process.exit(0);

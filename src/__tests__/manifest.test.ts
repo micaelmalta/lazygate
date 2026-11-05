@@ -71,9 +71,23 @@ describe("buildManifest", () => {
       })));
     }
     const text = buildManifest(servers, index)!;
-    expect(text.length).toBeLessThanOrEqual(MANIFEST_MAX_CHARS + 80);
+    expect(text.length).toBeLessThanOrEqual(MANIFEST_MAX_CHARS);
     expect(text).toMatch(/\d+ more servers? omitted/);
     expect(text).toContain("- srv0");
+  });
+
+  it("never exceeds the cap, even counting the omission note, for any budget", () => {
+    const index = new ToolIndex();
+    const servers: Record<string, ServerConfig> = {};
+    for (let i = 0; i < 8; i++) {
+      const cfg = server({ manifest: true, args: [`s${i}.js`] });
+      servers[`srv${i}`] = cfg;
+      index.record(`srv${i}`, cfg, [{ name: "tool", description: "", inputSchema: schema({ q: { type: "string" } }, ["q"]) }]);
+    }
+    for (let maxChars = 300; maxChars <= 900; maxChars += 7) {
+      const text = buildManifest(servers, index, { maxChars });
+      if (text) expect(text.length).toBeLessThanOrEqual(maxChars);
+    }
   });
 
   it("is deterministic, so the prompt cache stays valid", () => {
