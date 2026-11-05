@@ -47,6 +47,7 @@ import {
   writeFileSync,
   existsSync,
   mkdtempSync,
+  mkdirSync,
   rmSync,
   symlinkSync,
 } from "fs";
@@ -159,12 +160,31 @@ if (coldDiscovery && !tasksOnly) {
 // --task a,b|all picks which tasks --tasks runs (default: all). --json writes the full results.
 const taskArg = get("--task") ?? "all";
 const taskFlagGiven = has("--task");
+// Cold-path variants for --tasks (they only change how the lazygate strategies start):
+//   --preview          fixtures opt in to previewOnDiscover (discover_tools may start the server)
+//   --index warm       tool-index.json already holds the fixtures' signatures (they ran once before)
+//   --manifest         fixtures list their signatures in the MCP instructions (implies --index warm)
+//   --strategies a,b   run only these strategies (direct, call-tool, call-tool-optimized, run-chain)
+// Default: a fresh, isolated index and no preview, which is what a first-time user gets.
+const previewFlag = has("--preview");
+const manifestFlag = has("--manifest");
+const indexMode = manifestFlag ? "warm" : (get("--index") ?? "fresh");
+const strategiesArg = get("--strategies");
 const jsonOut = get("--json");
+if (!["fresh", "warm"].includes(indexMode)) {
+  console.error('--index must be "fresh" or "warm".');
+  process.exit(1);
+}
 const selectedTasks = taskArg === "all" ? [...TASK_IDS] : taskArg.split(",").map((t) => t.trim()).filter(Boolean);
 if (tasksOnly) {
   const unknown = selectedTasks.filter((t) => !TASK_IDS.includes(t));
   if (unknown.length || selectedTasks.length === 0) {
     console.error(`Unknown --task ${unknown.join(", ") || taskArg}. Available: ${TASK_IDS.join(", ")} (or "all").`);
+    process.exit(1);
+  }
+  const badStrategies = (strategiesArg ?? "").split(",").map((x) => x.trim()).filter(Boolean).filter((x) => !STRATEGY_IDS.includes(x));
+  if (badStrategies.length) {
+    console.error(`Unknown --strategies ${badStrategies.join(", ")}. Available: ${STRATEGY_IDS.join(", ")}.`);
     process.exit(1);
   }
 } else if (taskFlagGiven) {
@@ -1294,9 +1314,44 @@ function fixtureServerEntry(name, startLog) {
     env: { FIXTURE_START_LOG: startLog },
     inheritEnv: false,
     toolChain: true,
-    // The fixtures are safe to start, so cold discovery can show their signatures in one turn.
-    previewOnDiscover: true,
+    // Off by default (a discovery request starts nothing); --preview opts the fixtures in.
+    ...(previewFlag ? { previewOnDiscover: true } : {}),
+    ...(manifestFlag ? { manifest: true } : {}),
   };
+}
+
+/** Strategies this run covers, in the catalog's order. */
+const activeStrategies = () => {
+  const wanted = strategiesArg ? new Set(strategiesArg.split(",").map((x) => x.trim())) : null;
+  return STRATEGY_IDS.filter((id) => !wanted || wanted.has(id));
+};
+
+/**
+ * tool-index.json as it would look after each fixture server ran once: tool names, descriptions
+ * and call signatures (built through the real ProcessManager and ToolIndex from dist/).
+ */
+let warmIndexPromise = null;
+function warmToolIndexJson() {
+  warmIndexPromise ??= (async () => {
+    const { ProcessManager } = await import(pathToFileURL(resolve(__dirname, "..", "dist", "process-manager.js")).href);
+    const { ToolIndex } = await import(pathToFileURL(resolve(__dirname, "..", "dist", "tool-index.js")).href);
+    const dir = mkdtempSync(join(workDir, "warm-index-"));
+    const indexPath = join(dir, "tool-index.json");
+    const index = new ToolIndex(indexPath);
+    const manager = new ProcessManager({ idleTtlMs: 0 });
+    try {
+      for (const name of Object.keys(FIXTURE_SERVERS)) {
+        // Same command/args as the servers.json entry, so the index entry is "fresh" for it.
+        const cfg = fixtureServerEntry(name, join(dir, "warm-starts.log"));
+        const tools = await manager.activate(name, cfg);
+        index.record(name, cfg, tools);
+      }
+    } finally {
+      manager.dispose();
+    }
+    return readFileSync(indexPath, "utf8");
+  })();
+  return warmIndexPromise;
 }
 
 /**
@@ -1334,7 +1389,7 @@ function taskBrokerConfig(strategyDir, strategyId, startLog) {
  * - direct: every fixture server (and the user's runnable catalog with --include-catalog), classic MCP
  * - lazygate: one broker process wrapping that same catalog
  */
-function taskMcpConfig(strategyId, strategyDir, startLog) {
+async function taskMcpConfig(strategyId, strategyDir, startLog) {
   if (strategyId === "direct") {
     const mcp = includeCatalog ? buildMcpConfig(Object.keys(servers)) : { mcpServers: {} };
     // A fixture wins if the user already has a server with the same name.
@@ -1349,9 +1404,21 @@ function taskMcpConfig(strategyId, strategyDir, startLog) {
   }
   const cfgPath = taskBrokerConfig(strategyDir, strategyId, startLog);
   const brokerEntry = resolve(__dirname, "..", "dist", "index.js");
+  // The broker keeps tool-index.json under $HOME/.config/lazygate regardless of --config, so give
+  // it a private HOME: a run neither reads signatures a previous run left behind (which would make
+  // "cold" warm) nor writes fixture entries into the real index. With --include-catalog the real
+  // HOME stays, because the catalog's own servers may depend on it.
+  let env;
+  if (!includeCatalog) {
+    const home = join(strategyDir, "home");
+    const configHome = join(home, ".config", "lazygate");
+    mkdirSync(configHome, { recursive: true });
+    if (indexMode === "warm") writeFileSync(join(configHome, "tool-index.json"), await warmToolIndexJson());
+    env = { HOME: home };
+  }
   return {
     mcpServers: {
-      lazygate: { command: process.execPath, args: [brokerEntry, "--config", cfgPath] },
+      lazygate: { command: process.execPath, args: [brokerEntry, "--config", cfgPath], ...(env ? { env } : {}) },
     },
   };
 }
@@ -1368,9 +1435,9 @@ function countServerStarts(startLog) {
 async function runTaskStrategy(taskId, strategyId) {
   const dir = mkdtempSync(join(workDir, `task-${taskId}-${strategyId}-`));
   const startLog = join(dir, "starts.log");
-  const mcpConfig = taskMcpConfig(strategyId, dir, startLog);
+  const mcpConfig = await taskMcpConfig(strategyId, dir, startLog);
   const appendFile = join(dir, "instruction.md");
-  writeFileSync(appendFile, buildInstruction(taskId, strategyId, { cold: coldDiscovery }));
+  writeFileSync(appendFile, buildInstruction(taskId, strategyId, { cold: coldDiscovery, manifest: manifestFlag }));
   const result = await runClaudeTask(mcpConfig, { appendFile, prompt: taskPrompt(taskId, { cold: coldDiscovery }) });
   return { taskId, id: strategyId, label: STRATEGY_LABELS[strategyId], ...result, serversStarted: countServerStarts(startLog) };
 }
@@ -1584,7 +1651,7 @@ function taskDeltaLine(label, base, other) {
  */
 function summarizeAcrossTasks(rowsByTask) {
   const out = [];
-  for (const id of STRATEGY_IDS) {
+  for (const id of activeStrategies()) {
     const rows = Object.values(rowsByTask).map((r) => r.find((x) => x.id === id)).filter(Boolean);
     const okRows = rows.filter((r) => r.ok);
     const paired = Object.values(rowsByTask)
@@ -1626,6 +1693,12 @@ if (tasksOnly) {
     `Tasks:   ${selectedTasks.length} (${selectedTasks.join(", ")}); catalog holds ${Object.keys(FIXTURE_SERVERS).join(", ")}` +
       (coldDiscovery ? "; cold discovery — extra turns versus a known-tools run are the discover_tools / describe_tool lookups" : "")
   );
+  if (coldDiscovery || manifestFlag) {
+    console.log(
+      `Variant: index ${includeCatalog ? "user's own" : indexMode}${indexMode === "warm" ? " (signatures cached from an earlier run)" : ""}, ` +
+        `discover preview ${previewFlag ? "on" : "off"}, manifest ${manifestFlag ? "in the MCP instructions" : "off"}`
+    );
+  }
   console.log(
     `Runner:  claude (task mode, ${rounds} cold turn${rounds !== 1 ? "s" : ""} per strategy and task; ` +
       `averages use correct runs only)\n`
@@ -1637,8 +1710,8 @@ if (tasksOnly) {
       console.log(`Task ${taskId} — ${task.title}`);
       console.log(`Prompt: ${taskPrompt(taskId, { cold: coldDiscovery })}`);
       console.log(`Expect: ${task.expected().join(" ")}\n`);
-      for (const strategyId of STRATEGY_IDS) {
-        console.log(`[${STRATEGY_LABELS[strategyId]}]\n${buildInstruction(taskId, strategyId, { cold: coldDiscovery })}\n`);
+      for (const strategyId of activeStrategies()) {
+        console.log(`[${STRATEGY_LABELS[strategyId]}]\n${buildInstruction(taskId, strategyId, { cold: coldDiscovery, manifest: manifestFlag })}\n`);
       }
     }
     process.exit(0);
@@ -1658,7 +1731,7 @@ if (tasksOnly) {
     console.log(`── ${taskId}: ${TASKS[taskId].title}`);
     console.log(`   expected answer: ${expected.join(" ")}`);
     const rows = [];
-    for (const strategyId of STRATEGY_IDS) {
+    for (const strategyId of activeStrategies()) {
       const label = STRATEGY_LABELS[strategyId];
       const runs = [];
       for (let i = 0; i < rounds; i++) {
@@ -1726,6 +1799,7 @@ if (tasksOnly) {
     const doc = {
       generatedAt: new Date().toISOString(),
       mode: coldDiscovery ? "cold" : "known",
+      variant: { index: includeCatalog ? "user" : indexMode, preview: previewFlag, manifest: manifestFlag },
       rounds,
       includeCatalog,
       baselineInputPerCall: baselinePerCall,

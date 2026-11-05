@@ -210,7 +210,7 @@ export function strategyResponseOptimization(strategyId) {
 }
 
 /** The system-prompt addendum the model gets for one task and strategy. */
-export function buildInstruction(taskId, strategyId, { cold = false } = {}) {
+export function buildInstruction(taskId, strategyId, { cold = false, manifest = false } = {}) {
   const task = TASKS[taskId];
   const rule = ANSWER_RULE(task.format);
   const names = serverList(task);
@@ -229,6 +229,24 @@ export function buildInstruction(taskId, strategyId, { cold = false } = {}) {
       `You have many MCP servers loaded directly (no lazygate), including ${names}.\n` +
       `IGNORE every server except ${names}. Tools — ${toolList(task)}.\n${task.bulk}\n` +
       `Required sequence:\n${numbered(task.direct)}\n${rule}`
+    );
+  }
+
+  if (manifest && strategyId !== "direct") {
+    // The tool signatures reach the model through the broker's MCP instructions, not this text.
+    const listed =
+      "You have the lazygate MCP server. Its instructions list the tools of some upstream servers with their call signatures; " +
+      "use those directly and call discover_tools only for something that is not listed.\n";
+    if (strategyId === "call-tool") return `${listed}Use call_tool only (never run_chain).\n${task.coldBulk}\n${rule}`;
+    if (strategyId === "call-tool-optimized") {
+      return (
+        `${listed}Use call_tool only (never run_chain).\n` +
+        `${task.coldBulk} Ask call_tool for only the fields you need: pass fields=[...] (for example ${task.fields}).\n${rule}`
+      );
+    }
+    return (
+      `${listed}Write ONE run_chain script that fetches, filters and totals, calling servers.<server>.<tool>(args) per the listed signatures; ` +
+      `the records are large, so keep them inside the script (never use call_tool).\n${rule}`
     );
   }
 

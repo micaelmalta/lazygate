@@ -79,6 +79,7 @@ half-written file keeps the previous config.
 | `autoActivate` | `false` (default): spawned on `activate_server` or auto-activation. `true`: spawned when lazygate starts, in the background after it has connected, so a slow server never delays startup. Use `true` for servers you reach every session; keep heavy ones (`docker build`, `npm install` on first launch) `false` |
 | `expose` | which tools merge into the broker's `tools/list` after activate: omit / `"none"` (default) — none, use `describe_tool` / `call_tool`; `"all"` — every schema (legacy); string array — allowlist of tool names (bare upstream names). **Pin** the few tools an agent uses in nearly every session (with `autoActivate: true`): they are callable by name with no `discover_tools` / `describe_tool` turns, at the price of their schemas in every turn and a `tools/list_changed` prompt-cache hit when the set changes. Leave everything else on `"none"`. See [When to pin](#when-to-pin-expose) |
 | `namespaceTools` | when `true`, expose and accept tools as `server__tool` so identical upstream names across servers do not collide. Default `false`. Gateway-wide: `lazygate serve --namespace-tools` (per-server `true`/`false` overrides) |
+| `manifest` | `true` (or an array of bare tool names) lists this server's tool signatures in the broker's MCP `instructions`, so the model can `call_tool` / script it with no lookup turn. Signatures come from `tool-index.json`, so a server is listed once it has been activated once. Fixed at startup; costs prompt tokens every turn. See *Manifest* below |
 | `previewOnDiscover` | `true` lets `discover_tools` start this server when it is a clear match and has no cached signatures yet, so the reply can show them. Default off: discovery has no side effects. See *Preview of a clear match* under discovery |
 | `toolChain` | lets `run_chain` scripts call this server's tools. `true` allows every tool; an array allows only those bare tool names. Omitted = no script access (use `call_tool`). See [Tool chain](#tool-chain) |
 | `auth`, `groups` | gateway mode only — credential sources and access policy; see [gateway.md](gateway.md) |
@@ -455,6 +456,29 @@ lazygate sends `notifications/tools/list_changed` whenever the exposed tool set 
 (when `expose` merges schemas), on deactivate, when a server exits unexpectedly, and when a server
 announces a change itself. With the default `expose: "none"`, activation does not add schemas to
 `tools/list` — use `describe_tool` / `call_tool`.
+
+### Manifest (`manifest`)
+
+A cold agent needs one extra model call to find a tool (`discover_tools`), and that call re-reads the
+whole prompt, so on raw input it can cost more than it saves. `manifest: true` on a server puts its
+call signatures in the MCP `instructions` the broker returns at initialize, which clients place in
+the model's context from the first turn:
+
+```
+Call these tools directly with call_tool(server, tool, args); no discover_tools or describe_tool turn is needed. …
+- tickets (run_chain): list_tickets(args: { status?: … }); get_ticket(args: { id: string })
+Anything else: discover_tools.
+```
+
+Unlike `expose`, nothing is added to `tools/list` (no schemas, no `list_changed`, no cache churn), the
+server is not started, and the text is deterministic so the prompt cache stays valid. The
+trade-off is a fixed cost on every turn (about 400 tokens at most: the whole manifest is capped at
+1,600 characters, 12 tools per server, and a server that does not fit is left out with a note) against
+one model call per cold task. Use it for the few servers most sessions need; keep the long tail on
+`discover_tools`. Limits: the signatures come from the learned index, so a server must have run once
+(`lazygate` records it on first activation), and the text is read at startup, so a change shows up in
+the next session. It applies to stdio mode; gateway sessions do not send it yet. A client that
+ignores server `instructions` falls back to `discover_tools`.
 
 ### When to pin (`expose`)
 

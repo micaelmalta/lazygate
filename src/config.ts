@@ -59,6 +59,8 @@ const ServerSchema = z
     toolChain: z.union([z.boolean(), z.array(z.string())]).optional(),
     /** Let discover_tools start this server to show its signatures (see ServerConfig.previewOnDiscover). */
     previewOnDiscover: z.boolean().optional(),
+    /** List this server's tool signatures in the MCP instructions (see ServerConfig.manifest). */
+    manifest: z.union([z.boolean(), z.array(z.string())]).optional(),
   })
   .passthrough()
   .refine((c) => Boolean(c.command) || Boolean(c.url), {
