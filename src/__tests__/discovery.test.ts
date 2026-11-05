@@ -119,6 +119,23 @@ describe("DiscoveryRanker", () => {
       expect(ranker.search("rotate_credentials", [make("flush_cache"), peer()])).toEqual([]);
     });
 
+    it("rebuilds after an in-place edit of a learned tool when the entry version changes", () => {
+      const ranker = new DiscoveryRanker();
+      const config = { description: "ops console", keywords: ["ops"] };
+      const tools = [{ name: "refund_payment", description: "Refund a payment" }];
+      const view = (version?: string): DiscoveryEntry => ({
+        name: "x", description: config.description, keywords: config.keywords, tools, sources: [config, tools],
+        ...(version ? { version } : {}),
+      });
+      expect(ranker.search("refund payment", [view("1"), peer()])[0]?.name).toBe("x");
+      // Same array, same length, same version: the cache cannot know (the documented limit).
+      tools[0] = { name: "rotate_keys", description: "Rotate API keys" };
+      expect(ranker.search("rotate keys", [view("1"), peer()])).toEqual([]);
+      // A new version fixes it without hashing anything.
+      expect(ranker.search("rotate keys", [view("2"), peer()])[0]?.name).toBe("x");
+      expect(ranker.search("refund payment", [view("2"), peer()])).toEqual([]);
+    });
+
     it("recomputes corpus statistics when a document changes without the server set changing", () => {
       const ranker = new DiscoveryRanker();
       const noisy = (n: number): DiscoveryEntry[] =>

@@ -210,9 +210,10 @@ discovery (tuned and held-out sets) and truncation sections. CI compares a quick
 `benchmarks/baseline.json`. See [End-to-end suite](reference.md#end-to-end-suite---suite)
 and the [published results](../benchmarks/results/suite.md).
 
-`--tasks` runs one fixture job (`src/__tests__/fixtures/tickets-server.mjs`: count ana's open
-tickets and sum each ticket's `bodyLength`, expected `8 60000`) four ways and only reports token
-deltas between strategies that both answered correctly:
+`--tasks` runs four fixture tasks (tickets, orders, logs and one across two servers; see
+[reference](reference.md#benchmark)) four ways each and only reports token deltas between strategies
+that both answered correctly. Its published results, 96 correct runs of 96, are in the reference.
+An earlier single-task run on a larger catalog:
 
 | Strategy | What the model sees | Input tokens (range) | Turns | Time |
 |---|---|---:|---:|---:|

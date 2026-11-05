@@ -2,6 +2,7 @@
     "name": "lazygate",
     "version": "1.0.0",
     "description": "Lazy-loading MCP broker for Claude Code",
+    "license": "MIT",
     "type": "module",
     "main": "dist/index.js",
     "bin": {

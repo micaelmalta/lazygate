@@ -310,7 +310,7 @@ describe("R2: scratch cwd and private file modes", () => {
   });
 
   it("runs stdio children through the operator's LAZYGATE_STDIO_WRAPPER-style prefix", async () => {
-    const fixture = join(process.cwd(), "src", "__tests__", "fixtures", "tickets-server.mjs");
+    const fixture = join(process.cwd(), "scripts", "fixtures", "tickets-server.mjs");
     const marker = join(root, "wrapped.txt");
     const wrapper = join(root, "wrap.sh");
     writeFileSync(wrapper, `#!/bin/sh\necho wrapped > "${marker}"\nexec "$@"\n`);

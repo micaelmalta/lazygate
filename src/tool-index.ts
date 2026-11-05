@@ -47,6 +47,11 @@ export function toolText(tools: IndexedTool[]): string {
 export class ToolIndex {
   private data: Record<string, Entry> = {};
   private mtime = -1;
+  /** Bumped when the file is re-read from disk (another process may have changed anything). */
+  private epoch = 0;
+  /** Per-server change stamp from one global counter, so stamps never repeat; see {@link revision}. */
+  private readonly revisions = new Map<string, number>();
+  private stamp = 0;
 
   /** @param path JSON file to persist to; omit for a purely in-memory index. */
   constructor(private readonly path?: string) {
@@ -61,6 +66,7 @@ export class ToolIndex {
     if (!this.path) return;
     const m = fileMtimeMs(this.path);
     if (m === this.mtime) return;
+    this.epoch += 1;
     if (!existsSync(this.path)) {
       this.data = {};
       this.mtime = m;
@@ -74,6 +80,20 @@ export class ToolIndex {
       this.data = {};
     }
     this.mtime = m;
+  }
+
+  /**
+   * Opaque version of a server's indexed tools. It changes whenever `record` stores different tools,
+   * the server is renamed, or the file was re-read after an outside write, so a cache keyed on it
+   * stays correct even if a tool object were edited in place (no per-query hashing of descriptions).
+   */
+  revision(name: string): string {
+    this.ensureLoaded();
+    return `${this.epoch}.${this.revisions.get(name) ?? 0}`;
+  }
+
+  private bump(name: string): void {
+    this.revisions.set(name, (this.stamp += 1));
   }
 
   /** Indexed tools for a server, or [] if unknown or stale (config changed). */
@@ -104,6 +124,8 @@ export class ToolIndex {
     if (to in this.data) delete this.data[to];
     this.data[to] = this.data[from]!;
     delete this.data[from];
+    this.bump(from);
+    this.bump(to);
     this.save();
   }
 
@@ -127,6 +149,7 @@ export class ToolIndex {
     };
     if (JSON.stringify(this.data[name]) === JSON.stringify(entry)) return false;
     this.data[name] = entry;
+    this.bump(name);
     this.save();
     return true;
   }
