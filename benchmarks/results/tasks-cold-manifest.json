@@ -1,0 +1,752 @@
+{
+  "generatedAt": "2026-11-05T02:42:29.858Z",
+  "mode": "cold",
+  "variant": {
+    "index": "warm",
+    "preview": false,
+    "manifest": true
+  },
+  "rounds": 5,
+  "includeCatalog": false,
+  "baselineInputPerCall": 81670,
+  "tasks": {
+    "tickets": {
+      "title": "ana's open tickets: count and total bodyLength",
+      "expected": [
+        8,
+        60000
+      ],
+      "rows": [
+        {
+          "taskId": "tickets",
+          "id": "call-tool",
+          "label": "call_tool",
+          "ok": true,
+          "runs": 5,
+          "correctRuns": 5,
+          "totalInput": 257320,
+          "netInput": 12310,
+          "costUSD": 0.09485864000000001,
+          "minDurationMs": 13201,
+          "maxDurationMs": 13911,
+          "minInput": 257310,
+          "maxInput": 257328,
+          "turns": 10,
+          "apiCalls": 3,
+          "lookups": 0,
+          "serversStarted": 1,
+          "durationMs": 13522,
+          "answer": "8 60000",
+          "runDetails": [
+            {
+              "correct": true,
+              "answer": "8 60000",
+              "totalInput": 257310,
+              "netInput": 12300,
+              "apiCalls": 3,
+              "toolCalls": 10,
+              "lookups": 0,
+              "serversStarted": 1,
+              "durationMs": 13686,
+              "costUSD": 0.1095652
+            },
+            {
+              "correct": true,
+              "answer": "8 60000",
+              "totalInput": 257327,
+              "netInput": 12317,
+              "apiCalls": 3,
+              "toolCalls": 10,
+              "lookups": 0,
+              "serversStarted": 1,
+              "durationMs": 13274,
+              "costUSD": 0.091187
+            },
+            {
+              "correct": true,
+              "answer": "8 60000",
+              "totalInput": 257315,
+              "netInput": 12305,
+              "apiCalls": 3,
+              "toolCalls": 10,
+              "lookups": 0,
+              "serversStarted": 1,
+              "durationMs": 13201,
+              "costUSD": 0.091127
+            },
+            {
+              "correct": true,
+              "answer": "8 60000",
+              "totalInput": 257328,
+              "netInput": 12318,
+              "apiCalls": 3,
+              "toolCalls": 10,
+              "lookups": 0,
+              "serversStarted": 1,
+              "durationMs": 13911,
+              "costUSD": 0.091272
+            },
+            {
+              "correct": true,
+              "answer": "8 60000",
+              "totalInput": 257318,
+              "netInput": 12308,
+              "apiCalls": 3,
+              "toolCalls": 10,
+              "lookups": 0,
+              "serversStarted": 1,
+              "durationMs": 13538,
+              "costUSD": 0.091142
+            }
+          ]
+        },
+        {
+          "taskId": "tickets",
+          "id": "run-chain",
+          "label": "run_chain",
+          "ok": true,
+          "runs": 5,
+          "correctRuns": 5,
+          "totalInput": 221070,
+          "netInput": 8728,
+          "costUSD": 0.06292835999999999,
+          "minDurationMs": 6954,
+          "maxDurationMs": 9899,
+          "minInput": 169445,
+          "maxInput": 254774,
+          "turns": 2.6,
+          "apiCalls": 2.6,
+          "lookups": 0.6,
+          "serversStarted": 1,
+          "durationMs": 8540,
+          "answer": "8 60000",
+          "runDetails": [
+            {
+              "correct": true,
+              "answer": "8 60000",
+              "totalInput": 172121,
+              "netInput": 8781,
+              "apiCalls": 2,
+              "toolCalls": 2,
+              "lookups": 0,
+              "serversStarted": 1,
+              "durationMs": 7372,
+              "costUSD": 0.07563420000000001
+            },
+            {
+              "correct": true,
+              "answer": "8 60000",
+              "totalInput": 254774,
+              "netInput": 9764,
+              "apiCalls": 3,
+              "toolCalls": 3,
+              "lookups": 1,
+              "serversStarted": 1,
+              "durationMs": 9362,
+              "costUSD": 0.06547
+            },
+            {
+              "correct": true,
+              "answer": "8 60000",
+              "totalInput": 254514,
+              "netInput": 9504,
+              "apiCalls": 3,
+              "toolCalls": 3,
+              "lookups": 1,
+              "serversStarted": 1,
+              "durationMs": 9899,
+              "costUSD": 0.06412999999999999
+            },
+            {
+              "correct": true,
+              "answer": "8 60000",
+              "totalInput": 169445,
+              "netInput": 6105,
+              "apiCalls": 2,
+              "toolCalls": 2,
+              "lookups": 0,
+              "serversStarted": 1,
+              "durationMs": 6954,
+              "costUSD": 0.0456534
+            },
+            {
+              "correct": true,
+              "answer": "8 60000",
+              "totalInput": 254495,
+              "netInput": 9485,
+              "apiCalls": 3,
+              "toolCalls": 3,
+              "lookups": 1,
+              "serversStarted": 1,
+              "durationMs": 9114,
+              "costUSD": 0.0637542
+            }
+          ]
+        }
+      ]
+    },
+    "orders": {
+      "title": "acme's refunded orders: count and total refundCents",
+      "expected": [
+        8,
+        13250
+      ],
+      "rows": [
+        {
+          "taskId": "orders",
+          "id": "call-tool",
+          "label": "call_tool",
+          "ok": true,
+          "runs": 5,
+          "correctRuns": 5,
+          "totalInput": 256272,
+          "netInput": 11262,
+          "costUSD": 0.09090328,
+          "minDurationMs": 13262,
+          "maxDurationMs": 14428,
+          "minInput": 256262,
+          "maxInput": 256283,
+          "turns": 10,
+          "apiCalls": 3,
+          "lookups": 0,
+          "serversStarted": 1,
+          "durationMs": 13812,
+          "answer": "8 13250",
+          "runDetails": [
+            {
+              "correct": true,
+              "answer": "8 13250",
+              "totalInput": 256283,
+              "netInput": 11273,
+              "apiCalls": 3,
+              "toolCalls": 10,
+              "lookups": 0,
+              "serversStarted": 1,
+              "durationMs": 13640,
+              "costUSD": 0.1045094
+            },
+            {
+              "correct": true,
+              "answer": "8 13250",
+              "totalInput": 256267,
+              "netInput": 11257,
+              "apiCalls": 3,
+              "toolCalls": 10,
+              "lookups": 0,
+              "serversStarted": 1,
+              "durationMs": 13562,
+              "costUSD": 0.08754300000000001
+            },
+            {
+              "correct": true,
+              "answer": "8 13250",
+              "totalInput": 256273,
+              "netInput": 11263,
+              "apiCalls": 3,
+              "toolCalls": 10,
+              "lookups": 0,
+              "serversStarted": 1,
+              "durationMs": 13262,
+              "costUSD": 0.087473
+            },
+            {
+              "correct": true,
+              "answer": "8 13250",
+              "totalInput": 256273,
+              "netInput": 11263,
+              "apiCalls": 3,
+              "toolCalls": 10,
+              "lookups": 0,
+              "serversStarted": 1,
+              "durationMs": 14166,
+              "costUSD": 0.087473
+            },
+            {
+              "correct": true,
+              "answer": "8 13250",
+              "totalInput": 256262,
+              "netInput": 11252,
+              "apiCalls": 3,
+              "toolCalls": 10,
+              "lookups": 0,
+              "serversStarted": 1,
+              "durationMs": 14428,
+              "costUSD": 0.087518
+            }
+          ]
+        },
+        {
+          "taskId": "orders",
+          "id": "run-chain",
+          "label": "run_chain",
+          "ok": true,
+          "runs": 5,
+          "correctRuns": 5,
+          "totalInput": 173618,
+          "netInput": 10278,
+          "costUSD": 0.06595288,
+          "minDurationMs": 5880,
+          "maxDurationMs": 6566,
+          "minInput": 169435,
+          "maxInput": 174690,
+          "turns": 2,
+          "apiCalls": 2,
+          "lookups": 0,
+          "serversStarted": 1,
+          "durationMs": 6196,
+          "answer": "8 13250",
+          "runDetails": [
+            {
+              "correct": true,
+              "answer": "8 13250",
+              "totalInput": 174616,
+              "netInput": 11276,
+              "apiCalls": 2,
+              "toolCalls": 2,
+              "lookups": 0,
+              "serversStarted": 1,
+              "durationMs": 6399,
+              "costUSD": 0.0744388
+            },
+            {
+              "correct": true,
+              "answer": "8 13250",
+              "totalInput": 169435,
+              "netInput": 6095,
+              "apiCalls": 2,
+              "toolCalls": 2,
+              "lookups": 0,
+              "serversStarted": 1,
+              "durationMs": 6118,
+              "costUSD": 0.04447140000000001
+            },
+            {
+              "correct": true,
+              "answer": "8 13250",
+              "totalInput": 174690,
+              "netInput": 11350,
+              "apiCalls": 2,
+              "toolCalls": 2,
+              "lookups": 0,
+              "serversStarted": 1,
+              "durationMs": 6566,
+              "costUSD": 0.0707864
+            },
+            {
+              "correct": true,
+              "answer": "8 13250",
+              "totalInput": 174681,
+              "netInput": 11341,
+              "apiCalls": 2,
+              "toolCalls": 2,
+              "lookups": 0,
+              "serversStarted": 1,
+              "durationMs": 5880,
+              "costUSD": 0.06978140000000001
+            },
+            {
+              "correct": true,
+              "answer": "8 13250",
+              "totalInput": 174670,
+              "netInput": 11330,
+              "apiCalls": 2,
+              "toolCalls": 2,
+              "lookups": 0,
+              "serversStarted": 1,
+              "durationMs": 6019,
+              "costUSD": 0.07028640000000001
+            }
+          ]
+        }
+      ]
+    },
+    "logs": {
+      "title": "billing ERROR logs: count and total stackFrames",
+      "expected": [
+        10,
+        900
+      ],
+      "rows": [
+        {
+          "taskId": "logs",
+          "id": "call-tool",
+          "label": "call_tool",
+          "ok": true,
+          "runs": 5,
+          "correctRuns": 5,
+          "totalInput": 275148,
+          "netInput": 13804,
+          "costUSD": 0.10724496000000001,
+          "minDurationMs": 15894,
+          "maxDurationMs": 22198,
+          "minInput": 257288,
+          "maxInput": 346052,
+          "turns": 12.2,
+          "apiCalls": 3.2,
+          "lookups": 0,
+          "serversStarted": 1,
+          "durationMs": 17578,
+          "answer": "10 900",
+          "runDetails": [
+            {
+              "correct": true,
+              "answer": "10 900",
+              "totalInput": 257494,
+              "netInput": 12484,
+              "apiCalls": 3,
+              "toolCalls": 12,
+              "lookups": 0,
+              "serversStarted": 1,
+              "durationMs": 15894,
+              "costUSD": 0.1170772
+            },
+            {
+              "correct": true,
+              "answer": "10 900",
+              "totalInput": 257499,
+              "netInput": 12489,
+              "apiCalls": 3,
+              "toolCalls": 12,
+              "lookups": 0,
+              "serversStarted": 1,
+              "durationMs": 17300,
+              "costUSD": 0.0996158
+            },
+            {
+              "correct": true,
+              "answer": "10 900",
+              "totalInput": 346052,
+              "netInput": 19372,
+              "apiCalls": 4,
+              "toolCalls": 13,
+              "lookups": 0,
+              "serversStarted": 1,
+              "durationMs": 22198,
+              "costUSD": 0.1245652
+            },
+            {
+              "correct": true,
+              "answer": "10 900",
+              "totalInput": 257288,
+              "netInput": 12278,
+              "apiCalls": 3,
+              "toolCalls": 12,
+              "lookups": 0,
+              "serversStarted": 1,
+              "durationMs": 16592,
+              "costUSD": 0.09688080000000002
+            },
+            {
+              "correct": true,
+              "answer": "10 900",
+              "totalInput": 257409,
+              "netInput": 12399,
+              "apiCalls": 3,
+              "toolCalls": 12,
+              "lookups": 0,
+              "serversStarted": 1,
+              "durationMs": 15905,
+              "costUSD": 0.09808580000000001
+            }
+          ]
+        },
+        {
+          "taskId": "logs",
+          "id": "run-chain",
+          "label": "run_chain",
+          "ok": true,
+          "runs": 5,
+          "correctRuns": 5,
+          "totalInput": 172004,
+          "netInput": 8664,
+          "costUSD": 0.0589344,
+          "minDurationMs": 6079,
+          "maxDurationMs": 6758,
+          "minInput": 169511,
+          "maxInput": 173696,
+          "turns": 2,
+          "apiCalls": 2,
+          "lookups": 0,
+          "serversStarted": 1,
+          "durationMs": 6457,
+          "answer": "10 900",
+          "runDetails": [
+            {
+              "correct": true,
+              "answer": "10 900",
+              "totalInput": 173696,
+              "netInput": 10356,
+              "apiCalls": 2,
+              "toolCalls": 2,
+              "lookups": 0,
+              "serversStarted": 1,
+              "durationMs": 6615,
+              "costUSD": 0.0719452
+            },
+            {
+              "correct": true,
+              "answer": "10 900",
+              "totalInput": 169523,
+              "netInput": 6183,
+              "apiCalls": 2,
+              "toolCalls": 2,
+              "lookups": 0,
+              "serversStarted": 1,
+              "durationMs": 6758,
+              "costUSD": 0.0462842
+            },
+            {
+              "correct": true,
+              "answer": "10 900",
+              "totalInput": 173662,
+              "netInput": 10322,
+              "apiCalls": 2,
+              "toolCalls": 2,
+              "lookups": 0,
+              "serversStarted": 1,
+              "durationMs": 6095,
+              "costUSD": 0.0655992
+            },
+            {
+              "correct": true,
+              "answer": "10 900",
+              "totalInput": 173630,
+              "netInput": 10290,
+              "apiCalls": 2,
+              "toolCalls": 2,
+              "lookups": 0,
+              "serversStarted": 1,
+              "durationMs": 6079,
+              "costUSD": 0.0647992
+            },
+            {
+              "correct": true,
+              "answer": "10 900",
+              "totalInput": 169511,
+              "netInput": 6171,
+              "apiCalls": 2,
+              "toolCalls": 2,
+              "lookups": 0,
+              "serversStarted": 1,
+              "durationMs": 6736,
+              "costUSD": 0.0460442
+            }
+          ]
+        }
+      ]
+    },
+    "cross": {
+      "title": "two servers: ana's open ticket count and acme's total refundCents",
+      "expected": [
+        8,
+        13250
+      ],
+      "rows": [
+        {
+          "taskId": "cross",
+          "id": "call-tool",
+          "label": "call_tool",
+          "ok": true,
+          "runs": 5,
+          "correctRuns": 5,
+          "totalInput": 257986,
+          "netInput": 12976,
+          "costUSD": 0.0952992,
+          "minDurationMs": 14273,
+          "maxDurationMs": 15965,
+          "minInput": 257961,
+          "maxInput": 258071,
+          "turns": 11,
+          "apiCalls": 3,
+          "lookups": 0,
+          "serversStarted": 2,
+          "durationMs": 15021,
+          "answer": "8 13250",
+          "runDetails": [
+            {
+              "correct": true,
+              "answer": "8 13250",
+              "totalInput": 257969,
+              "netInput": 12959,
+              "apiCalls": 3,
+              "toolCalls": 11,
+              "lookups": 0,
+              "serversStarted": 2,
+              "durationMs": 14273,
+              "costUSD": 0.11159460000000002
+            },
+            {
+              "correct": true,
+              "answer": "8 13250",
+              "totalInput": 257967,
+              "netInput": 12957,
+              "apiCalls": 3,
+              "toolCalls": 11,
+              "lookups": 0,
+              "serversStarted": 2,
+              "durationMs": 14933,
+              "costUSD": 0.0907566
+            },
+            {
+              "correct": true,
+              "answer": "8 13250",
+              "totalInput": 258071,
+              "netInput": 13061,
+              "apiCalls": 3,
+              "toolCalls": 11,
+              "lookups": 0,
+              "serversStarted": 2,
+              "durationMs": 15017,
+              "costUSD": 0.09211659999999999
+            },
+            {
+              "correct": true,
+              "answer": "8 13250",
+              "totalInput": 257961,
+              "netInput": 12951,
+              "apiCalls": 3,
+              "toolCalls": 11,
+              "lookups": 0,
+              "serversStarted": 2,
+              "durationMs": 15965,
+              "costUSD": 0.0913666
+            },
+            {
+              "correct": true,
+              "answer": "8 13250",
+              "totalInput": 257964,
+              "netInput": 12954,
+              "apiCalls": 3,
+              "toolCalls": 11,
+              "lookups": 0,
+              "serversStarted": 2,
+              "durationMs": 14919,
+              "costUSD": 0.09066160000000001
+            }
+          ]
+        },
+        {
+          "taskId": "cross",
+          "id": "run-chain",
+          "label": "run_chain",
+          "ok": true,
+          "runs": 5,
+          "correctRuns": 5,
+          "totalInput": 226593,
+          "netInput": 14251,
+          "costUSD": 0.09453492,
+          "minDurationMs": 9312,
+          "maxDurationMs": 12192,
+          "minInput": 180531,
+          "maxInput": 255615,
+          "turns": 3.2,
+          "apiCalls": 2.6,
+          "lookups": 1.2,
+          "serversStarted": 2,
+          "durationMs": 10902,
+          "answer": "8 13250",
+          "runDetails": [
+            {
+              "correct": true,
+              "answer": "8 13250",
+              "totalInput": 255615,
+              "netInput": 10605,
+              "apiCalls": 3,
+              "toolCalls": 4,
+              "lookups": 2,
+              "serversStarted": 2,
+              "durationMs": 10673,
+              "costUSD": 0.0860494
+            },
+            {
+              "correct": true,
+              "answer": "8 13250",
+              "totalInput": 180531,
+              "netInput": 17191,
+              "apiCalls": 2,
+              "toolCalls": 2,
+              "lookups": 0,
+              "serversStarted": 2,
+              "durationMs": 9312,
+              "costUSD": 0.10728499999999999
+            },
+            {
+              "correct": true,
+              "answer": "8 13250",
+              "totalInput": 255473,
+              "netInput": 10463,
+              "apiCalls": 3,
+              "toolCalls": 4,
+              "lookups": 2,
+              "serversStarted": 2,
+              "durationMs": 10387,
+              "costUSD": 0.0706386
+            },
+            {
+              "correct": true,
+              "answer": "8 13250",
+              "totalInput": 185765,
+              "netInput": 22425,
+              "apiCalls": 2,
+              "toolCalls": 2,
+              "lookups": 0,
+              "serversStarted": 2,
+              "durationMs": 11944,
+              "costUSD": 0.136795
+            },
+            {
+              "correct": true,
+              "answer": "8 13250",
+              "totalInput": 255581,
+              "netInput": 10571,
+              "apiCalls": 3,
+              "toolCalls": 4,
+              "lookups": 2,
+              "serversStarted": 2,
+              "durationMs": 12192,
+              "costUSD": 0.07190659999999999
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "summary": [
+    {
+      "id": "call-tool",
+      "label": "call_tool",
+      "tasksCorrect": 4,
+      "tasks": 4,
+      "correctRuns": 20,
+      "runs": 20,
+      "meanApiCalls": 3.05,
+      "meanLookups": 0,
+      "meanServersStarted": 1.25,
+      "meanNetInput": 12588,
+      "meanRawInput": 261682,
+      "meanCostUSD": 0.09707652,
+      "pairedTasks": 0,
+      "vsDirectPct": null,
+      "vsDirectRawPct": null,
+      "vsDirectCostPct": null
+    },
+    {
+      "id": "run-chain",
+      "label": "run_chain",
+      "tasksCorrect": 4,
+      "tasks": 4,
+      "correctRuns": 20,
+      "runs": 20,
+      "meanApiCalls": 2.3,
+      "meanLookups": 0.44999999999999996,
+      "meanServersStarted": 1.25,
+      "meanNetInput": 10480,
+      "meanRawInput": 198321,
+      "meanCostUSD": 0.07058764000000001,
+      "pairedTasks": 0,
+      "vsDirectPct": null,
+      "vsDirectRawPct": null,
+      "vsDirectCostPct": null
+    }
+  ]
+}

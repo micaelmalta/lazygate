@@ -18,6 +18,7 @@ import { ProcessManager } from "./process-manager.js";
 import { createBroker } from "./broker.js";
 import { META_TOOL_NAMES } from "./meta-tools.js";
 import { loadRegistry } from "./registry.js";
+import { buildManifest } from "./manifest.js";
 import { adoptLegacyConfigDir, APP_NAME } from "./paths.js";
 import { loadEnvFile } from "./env-file.js";
 import { loadTokenizer, parseTokenizerFlag } from "./tokenizers.js";
@@ -71,9 +72,11 @@ async function main(): Promise<void> {
 async function runStdio(): Promise<void> {
   const { router, skillRouter, toolIndex, skillHashes, serverConfigs } = loadRegistry(process.argv);
 
+  // Signatures of the servers that opt in with `manifest`, from the learned index (starts nothing).
+  const manifest = buildManifest(serverConfigs, toolIndex);
   const server = new Server(
     { name: APP_NAME, version: VERSION },
-    { capabilities: { tools: { listChanged: true } } }
+    { capabilities: { tools: { listChanged: true } }, ...(manifest ? { instructions: manifest } : {}) }
   );
 
   let connected = false;

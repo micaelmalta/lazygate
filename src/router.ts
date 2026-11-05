@@ -113,6 +113,17 @@ export interface ServerConfig {
    * signatures are cached in tool-index.json and discovery shows them without starting anything.
    */
   previewOnDiscover?: boolean;
+  /**
+   * List this server's tools (their call signatures) in the broker's MCP `instructions`, which the
+   * client puts in the model's context from the first turn, so the model can `call_tool` (or script
+   * it in `run_chain`) straight away with no `discover_tools` / `describe_tool` turn.
+   * - true: every indexed tool (bounded)
+   * - string[]: only those bare tool names
+   * Signatures come from `tool-index.json`, so a server is listed once it has been activated at
+   * least once. The text is fixed at startup and costs prompt tokens on every turn; use it for the
+   * few servers most sessions need.
+   */
+  manifest?: boolean | string[];
 }
 
 /** Effective credential scope. HTTP servers default to per-user; stdio defaults to shared. */

@@ -27,10 +27,9 @@ describe("benchmark --tasks --cold-discovery (dry run)", () => {
       stdio: ["ignore", "pipe", "pipe"],
     });
 
-  it("tells the lazygate strategies to start from discover_tools without naming the server or tools", () => {
+  it("gives the lazygate strategies neutral instructions that name neither the server nor the tools", () => {
     const cold = run(["--tasks", "--cold-discovery", "--estimate"]);
     expect(cold).toContain("--cold-discovery");
-    expect(cold).toContain("discover_tools");
     const lazygateSections = cold.split("[").filter((section) => /^(call_tool|call_tool\+opt|run_chain)\]/.test(section));
     // Three lazygate strategies per task (tickets, orders, logs, cross).
     expect(lazygateSections).toHaveLength(3 * 4);
