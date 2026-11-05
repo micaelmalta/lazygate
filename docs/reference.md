@@ -695,7 +695,7 @@ raw − calls × overhead next to the raw figure. Compare strategies on net toke
 Published runs (`benchmarks/results/tasks-*.json`; 4 tasks, strict answer check: the final line of
 the reply must be exactly the expected integers, in order; fixed overhead about 81,700 input tokens
 per call). Every run is in the JSON (`runDetails`: answer, tokens, API calls, cost, duration), so
-wrong answers and errors can be audited. All 180 runs below answered correctly.
+wrong answers and errors can be audited. All 188 runs below answered correctly.
 
 **Known tools** (`tasks-known.json`; 4 strategies × 3 rounds; the instructions name the server and
 tools; run before the private-`HOME` isolation below, with `previewOnDiscover` on, which cannot matter
