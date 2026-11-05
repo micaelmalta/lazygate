@@ -657,42 +657,66 @@ eight `get_ticket` calls into one response still reports ten), and shows **net**
 raw − calls × overhead next to the raw figure. Compare strategies on net tokens and API calls.
 
 Published run (`benchmarks/results/tasks-known.json` and `tasks-cold.json`; 4 tasks × 4 strategies ×
-3 rounds, per mode; **all 96 runs answered correctly**; fixed overhead 81,950 tokens per call). The
-fixture servers set `previewOnDiscover: true` (they are safe to start); other servers show no
-signatures on a first `discover_tools` until they have been used once.
+3 rounds, per mode; **all 96 runs answered correctly** under a strict check: the final line of the
+reply must be exactly the expected integers, in order, with nothing else counted; fixed overhead
+about 81,700 tokens per call). Every run is in the JSON (`runDetails`: answer, tokens, API calls,
+cost, duration), so wrong answers and errors can be audited. The fixture servers set
+`previewOnDiscover: true` (they are safe to start); other servers show no signatures on a first
+`discover_tools` until they have been used once.
 
-| Strategy | Known tools: net input | calls | vs `direct` | Cold discovery: net input | calls | lookups | vs `direct` |
-|---|--:|--:|--:|--:|--:|--:|--:|
-| `direct` | 33,433 | 3 | — | 33,086 | 3 | 0 | — |
-| `call_tool` | 11,540 | 3 | −65.5% | 14,834 | 4 | 1.3 | −55.2% |
-| `call_tool+opt` | 11,645 | 3 | −65.2% | 14,960 | 4 | 1.3 | −54.8% |
-| `run_chain` | 8,754 | 3 | −73.8% | 10,839 | 3.3 | 1.3 | −67.2% |
+Known tools (instructions name the server and tools):
 
-Net input is per-task mean over the correct runs; "vs `direct`" sums net input over the tasks where
-both sides were correct. `lookups` counts `discover_tools` / `describe_tool` / `activate_server`
-calls. `direct` starts all three fixture servers in every run; lazygate starts one (two for `cross`),
-so the other fixture servers are never launched. Per task (net input, cold discovery in brackets):
+| Strategy | net input | raw input | cost | API calls | vs `direct`: net / raw / cost |
+|---|--:|--:|--:|--:|--:|
+| `direct` | 33,381 | 278,379 | $0.184 | 3 | — |
+| `call_tool` | 11,447 | 256,445 | $0.130 | 3 | −65.7% / −7.9% / −29.2% |
+| `call_tool+opt` | 11,582 | 256,580 | $0.098 | 3 | −65.3% / −7.8% / −46.6% |
+| `run_chain` | 8,703 | 253,701 | $0.067 | 3 | −73.9% / −8.9% / −63.5% |
+
+Cold discovery (the model must find the servers and tools):
+
+| Strategy | net input | raw input | cost | API calls | lookups | vs `direct`: net / raw / cost |
+|---|--:|--:|--:|--:|--:|--:|
+| `direct` | 32,859 | 277,944 | $0.152 | 3 | 0 | — |
+| `call_tool` | 14,999 | 341,779 | $0.152 | 4 | 1.3 | −54.4% / **+23.0%** / +0.0% |
+| `call_tool+opt` | 15,116 | 341,896 | $0.119 | 4 | 1.3 | −54.0% / **+23.0%** / −21.2% |
+| `run_chain` | 13,233 | 299,165 | $0.088 | 3.5 | 1.3 | −59.7% / **+7.6%** / −41.8% |
+
+*Net input* is raw input minus API calls × the fixed overhead, computed per run and then averaged,
+so it is a modeled figure. *Raw input* and *cost* are what Claude reported. "vs `direct`" sums each
+measure over the tasks where both sides were correct. `lookups` counts `discover_tools` /
+`describe_tool` / `activate_server` calls. `direct` starts all three fixture servers in every run;
+lazygate starts one (two for `cross`), so the other fixture servers are never launched. Per task
+(net input; cold discovery in brackets):
 
 | Task | `direct` | `call_tool` | `run_chain` |
 |---|--:|--:|--:|
-| `tickets` | 25,326 (25,009) | 11,429 (14,911) | 8,494 (8,942) |
-| `orders` | 38,453 (38,174) | 10,616 (13,997) | 8,445 (12,375) |
-| `logs` | 29,728 (29,404) | 11,681 (15,033) | 8,554 (9,508) |
-| `cross` | 40,225 (39,757) | 12,432 (15,394) | 9,524 (12,531) |
+| `tickets` | 25,306 (25,129) | 11,336 (15,023) | 8,476 (9,151) |
+| `orders` | 38,390 (37,600) | 10,462 (14,264) | 8,377 (15,772) |
+| `logs` | 29,665 (29,530) | 11,590 (15,134) | 8,480 (9,615) |
+| `cross` | 40,162 (39,178) | 12,400 (15,573) | 9,479 (18,392) |
 
 How to read and not read this:
 
-- Cold discovery costs lazygate one extra API call for `call_tool` (the lookup turn) and for
-  `run_chain` on two tasks; `direct` has no lookup turn. Each extra call re-reads the whole system
-  prompt, so the **raw** input of a cold `call_tool` run is higher than `direct`'s (about +57,000 to
-  +72,000 tokens) even though its net input is lower. Net input is what the strategy adds on top of
-  the fixed overhead; raw input (and any cache pricing) includes that overhead for every call.
-- `call_tool+opt` is within noise of `call_tool` here (+0.6% to +1.5% net input). The model issues
-  its per-record calls as one parallel batch (10 tool calls in 3 API calls), so the large records
-  reach its context once, and the benchmark does not record whether it passed `fields`. Earlier
-  single-task runs (see [how it works](how-it-works.md)) measured 5–8% savings with a model that
-  went turn by turn; treat the end-to-end benefit of response optimization as task- and
-  model-dependent and not shown by this run. Why it was flat here has not been investigated.
+- **Net savings are not billable savings.** The 55–74% figures subtract a constant overhead that
+  every API call pays. Raw input is the billed quantity before caching: lazygate is 8–9% lower with
+  known tools, but **higher with cold discovery** (+23% for `call_tool`, +7.6% for `run_chain`),
+  because a lookup turn is an extra API call that re-reads the whole system prompt. Cost follows the
+  prompt cache: the same strategy cost $0.07 to $0.30 across runs depending on whether the call wrote
+  or read the cache, so treat cost as indicative, not a measurement of steady-state pricing.
+- **Cold `run_chain` is the least stable.** Its mean is 3.5 API calls and two cells (`orders`,
+  `cross`) cost more than their known-tools runs by 6,000–9,000 net tokens: some runs spent an extra
+  turn after a script or lookup problem. It stays correct and ahead of `direct` on net and cost
+  overall, but not on every task. Per-run durations vary the same way (for example 19–122 s for one
+  `call_tool` cell).
+- **`call_tool+opt` is within noise of `call_tool` on tokens** (about +1% net input). The model
+  issues its per-record calls as one parallel batch (10 tool calls in 3 API calls), so the large
+  records reach its context once, and the benchmark does not record whether it passed `fields`. Its
+  lower cost in the table comes from cache state (the `tickets` `call_tool` cell ran first and paid
+  a cache write), not from optimization. Earlier single-task runs (see
+  [how it works](how-it-works.md)) measured 5–8% token savings with a model that went turn by turn;
+  treat the end-to-end benefit of response optimization as task- and model-dependent and not shown
+  by this run. Why it was flat here has not been investigated.
 - The catalog is three small servers, so the schema savings of lazy loading are not what this
   measures (see the suite for 20–500 tool catalogs). It measures whether a real model finishes
   multi-step tasks correctly and cheaply when it must find, call and combine tools.

@@ -289,18 +289,15 @@ export function taskPrompt(taskId, { cold = false } = {}) {
 }
 
 /**
- * True when `answer` reports the expected integers. Prefers a final line that is exactly the
- * expected number of integers; falls back to finding all of them anywhere in the text.
+ * True only when the answer's final non-empty line is exactly the expected integers, in order,
+ * separated by single spaces (what the task instructions ask for). Numbers elsewhere in the
+ * response, a different order, extra numbers and thousands separators are all wrong: the model
+ * was told to reply with nothing else, so lenient matching could score a wrong answer correct.
  */
 export function answerMatches(answer, expected) {
   const lines = String(answer).trim().split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-  const exact = new RegExp(`^${expected.map(() => "(\\d[\\d,]*)").join("\\s+")}$`);
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const m = exact.exec(lines[i]);
-    if (m) return expected.every((value, n) => Number(m[n + 1].replace(/,/g, "")) === value);
-  }
-  const nums = (String(answer).match(/\d+/g) ?? []).map(Number);
-  return expected.every((value) => nums.includes(value));
+  const last = lines[lines.length - 1];
+  return last === expected.join(" ");
 }
 
 /** The line the model was asked for, or the start of its first line when it gave prose. */

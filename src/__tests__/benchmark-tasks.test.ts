@@ -74,17 +74,25 @@ describe("task catalog", () => {
 });
 
 describe("answer checking", () => {
-  it("accepts the exact line, thousands separators and a final numeric line after prose", () => {
+  it("accepts exactly the expected integers on the final line", () => {
     expect(tasks.answerMatches("8 60000", [8, 60000])).toBe(true);
-    expect(tasks.answerMatches("8 60,000", [8, 60000])).toBe(true);
+    expect(tasks.answerMatches("  8 60000\n", [8, 60000])).toBe(true);
     expect(tasks.answerMatches("Here you go\n8 13250", [8, 13250])).toBe(true);
-    expect(tasks.answerMatches("8 13250 3", [8, 13250])).toBe(true); // falls back to finding both numbers
   });
 
-  it("rejects wrong or missing numbers", () => {
+  it("rejects wrong, reordered, extra or merely mentioned numbers", () => {
     expect(tasks.answerMatches("8 59999", [8, 60000])).toBe(false);
     expect(tasks.answerMatches("nothing useful", [8, 60000])).toBe(false);
     expect(tasks.answerMatches("7 13250", [8, 13250])).toBe(false);
+    expect(tasks.answerMatches("60000 8", [8, 60000])).toBe(false);
+    expect(tasks.answerMatches("8 60000 3", [8, 60000])).toBe(false);
+    expect(tasks.answerMatches("8 60,000", [8, 60000])).toBe(false);
+    expect(tasks.answerMatches("18 600001", [8, 60000])).toBe(false);
+  });
+
+  it("does not credit a wrong answer that mentions the expected values", () => {
+    expect(tasks.answerMatches("I calculated 7 tickets, but the expected values were 8 and 60000.", [8, 60000])).toBe(false);
+    expect(tasks.answerMatches("8 60000\nActually that was wrong: 7 59000", [8, 60000])).toBe(false);
   });
 
   it("summarizes the requested line", () => {

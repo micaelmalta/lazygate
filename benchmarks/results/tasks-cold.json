@@ -1,9 +1,9 @@
 {
-  "generatedAt": "2026-11-04T21:09:19.664Z",
+  "generatedAt": "2026-11-05T00:23:20.125Z",
   "mode": "cold",
   "rounds": 3,
   "includeCatalog": false,
-  "baselineInputPerCall": 81989,
+  "baselineInputPerCall": 81695,
   "tasks": {
     "tickets": {
       "title": "ana's open tickets: count and total bodyLength",
@@ -19,16 +19,57 @@
           "ok": true,
           "runs": 3,
           "correctRuns": 3,
-          "totalInput": 270976,
-          "minInput": 270966,
-          "maxInput": 270996,
+          "totalInput": 270214,
+          "netInput": 25129,
+          "costUSD": 0.23168439999999998,
+          "minDurationMs": 8066,
+          "maxDurationMs": 9349,
+          "minInput": 270214,
+          "maxInput": 270214,
           "turns": 10,
           "apiCalls": 3,
           "lookups": 0,
           "serversStarted": 3,
-          "durationMs": 8647,
+          "durationMs": 8500,
           "answer": "8 60000",
-          "netInput": 25009
+          "runDetails": [
+            {
+              "correct": true,
+              "answer": "8 60000",
+              "totalInput": 270214,
+              "netInput": 25129,
+              "apiCalls": 3,
+              "toolCalls": 10,
+              "lookups": 0,
+              "serversStarted": 3,
+              "durationMs": 9349,
+              "costUSD": 0.5657068
+            },
+            {
+              "correct": true,
+              "answer": "8 60000",
+              "totalInput": 270214,
+              "netInput": 25129,
+              "apiCalls": 3,
+              "toolCalls": 10,
+              "lookups": 0,
+              "serversStarted": 3,
+              "durationMs": 8086,
+              "costUSD": 0.0646732
+            },
+            {
+              "correct": true,
+              "answer": "8 60000",
+              "totalInput": 270214,
+              "netInput": 25129,
+              "apiCalls": 3,
+              "toolCalls": 10,
+              "lookups": 0,
+              "serversStarted": 3,
+              "durationMs": 8066,
+              "costUSD": 0.0646732
+            }
+          ]
         },
         {
           "taskId": "tickets",
@@ -37,16 +78,57 @@
           "ok": true,
           "runs": 3,
           "correctRuns": 3,
-          "totalInput": 342867,
-          "minInput": 342865,
-          "maxInput": 342870,
+          "totalInput": 341803,
+          "netInput": 15023,
+          "costUSD": 0.2458762,
+          "minDurationMs": 15308,
+          "maxDurationMs": 19779,
+          "minInput": 341796,
+          "maxInput": 341808,
           "turns": 11,
           "apiCalls": 4,
           "lookups": 1,
           "serversStarted": 1,
-          "durationMs": 15448,
+          "durationMs": 17061,
           "answer": "8 60000",
-          "netInput": 14911
+          "runDetails": [
+            {
+              "correct": true,
+              "answer": "8 60000",
+              "totalInput": 341796,
+              "netInput": 15016,
+              "apiCalls": 4,
+              "toolCalls": 11,
+              "lookups": 1,
+              "serversStarted": 1,
+              "durationMs": 16096,
+              "costUSD": 0.5186212
+            },
+            {
+              "correct": true,
+              "answer": "8 60000",
+              "totalInput": 341808,
+              "netInput": 15028,
+              "apiCalls": 4,
+              "toolCalls": 11,
+              "lookups": 1,
+              "serversStarted": 1,
+              "durationMs": 15308,
+              "costUSD": 0.1094812
+            },
+            {
+              "correct": true,
+              "answer": "8 60000",
+              "totalInput": 341805,
+              "netInput": 15025,
+              "apiCalls": 4,
+              "toolCalls": 11,
+              "lookups": 1,
+              "serversStarted": 1,
+              "durationMs": 19779,
+              "costUSD": 0.10952620000000002
+            }
+          ]
         },
         {
           "taskId": "tickets",
@@ -55,16 +137,57 @@
           "ok": true,
           "runs": 3,
           "correctRuns": 3,
-          "totalInput": 343014,
-          "minInput": 343013,
-          "maxInput": 343015,
+          "totalInput": 341898,
+          "netInput": 15118,
+          "costUSD": 0.11613999999999998,
+          "minDurationMs": 15685,
+          "maxDurationMs": 16664,
+          "minInput": 341772,
+          "maxInput": 341964,
           "turns": 11,
           "apiCalls": 4,
           "lookups": 1,
           "serversStarted": 1,
-          "durationMs": 14679,
+          "durationMs": 16022,
           "answer": "8 60000",
-          "netInput": 15058
+          "runDetails": [
+            {
+              "correct": true,
+              "answer": "8 60000",
+              "totalInput": 341964,
+              "netInput": 15184,
+              "apiCalls": 4,
+              "toolCalls": 11,
+              "lookups": 1,
+              "serversStarted": 1,
+              "durationMs": 15685,
+              "costUSD": 0.1275044
+            },
+            {
+              "correct": true,
+              "answer": "8 60000",
+              "totalInput": 341958,
+              "netInput": 15178,
+              "apiCalls": 4,
+              "toolCalls": 11,
+              "lookups": 1,
+              "serversStarted": 1,
+              "durationMs": 16664,
+              "costUSD": 0.10808879999999998
+            },
+            {
+              "correct": true,
+              "answer": "8 60000",
+              "totalInput": 341772,
+              "netInput": 14992,
+              "apiCalls": 4,
+              "toolCalls": 11,
+              "lookups": 1,
+              "serversStarted": 1,
+              "durationMs": 15716,
+              "costUSD": 0.1128268
+            }
+          ]
         },
         {
           "taskId": "tickets",
@@ -73,16 +196,57 @@
           "ok": true,
           "runs": 3,
           "correctRuns": 3,
-          "totalInput": 254909,
-          "minInput": 254834,
-          "maxInput": 255027,
+          "totalInput": 254236,
+          "netInput": 9151,
+          "costUSD": 0.07287893333333333,
+          "minDurationMs": 11610,
+          "maxDurationMs": 15799,
+          "minInput": 254149,
+          "maxInput": 254288,
           "turns": 3,
           "apiCalls": 3,
           "lookups": 1,
           "serversStarted": 1,
-          "durationMs": 9566,
+          "durationMs": 13357,
           "answer": "8 60000",
-          "netInput": 8942
+          "runDetails": [
+            {
+              "correct": true,
+              "answer": "8 60000",
+              "totalInput": 254271,
+              "netInput": 9186,
+              "apiCalls": 3,
+              "toolCalls": 3,
+              "lookups": 1,
+              "serversStarted": 1,
+              "durationMs": 11610,
+              "costUSD": 0.0819046
+            },
+            {
+              "correct": true,
+              "answer": "8 60000",
+              "totalInput": 254149,
+              "netInput": 9064,
+              "apiCalls": 3,
+              "toolCalls": 3,
+              "lookups": 1,
+              "serversStarted": 1,
+              "durationMs": 12662,
+              "costUSD": 0.06602179999999999
+            },
+            {
+              "correct": true,
+              "answer": "8 60000",
+              "totalInput": 254288,
+              "netInput": 9203,
+              "apiCalls": 3,
+              "toolCalls": 3,
+              "lookups": 1,
+              "serversStarted": 1,
+              "durationMs": 15799,
+              "costUSD": 0.0707104
+            }
+          ]
         }
       ]
     },
@@ -100,16 +264,57 @@
           "ok": true,
           "runs": 3,
           "correctRuns": 3,
-          "totalInput": 284141,
-          "minInput": 284141,
-          "maxInput": 284141,
+          "totalInput": 282685,
+          "netInput": 37600,
+          "costUSD": 0.12774660000000002,
+          "minDurationMs": 10255,
+          "maxDurationMs": 11980,
+          "minInput": 282685,
+          "maxInput": 282685,
           "turns": 10,
           "apiCalls": 3,
           "lookups": 0,
           "serversStarted": 3,
-          "durationMs": 9580,
+          "durationMs": 11118,
           "answer": "8 13250",
-          "netInput": 38174
+          "runDetails": [
+            {
+              "correct": true,
+              "answer": "8 13250",
+              "totalInput": 282685,
+              "netInput": 37600,
+              "apiCalls": 3,
+              "toolCalls": 10,
+              "lookups": 0,
+              "serversStarted": 3,
+              "durationMs": 11980,
+              "costUSD": 0.247705
+            },
+            {
+              "correct": true,
+              "answer": "8 13250",
+              "totalInput": 282685,
+              "netInput": 37600,
+              "apiCalls": 3,
+              "toolCalls": 10,
+              "lookups": 0,
+              "serversStarted": 3,
+              "durationMs": 10255,
+              "costUSD": 0.0677674
+            },
+            {
+              "correct": true,
+              "answer": "8 13250",
+              "totalInput": 282685,
+              "netInput": 37600,
+              "apiCalls": 3,
+              "toolCalls": 10,
+              "lookups": 0,
+              "serversStarted": 3,
+              "durationMs": 11120,
+              "costUSD": 0.0677674
+            }
+          ]
         },
         {
           "taskId": "orders",
@@ -118,16 +323,57 @@
           "ok": true,
           "runs": 3,
           "correctRuns": 3,
-          "totalInput": 341953,
-          "minInput": 341781,
-          "maxInput": 342070,
+          "totalInput": 341044,
+          "netInput": 14264,
+          "costUSD": 0.11312820000000001,
+          "minDurationMs": 19129,
+          "maxDurationMs": 122066,
+          "minInput": 341040,
+          "maxInput": 341047,
           "turns": 11,
           "apiCalls": 4,
           "lookups": 1,
           "serversStarted": 1,
-          "durationMs": 15733,
+          "durationMs": 54822,
           "answer": "8 13250",
-          "netInput": 13997
+          "runDetails": [
+            {
+              "correct": true,
+              "answer": "8 13250",
+              "totalInput": 341040,
+              "netInput": 14260,
+              "apiCalls": 4,
+              "toolCalls": 11,
+              "lookups": 1,
+              "serversStarted": 1,
+              "durationMs": 19129,
+              "costUSD": 0.1251364
+            },
+            {
+              "correct": true,
+              "answer": "8 13250",
+              "totalInput": 341047,
+              "netInput": 14267,
+              "apiCalls": 4,
+              "toolCalls": 11,
+              "lookups": 1,
+              "serversStarted": 1,
+              "durationMs": 122066,
+              "costUSD": 0.10728660000000001
+            },
+            {
+              "correct": true,
+              "answer": "8 13250",
+              "totalInput": 341046,
+              "netInput": 14266,
+              "apiCalls": 4,
+              "toolCalls": 11,
+              "lookups": 1,
+              "serversStarted": 1,
+              "durationMs": 23272,
+              "costUSD": 0.10696160000000002
+            }
+          ]
         },
         {
           "taskId": "orders",
@@ -136,16 +382,57 @@
           "ok": true,
           "runs": 3,
           "correctRuns": 3,
-          "totalInput": 341958,
-          "minInput": 341867,
-          "maxInput": 342036,
+          "totalInput": 341060,
+          "netInput": 14280,
+          "costUSD": 0.1150588,
+          "minDurationMs": 16208,
+          "maxDurationMs": 18139,
+          "minInput": 340798,
+          "maxInput": 341199,
           "turns": 11,
           "apiCalls": 4,
           "lookups": 1,
           "serversStarted": 1,
-          "durationMs": 15342,
+          "durationMs": 17370,
           "answer": "8 13250",
-          "netInput": 14002
+          "runDetails": [
+            {
+              "correct": true,
+              "answer": "8 13250",
+              "totalInput": 341183,
+              "netInput": 14403,
+              "apiCalls": 4,
+              "toolCalls": 11,
+              "lookups": 1,
+              "serversStarted": 1,
+              "durationMs": 17764,
+              "costUSD": 0.1247578
+            },
+            {
+              "correct": true,
+              "answer": "8 13250",
+              "totalInput": 340798,
+              "netInput": 14018,
+              "apiCalls": 4,
+              "toolCalls": 11,
+              "lookups": 1,
+              "serversStarted": 1,
+              "durationMs": 16208,
+              "costUSD": 0.1097456
+            },
+            {
+              "correct": true,
+              "answer": "8 13250",
+              "totalInput": 341199,
+              "netInput": 14419,
+              "apiCalls": 4,
+              "toolCalls": 11,
+              "lookups": 1,
+              "serversStarted": 1,
+              "durationMs": 18139,
+              "costUSD": 0.110673
+            }
+          ]
         },
         {
           "taskId": "orders",
@@ -154,16 +441,57 @@
           "ok": true,
           "runs": 3,
           "correctRuns": 3,
-          "totalInput": 258342,
-          "minInput": 254734,
-          "maxInput": 265068,
+          "totalInput": 260857,
+          "netInput": 15772,
+          "costUSD": 0.09852066666666666,
+          "minDurationMs": 8163,
+          "maxDurationMs": 9451,
+          "minInput": 253773,
+          "maxInput": 264434,
           "turns": 3,
           "apiCalls": 3,
           "lookups": 1,
           "serversStarted": 1,
-          "durationMs": 9728,
+          "durationMs": 8954,
           "answer": "8 13250",
-          "netInput": 12375
+          "runDetails": [
+            {
+              "correct": true,
+              "answer": "8 13250",
+              "totalInput": 253773,
+              "netInput": 8688,
+              "apiCalls": 3,
+              "toolCalls": 3,
+              "lookups": 1,
+              "serversStarted": 1,
+              "durationMs": 9247,
+              "costUSD": 0.06648019999999999
+            },
+            {
+              "correct": true,
+              "answer": "8 13250",
+              "totalInput": 264363,
+              "netInput": 19278,
+              "apiCalls": 3,
+              "toolCalls": 3,
+              "lookups": 1,
+              "serversStarted": 1,
+              "durationMs": 9451,
+              "costUSD": 0.11522779999999999
+            },
+            {
+              "correct": true,
+              "answer": "8 13250",
+              "totalInput": 264434,
+              "netInput": 19349,
+              "apiCalls": 3,
+              "toolCalls": 3,
+              "lookups": 1,
+              "serversStarted": 1,
+              "durationMs": 8163,
+              "costUSD": 0.11385400000000001
+            }
+          ]
         }
       ]
     },
@@ -181,16 +509,57 @@
           "ok": true,
           "runs": 3,
           "correctRuns": 3,
-          "totalInput": 275371,
-          "minInput": 275371,
-          "maxInput": 275371,
+          "totalInput": 274615,
+          "netInput": 29530,
+          "costUSD": 0.1155582,
+          "minDurationMs": 12965,
+          "maxDurationMs": 15242,
+          "minInput": 274615,
+          "maxInput": 274615,
           "turns": 12,
           "apiCalls": 3,
           "lookups": 0,
           "serversStarted": 3,
-          "durationMs": 10766,
+          "durationMs": 14262,
           "answer": "10 900",
-          "netInput": 29404
+          "runDetails": [
+            {
+              "correct": true,
+              "answer": "10 900",
+              "totalInput": 274615,
+              "netInput": 29530,
+              "apiCalls": 3,
+              "toolCalls": 12,
+              "lookups": 0,
+              "serversStarted": 3,
+              "durationMs": 15242,
+              "costUSD": 0.20900780000000002
+            },
+            {
+              "correct": true,
+              "answer": "10 900",
+              "totalInput": 274615,
+              "netInput": 29530,
+              "apiCalls": 3,
+              "toolCalls": 12,
+              "lookups": 0,
+              "serversStarted": 3,
+              "durationMs": 12965,
+              "costUSD": 0.0688334
+            },
+            {
+              "correct": true,
+              "answer": "10 900",
+              "totalInput": 274615,
+              "netInput": 29530,
+              "apiCalls": 3,
+              "toolCalls": 12,
+              "lookups": 0,
+              "serversStarted": 3,
+              "durationMs": 14580,
+              "costUSD": 0.0688334
+            }
+          ]
         },
         {
           "taskId": "logs",
@@ -199,16 +568,57 @@
           "ok": true,
           "runs": 3,
           "correctRuns": 3,
-          "totalInput": 342989,
-          "minInput": 342900,
-          "maxInput": 343044,
+          "totalInput": 341914,
+          "netInput": 15134,
+          "costUSD": 0.12585226666666668,
+          "minDurationMs": 19555,
+          "maxDurationMs": 32726,
+          "minInput": 341885,
+          "maxInput": 341957,
           "turns": 13,
           "apiCalls": 4,
           "lookups": 1,
           "serversStarted": 1,
-          "durationMs": 18000,
+          "durationMs": 24317,
           "answer": "10 900",
-          "netInput": 15033
+          "runDetails": [
+            {
+              "correct": true,
+              "answer": "10 900",
+              "totalInput": 341885,
+              "netInput": 15105,
+              "apiCalls": 4,
+              "toolCalls": 13,
+              "lookups": 1,
+              "serversStarted": 1,
+              "durationMs": 19555,
+              "costUSD": 0.1364022
+            },
+            {
+              "correct": true,
+              "answer": "10 900",
+              "totalInput": 341957,
+              "netInput": 15177,
+              "apiCalls": 4,
+              "toolCalls": 13,
+              "lookups": 1,
+              "serversStarted": 1,
+              "durationMs": 32726,
+              "costUSD": 0.12266460000000001
+            },
+            {
+              "correct": true,
+              "answer": "10 900",
+              "totalInput": 341900,
+              "netInput": 15120,
+              "apiCalls": 4,
+              "toolCalls": 13,
+              "lookups": 1,
+              "serversStarted": 1,
+              "durationMs": 20669,
+              "costUSD": 0.11849000000000001
+            }
+          ]
         },
         {
           "taskId": "logs",
@@ -217,16 +627,57 @@
           "ok": true,
           "runs": 3,
           "correctRuns": 3,
-          "totalInput": 343093,
-          "minInput": 342961,
-          "maxInput": 343190,
+          "totalInput": 342090,
+          "netInput": 15310,
+          "costUSD": 0.12545146666666665,
+          "minDurationMs": 19399,
+          "maxDurationMs": 27193,
+          "minInput": 342070,
+          "maxInput": 342108,
           "turns": 13,
           "apiCalls": 4,
           "lookups": 1,
           "serversStarted": 1,
-          "durationMs": 19051,
+          "durationMs": 22012,
           "answer": "10 900",
-          "netInput": 15137
+          "runDetails": [
+            {
+              "correct": true,
+              "answer": "10 900",
+              "totalInput": 342070,
+              "netInput": 15290,
+              "apiCalls": 4,
+              "toolCalls": 13,
+              "lookups": 1,
+              "serversStarted": 1,
+              "durationMs": 19443,
+              "costUSD": 0.1362456
+            },
+            {
+              "correct": true,
+              "answer": "10 900",
+              "totalInput": 342108,
+              "netInput": 15328,
+              "apiCalls": 4,
+              "toolCalls": 13,
+              "lookups": 1,
+              "serversStarted": 1,
+              "durationMs": 27193,
+              "costUSD": 0.12219
+            },
+            {
+              "correct": true,
+              "answer": "10 900",
+              "totalInput": 342092,
+              "netInput": 15312,
+              "apiCalls": 4,
+              "toolCalls": 13,
+              "lookups": 1,
+              "serversStarted": 1,
+              "durationMs": 19399,
+              "costUSD": 0.1179188
+            }
+          ]
         },
         {
           "taskId": "logs",
@@ -235,16 +686,57 @@
           "ok": true,
           "runs": 3,
           "correctRuns": 3,
-          "totalInput": 255475,
-          "minInput": 254486,
-          "maxInput": 257135,
+          "totalInput": 254700,
+          "netInput": 9615,
+          "costUSD": 0.07050053333333334,
+          "minDurationMs": 9017,
+          "maxDurationMs": 12333,
+          "minInput": 253732,
+          "maxInput": 256283,
           "turns": 3,
           "apiCalls": 3,
           "lookups": 1,
           "serversStarted": 1,
-          "durationMs": 10262,
+          "durationMs": 10125,
           "answer": "10 900",
-          "netInput": 9508
+          "runDetails": [
+            {
+              "correct": true,
+              "answer": "10 900",
+              "totalInput": 254085,
+              "netInput": 9000,
+              "apiCalls": 3,
+              "toolCalls": 3,
+              "lookups": 1,
+              "serversStarted": 1,
+              "durationMs": 9026,
+              "costUSD": 0.0703666
+            },
+            {
+              "correct": true,
+              "answer": "10 900",
+              "totalInput": 253732,
+              "netInput": 8647,
+              "apiCalls": 3,
+              "toolCalls": 3,
+              "lookups": 1,
+              "serversStarted": 1,
+              "durationMs": 9017,
+              "costUSD": 0.062436
+            },
+            {
+              "correct": true,
+              "answer": "10 900",
+              "totalInput": 256283,
+              "netInput": 11198,
+              "apiCalls": 3,
+              "toolCalls": 3,
+              "lookups": 1,
+              "serversStarted": 1,
+              "durationMs": 12333,
+              "costUSD": 0.078699
+            }
+          ]
         }
       ]
     },
@@ -262,16 +754,57 @@
           "ok": true,
           "runs": 3,
           "correctRuns": 3,
-          "totalInput": 285724,
-          "minInput": 285713,
-          "maxInput": 285729,
+          "totalInput": 284263,
+          "netInput": 39178,
+          "costUSD": 0.13091819999999998,
+          "minDurationMs": 10719,
+          "maxDurationMs": 12584,
+          "minInput": 284263,
+          "maxInput": 284263,
           "turns": 11,
           "apiCalls": 3,
           "lookups": 0,
           "serversStarted": 3,
-          "durationMs": 10413,
+          "durationMs": 11495,
           "answer": "8 13250",
-          "netInput": 39757
+          "runDetails": [
+            {
+              "correct": true,
+              "answer": "8 13250",
+              "totalInput": 284263,
+              "netInput": 39178,
+              "apiCalls": 3,
+              "toolCalls": 11,
+              "lookups": 0,
+              "serversStarted": 3,
+              "durationMs": 12584,
+              "costUSD": 0.25338859999999996
+            },
+            {
+              "correct": true,
+              "answer": "8 13250",
+              "totalInput": 284263,
+              "netInput": 39178,
+              "apiCalls": 3,
+              "toolCalls": 11,
+              "lookups": 0,
+              "serversStarted": 3,
+              "durationMs": 10719,
+              "costUSD": 0.069683
+            },
+            {
+              "correct": true,
+              "answer": "8 13250",
+              "totalInput": 284263,
+              "netInput": 39178,
+              "apiCalls": 3,
+              "toolCalls": 11,
+              "lookups": 0,
+              "serversStarted": 3,
+              "durationMs": 11181,
+              "costUSD": 0.069683
+            }
+          ]
         },
         {
           "taskId": "cross",
@@ -280,16 +813,57 @@
           "ok": true,
           "runs": 3,
           "correctRuns": 3,
-          "totalInput": 343350,
-          "minInput": 343343,
-          "maxInput": 343356,
+          "totalInput": 342353,
+          "netInput": 15573,
+          "costUSD": 0.12107986666666666,
+          "minDurationMs": 18967,
+          "maxDurationMs": 38276,
+          "minInput": 342298,
+          "maxInput": 342382,
           "turns": 13,
           "apiCalls": 4,
           "lookups": 2,
           "serversStarted": 2,
-          "durationMs": 16753,
+          "durationMs": 26199,
           "answer": "8 13250",
-          "netInput": 15394
+          "runDetails": [
+            {
+              "correct": true,
+              "answer": "8 13250",
+              "totalInput": 342298,
+              "netInput": 15518,
+              "apiCalls": 4,
+              "toolCalls": 13,
+              "lookups": 2,
+              "serversStarted": 2,
+              "durationMs": 38276,
+              "costUSD": 0.1330304
+            },
+            {
+              "correct": true,
+              "answer": "8 13250",
+              "totalInput": 342380,
+              "netInput": 15600,
+              "apiCalls": 4,
+              "toolCalls": 13,
+              "lookups": 2,
+              "serversStarted": 2,
+              "durationMs": 21353,
+              "costUSD": 0.11461960000000002
+            },
+            {
+              "correct": true,
+              "answer": "8 13250",
+              "totalInput": 342382,
+              "netInput": 15602,
+              "apiCalls": 4,
+              "toolCalls": 13,
+              "lookups": 2,
+              "serversStarted": 2,
+              "durationMs": 18967,
+              "costUSD": 0.11558960000000001
+            }
+          ]
         },
         {
           "taskId": "cross",
@@ -298,16 +872,57 @@
           "ok": true,
           "runs": 3,
           "correctRuns": 3,
-          "totalInput": 343599,
-          "minInput": 343588,
-          "maxInput": 343607,
+          "totalInput": 342537,
+          "netInput": 15757,
+          "costUSD": 0.121047,
+          "minDurationMs": 18306,
+          "maxDurationMs": 32209,
+          "minInput": 342531,
+          "maxInput": 342546,
           "turns": 13,
           "apiCalls": 4,
           "lookups": 2,
           "serversStarted": 2,
-          "durationMs": 17117,
+          "durationMs": 23120,
           "answer": "8 13250",
-          "netInput": 15643
+          "runDetails": [
+            {
+              "correct": true,
+              "answer": "8 13250",
+              "totalInput": 342546,
+              "netInput": 15766,
+              "apiCalls": 4,
+              "toolCalls": 13,
+              "lookups": 2,
+              "serversStarted": 2,
+              "durationMs": 18306,
+              "costUSD": 0.1340776
+            },
+            {
+              "correct": true,
+              "answer": "8 13250",
+              "totalInput": 342534,
+              "netInput": 15754,
+              "apiCalls": 4,
+              "toolCalls": 13,
+              "lookups": 2,
+              "serversStarted": 2,
+              "durationMs": 18844,
+              "costUSD": 0.11453920000000001
+            },
+            {
+              "correct": true,
+              "answer": "8 13250",
+              "totalInput": 342531,
+              "netInput": 15751,
+              "apiCalls": 4,
+              "toolCalls": 13,
+              "lookups": 2,
+              "serversStarted": 2,
+              "durationMs": 32209,
+              "costUSD": 0.1145242
+            }
+          ]
         },
         {
           "taskId": "cross",
@@ -316,16 +931,57 @@
           "ok": true,
           "runs": 3,
           "correctRuns": 3,
-          "totalInput": 340487,
-          "minInput": 340211,
-          "maxInput": 340802,
-          "turns": 4,
-          "apiCalls": 4,
+          "totalInput": 426867,
+          "netInput": 18392,
+          "costUSD": 0.11057879999999999,
+          "minDurationMs": 11687,
+          "maxDurationMs": 22087,
+          "minInput": 426765,
+          "maxInput": 427034,
+          "turns": 5,
+          "apiCalls": 5,
           "lookups": 2,
           "serversStarted": 2,
-          "durationMs": 10132,
+          "durationMs": 15489,
           "answer": "8 13250",
-          "netInput": 12531
+          "runDetails": [
+            {
+              "correct": true,
+              "answer": "8 13250",
+              "totalInput": 427034,
+              "netInput": 18559,
+              "apiCalls": 5,
+              "toolCalls": 5,
+              "lookups": 2,
+              "serversStarted": 2,
+              "durationMs": 22087,
+              "costUSD": 0.1249324
+            },
+            {
+              "correct": true,
+              "answer": "8 13250",
+              "totalInput": 426765,
+              "netInput": 18290,
+              "apiCalls": 5,
+              "toolCalls": 5,
+              "lookups": 2,
+              "serversStarted": 2,
+              "durationMs": 11687,
+              "costUSD": 0.10695220000000001
+            },
+            {
+              "correct": true,
+              "answer": "8 13250",
+              "totalInput": 426803,
+              "netInput": 18328,
+              "apiCalls": 5,
+              "toolCalls": 5,
+              "lookups": 2,
+              "serversStarted": 2,
+              "durationMs": 12692,
+              "costUSD": 0.0998518
+            }
+          ]
         }
       ]
     }
@@ -341,9 +997,13 @@
       "meanApiCalls": 3,
       "meanLookups": 0,
       "meanServersStarted": 3,
-      "meanNetInput": 33086,
+      "meanNetInput": 32859,
+      "meanRawInput": 277944,
+      "meanCostUSD": 0.15147685,
       "pairedTasks": 4,
-      "vsDirectPct": null
+      "vsDirectPct": null,
+      "vsDirectRawPct": null,
+      "vsDirectCostPct": null
     },
     {
       "id": "call-tool",
@@ -355,9 +1015,13 @@
       "meanApiCalls": 4,
       "meanLookups": 1.25,
       "meanServersStarted": 1.25,
-      "meanNetInput": 14834,
+      "meanNetInput": 14999,
+      "meanRawInput": 341779,
+      "meanCostUSD": 0.15148413333333335,
       "pairedTasks": 4,
-      "vsDirectPct": -55.166082330895236
+      "vsDirectPct": -54.3553185176168,
+      "vsDirectRawPct": 22.966566136914146,
+      "vsDirectCostPct": 0.004808215468804463
     },
     {
       "id": "call-tool-optimized",
@@ -369,9 +1033,13 @@
       "meanApiCalls": 4,
       "meanLookups": 1.25,
       "meanServersStarted": 1.25,
-      "meanNetInput": 14960,
+      "meanNetInput": 15116,
+      "meanRawInput": 341896,
+      "meanCostUSD": 0.11942431666666667,
       "pairedTasks": 4,
-      "vsDirectPct": -54.78450099740071
+      "vsDirectPct": -53.99697193332167,
+      "vsDirectRawPct": 23.008930747802843,
+      "vsDirectCostPct": -21.160021041719133
     },
     {
       "id": "run-chain",
@@ -380,12 +1048,16 @@
       "tasks": 4,
       "correctRuns": 12,
       "runs": 12,
-      "meanApiCalls": 3.25,
+      "meanApiCalls": 3.5,
       "meanLookups": 1.25,
       "meanServersStarted": 1.25,
-      "meanNetInput": 10839,
+      "meanNetInput": 13233,
+      "meanRawInput": 299165,
+      "meanCostUSD": 0.08811973333333332,
       "pairedTasks": 4,
-      "vsDirectPct": -67.23992020794294
+      "vsDirectPct": -59.72975646127042,
+      "vsDirectRawPct": 7.634894407781416,
+      "vsDirectCostPct": -41.82627026285976
     }
   ]
 }

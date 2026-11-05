@@ -1491,7 +1491,7 @@ function measureTaskBaseline() {
 function summarizeTaskRuns(id, label, runs, taskId) {
   const completed = runs.filter((r) => r.ok);
   if (completed.length === 0) {
-    return { taskId, id, label, ok: false, error: runs[0]?.error ?? "no runs", runs: runs.length, correctRuns: 0 };
+    return { taskId, id, label, ok: false, error: runs[0]?.error ?? "no runs", runs: runs.length, correctRuns: 0, runDetails: runs.map(runDetail) };
   }
   const correct = completed.filter((r) => r.correct);
   const basis = correct.length ? correct : completed;
@@ -1504,6 +1504,11 @@ function summarizeTaskRuns(id, label, runs, taskId) {
     runs: runs.length,
     correctRuns: correct.length,
     totalInput: Math.round(mean(inputs)),
+    // Net input is computed per run (raw − that run's API calls × the fixed overhead), then averaged.
+    netInput: Math.round(mean(basis.map((r) => r.netInput ?? r.totalInput))),
+    costUSD: mean(basis.map((r) => r.costUSD ?? 0)),
+    minDurationMs: Math.min(...basis.map((r) => r.durationMs)),
+    maxDurationMs: Math.max(...basis.map((r) => r.durationMs)),
     minInput: Math.min(...inputs),
     maxInput: Math.max(...inputs),
     turns: mean(basis.map((r) => r.turns)),
@@ -1512,7 +1517,27 @@ function summarizeTaskRuns(id, label, runs, taskId) {
     serversStarted: mean(basis.map((r) => r.serversStarted ?? 0)),
     durationMs: Math.round(mean(basis.map((r) => r.durationMs))),
     answer: basis[basis.length - 1].answer,
+    // Every run, including wrong ones and errors, so a published result can be audited.
+    runDetails: runs.map(runDetail),
   };
+}
+
+/** The auditable facts of one live run. */
+function runDetail(r) {
+  return r.ok
+    ? {
+        correct: Boolean(r.correct),
+        answer: String(r.answer).trim().slice(0, 200),
+        totalInput: r.totalInput,
+        netInput: r.netInput,
+        apiCalls: r.apiCalls,
+        toolCalls: r.turns,
+        lookups: r.lookups ?? 0,
+        serversStarted: r.serversStarted ?? 0,
+        durationMs: r.durationMs,
+        costUSD: r.costUSD ?? 0,
+      }
+    : { correct: false, error: String(r.error ?? "unknown").slice(0, 200), durationMs: r.durationMs ?? 0 };
 }
 
 /** Mean turns: whole numbers stay whole, otherwise one decimal. */
@@ -1532,7 +1557,7 @@ function taskRowLine(r, rounds, expectedCount) {
     `${r.label.padEnd(14)} net ${fmtNumTask(r.netInput).padStart(8)}  raw ${fmtNumTask(r.totalInput).padStart(9)}  ` +
     `calls ${fmtTurns(r.apiCalls).padStart(4)}  tool calls ${fmtTurns(r.turns).padStart(4)}  ` +
     `lookups ${fmtTurns(r.lookups).padStart(3)}  servers started ${fmtTurns(r.serversStarted).padStart(3)}  ` +
-    `${(r.durationMs / 1000).toFixed(1).padStart(5)}s  ${verdict}  answer: ${answerSummary(r.answer, expectedCount)}${range}`
+    `$${r.costUSD.toFixed(4)}  ${(r.durationMs / 1000).toFixed(1).padStart(5)}s  ${verdict}  answer: ${answerSummary(r.answer, expectedCount)}${range}`
   );
 }
 
@@ -1547,7 +1572,9 @@ function taskDeltaLine(label, base, other) {
   const callsD = other.apiCalls - base.apiCalls;
   return (
     `${label}: ${sign}${fmtNumTask(Math.abs(d))} net input tokens (${sign}${pct}%); ` +
-    `${callsD >= 0 ? "+" : "−"}${fmtTurns(Math.abs(callsD))} API calls; raw ${rawD >= 0 ? "+" : "−"}${fmtNumTask(Math.abs(rawD))}`
+    `${callsD >= 0 ? "+" : "−"}${fmtTurns(Math.abs(callsD))} API calls; raw ${rawD >= 0 ? "+" : "−"}${fmtNumTask(Math.abs(rawD))} ` +
+    `(${rawD >= 0 ? "+" : "−"}${base.totalInput ? Math.abs((rawD / base.totalInput) * 100).toFixed(1) : "0.0"}%); ` +
+    `cost ${other.costUSD - base.costUSD >= 0 ? "+" : "−"}$${Math.abs(other.costUSD - base.costUSD).toFixed(4)}`
   );
 }
 
@@ -1563,8 +1590,14 @@ function summarizeAcrossTasks(rowsByTask) {
     const paired = Object.values(rowsByTask)
       .map((r) => [r.find((x) => x.id === "direct"), r.find((x) => x.id === id)])
       .filter(([d, o]) => d?.ok && d.correctRuns > 0 && o?.ok && o.correctRuns > 0);
-    const baseNet = paired.reduce((a, [d]) => a + d.netInput, 0);
-    const net = paired.reduce((a, [, o]) => a + o.netInput, 0);
+    const sum = (pick) => ({
+      base: paired.reduce((a, [d]) => a + pick(d), 0),
+      other: paired.reduce((a, [, o]) => a + pick(o), 0),
+    });
+    const pct = (t) => (id !== "direct" && t.base ? ((t.other - t.base) / t.base) * 100 : null);
+    const net = sum((r) => r.netInput);
+    const raw = sum((r) => r.totalInput);
+    const cost = sum((r) => r.costUSD);
     out.push({
       id,
       label: STRATEGY_LABELS[id],
@@ -1576,8 +1609,12 @@ function summarizeAcrossTasks(rowsByTask) {
       meanLookups: avg(okRows.map((r) => r.lookups)),
       meanServersStarted: avg(okRows.map((r) => r.serversStarted)),
       meanNetInput: Math.round(avg(okRows.map((r) => r.netInput))),
+      meanRawInput: Math.round(avg(okRows.map((r) => r.totalInput))),
+      meanCostUSD: avg(okRows.map((r) => r.costUSD)),
       pairedTasks: paired.length,
-      vsDirectPct: id !== "direct" && baseNet ? ((net - baseNet) / baseNet) * 100 : null,
+      vsDirectPct: pct(net),
+      vsDirectRawPct: pct(raw),
+      vsDirectCostPct: pct(cost),
     });
   }
   return out;
@@ -1628,13 +1665,14 @@ if (tasksOnly) {
         const suffix = rounds > 1 ? ` (round ${i + 1}/${rounds})` : "";
         process.stdout.write(`  ${label.padEnd(14)} running...${suffix}\n`);
         const r = await runTaskStrategy(taskId, strategyId);
-        if (r.ok) r.correct = answerMatches(r.answer, expected);
+        if (r.ok) {
+          r.correct = answerMatches(r.answer, expected);
+          // Input above the fixed per-call overhead: schemas, instructions, calls and results only.
+          r.netInput = Math.max(0, Math.round(r.totalInput - r.apiCalls * baselinePerCall));
+        }
         runs.push(r);
       }
-      const row = summarizeTaskRuns(strategyId, label, runs, taskId);
-      // Input above the fixed per-call overhead: schemas, instructions, calls and results only.
-      if (row.ok) row.netInput = Math.max(0, Math.round(row.totalInput - row.apiCalls * baselinePerCall));
-      rows.push(row);
+      rows.push(summarizeTaskRuns(strategyId, label, runs, taskId));
     }
     rowsByTask[taskId] = rows;
     console.log("");
@@ -1668,19 +1706,20 @@ if (tasksOnly) {
   );
   console.log(`${"═".repeat(76)}`);
   console.log(
-    `${"strategy".padEnd(14)} ${"correct".padStart(9)} ${"net in".padStart(9)} ${"calls".padStart(6)} ${"lookups".padStart(8)} ${"servers".padStart(8)}  vs direct`
+    `${"strategy".padEnd(14)} ${"correct".padStart(9)} ${"net in".padStart(9)} ${"raw in".padStart(9)} ${"cost".padStart(8)} ${"calls".padStart(6)} ${"lookups".padStart(8)} ${"servers".padStart(8)}  vs direct: net / raw / cost`
   );
+  const signed = (v) => (v === null ? "—" : `${v <= 0 ? "−" : "+"}${Math.abs(v).toFixed(1)}%`);
   for (const r of summary) {
-    const vs = r.vsDirectPct === null ? "—" : `${r.vsDirectPct <= 0 ? "−" : "+"}${Math.abs(r.vsDirectPct).toFixed(1)}% (${r.pairedTasks} paired task${r.pairedTasks !== 1 ? "s" : ""})`;
+    const vs = r.vsDirectPct === null ? "—" : `${signed(r.vsDirectPct)} / ${signed(r.vsDirectRawPct)} / ${signed(r.vsDirectCostPct)} (${r.pairedTasks} paired)`;
     console.log(
-      `${r.label.padEnd(14)} ${`${r.correctRuns}/${r.runs}`.padStart(9)} ${fmtNumTask(r.meanNetInput).padStart(9)} ` +
-        `${fmtTurns(Math.round(r.meanApiCalls * 10) / 10).padStart(6)} ${fmtTurns(Math.round(r.meanLookups * 10) / 10).padStart(8)} ` +
+      `${r.label.padEnd(14)} ${`${r.correctRuns}/${r.runs}`.padStart(9)} ${fmtNumTask(r.meanNetInput).padStart(9)} ${fmtNumTask(r.meanRawInput).padStart(9)} ` +
+        `${`$${r.meanCostUSD.toFixed(4)}`.padStart(8)} ${fmtTurns(Math.round(r.meanApiCalls * 10) / 10).padStart(6)} ${fmtTurns(Math.round(r.meanLookups * 10) / 10).padStart(8)} ` +
         `${fmtTurns(Math.round(r.meanServersStarted * 10) / 10).padStart(8)}  ${vs}`
     );
   }
   console.log(
     `\n"servers" is how many fixture server processes the run launched (direct starts all ${Object.keys(FIXTURE_SERVERS).length} eagerly; ` +
-      `lazygate starts only what the task touches). "net in" and "calls" are means over strategies' tasks; "vs direct" sums net input over paired tasks.\n`
+      `lazygate starts only what the task touches). "net in" removes the fixed per-call overhead (a modeled figure); "raw in" and "cost" are what the run reported. All are means over the strategy's tasks; "vs direct" sums each measure over the tasks where both sides were correct.\n`
   );
 
   if (jsonOut) {
