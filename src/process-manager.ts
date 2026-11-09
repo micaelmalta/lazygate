@@ -281,8 +281,9 @@ export interface ProcessManagerOptions {
    */
   stdioWrapper?: readonly string[];
   /**
-   * Gateway: receive secret values (runtime credentials, resolved env/headers) so a
-   * session redactor can scrub them from tool results and logs.
+   * Gateway: receive secret values (`${VAR}` expansions, OAuth tokens) so a session redactor
+   * can scrub them from tool results and logs. Literal values in `env` / `headers` are plain
+   * configuration and are not reported; runtime credentials are registered by the gateway.
    */
   onSecrets?: (values: Iterable<string | undefined>) => void;
   /** Gateway: scrub a stderr / log line before writing it. */
@@ -454,21 +455,6 @@ export class ProcessManager {
     }
   }
 
-  private reportSecrets(...maps: Array<Record<string, string> | undefined>): void {
-    if (!this.onSecrets) return;
-    const values: string[] = [];
-    for (const m of maps) {
-      if (!m) continue;
-      for (const v of Object.values(m)) if (v) values.push(v);
-    }
-    if (values.length === 0) return;
-    try {
-      this.onSecrets(values);
-    } catch {
-      /* redactor must never break lifecycle handling */
-    }
-  }
-
   private logLine(line: string): void {
     const text = this.redactLog ? this.redactLog(line) : line;
     console.error(text);
@@ -624,7 +610,6 @@ export class ProcessManager {
     this.logLine(`${LOG_PREFIX} Activating server: ${name}`);
 
     const env = { ...this.resolveEnv(config.env ?? {}, name), ...(runtime?.env ?? {}) };
-    this.reportSecrets(config.env, env, runtime?.env);
     // Operator-provided sandbox (docker/bwrap/nsjail/sudo -u): the wrapper runs the real command.
     const [spawnCmd, ...spawnArgs] = this.stdioWrapper.length
       ? [...this.stdioWrapper, config.command, ...(config.args ?? [])]
@@ -905,7 +890,6 @@ export class ProcessManager {
     }
     // Gateway credentials go in last and are never re-expanded.
     Object.assign(headers, runtime?.headers ?? {});
-    this.reportSecrets(config.headers, headers, runtime?.headers, resolvedEnv);
 
     const staticAuth = hasHeader(headers, "authorization");
     const oauthAllowed = config.oauth !== false && !staticAuth;

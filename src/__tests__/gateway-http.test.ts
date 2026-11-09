@@ -26,6 +26,8 @@ const FIXTURE = fileURLToPath(new URL("./fixtures/cred-server.mjs", import.meta.
 const ALICE_KEY = "alice-jira-key-123";
 const BOB_KEY = "bob-jira-key-456";
 const SHARED_SECRET = "shared-secret-value";
+const TENANT_URL = "https://tenant.example.net";
+const ENV_SECRET = "env-var-secret-321";
 
 let dir: string;
 let gw: Gateway;
@@ -72,6 +74,7 @@ function rawPost(path: string, headers: Record<string, string>, body: unknown): 
 
 beforeAll(async () => {
   dir = mkdtempSync(join(tmpdir(), "lzg-gw-"));
+  process.env.LZG_TEST_ENV_SECRET = ENV_SECRET;
   const server = (prefix: string, auth: unknown, extra: Record<string, unknown> = {}) => ({
     description: `${prefix} test server`,
     keywords: [prefix],
@@ -91,6 +94,9 @@ beforeAll(async () => {
         fallbacky: server("fallbacky", { scope: "user", fallback: "server", env: { TEST_TOKEN: "${cred:token}" } }),
         sre: server("sre", undefined, { groups: ["sre"] }),
         desktop: server("desktop", undefined, { local: true, keywords: ["desktop", "filesystem"] }),
+        plainenv: server("plainenv", undefined, { env: { TOOL_PREFIX: "plainenv", TEST_TOKEN: TENANT_URL } }),
+        plainauth: server("plainauth", { scope: "user", env: { TEST_TOKEN: TENANT_URL } }),
+        varenv: server("varenv", undefined, { env: { TOOL_PREFIX: "varenv", TEST_TOKEN: "${LZG_TEST_ENV_SECRET}" } }),
       },
     })
   );
@@ -121,6 +127,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  delete process.env.LZG_TEST_ENV_SECRET;
   if (PRIOR_ALLOW_STDIO === undefined) delete process.env.LAZYGATE_GATEWAY_ALLOW_STDIO;
   else process.env.LAZYGATE_GATEWAY_ALLOW_STDIO = PRIOR_ALLOW_STDIO;
   await Promise.all(clients.map((c) => c.close().catch(() => undefined)));
@@ -205,6 +212,22 @@ describe("user-level credentials (headers)", () => {
     const r = await call(client, "jira_echo");
     expect(text(r)).toBe("[redacted]");
     expect(JSON.stringify(r)).not.toContain(ALICE_KEY);
+  });
+
+  it("leaves literal env and auth.env values unredacted", async () => {
+    const { client } = await connect(aliceToken);
+    await call(client, "activate_server", { server_name: "plainenv" });
+    await call(client, "activate_server", { server_name: "plainauth" });
+    expect(text(await call(client, "plainenv_echo"))).toBe(TENANT_URL);
+    expect(text(await call(client, "plainauth_echo"))).toBe(TENANT_URL);
+  });
+
+  it("still redacts values expanded from ${VAR}", async () => {
+    const { client } = await connect(aliceToken);
+    await call(client, "activate_server", { server_name: "varenv" });
+    const r = await call(client, "varenv_echo");
+    expect(text(r)).toBe("[redacted]");
+    expect(JSON.stringify(r)).not.toContain(ENV_SECRET);
   });
 
   it("falls back to the server-level secret when the user sent nothing", async () => {
