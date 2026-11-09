@@ -11,12 +11,15 @@ import { ProcessManager } from "../process-manager.js";
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const script = resolve(repoRoot, "scripts/benchmark.mjs");
 const tasksUrl = pathToFileURL(resolve(repoRoot, "scripts/lib/tasks.mjs")).href;
+const taskDataUrl = pathToFileURL(resolve(repoRoot, "scripts/fixtures/task-data.mjs")).href;
+let data: { EVAL_CURRENT_POLICY: string };
 
 type Tasks = {
-  TASKS: Record<string, { servers: string[]; expected(): number[]; title: string }>;
+  TASKS: Record<string, { servers: string[]; expected(): number[]; title: string; fields: string | null }>;
   TASK_IDS: string[];
   STRATEGY_IDS: string[];
   FIXTURE_SERVERS: Record<string, { file: string; tools: string }>;
+  ALL_FIXTURE_SERVERS: Record<string, { file: string; tools: string }>;
   FIXTURE_DIR: string;
   buildInstruction(task: string, strategy: string, opts?: { cold?: boolean }): string;
   taskPrompt(task: string, opts?: { cold?: boolean }): string;
@@ -28,11 +31,39 @@ let tasks: Tasks;
 let home: string;
 beforeAll(async () => {
   tasks = (await import(tasksUrl)) as Tasks;
+  data = (await import(taskDataUrl)) as { EVAL_CURRENT_POLICY: string };
   home = mkdtempSync(join(tmpdir(), "lazygate-tasks-"));
 });
 afterAll(() => rmSync(home, { recursive: true, force: true }));
 
 const textOf = (result: { content?: Array<{ type: string; text?: string }> }): string => result.content?.[0]?.text ?? "";
+
+/**
+ * Reads the facts an agent needs out of the current policy page: the labelled parameter rows, the
+ * per-category window table and the excluded-categories sentence. Plain regexes over the markup, the
+ * way an agent reads the page, so it checks what the page states rather than the fixture constants.
+ */
+function parsePolicyPage(html: string) {
+  const cell = (label: string) => {
+    const m = new RegExp(`<tr><td>${label}[^<]*</td><td>(\\d+)</td></tr>`).exec(html);
+    if (!m) throw new Error(`policy page has no "${label}" row`);
+    return Number(m[1]);
+  };
+  const windows: Record<string, number> = {};
+  const section = /Return window by category[\s\S]*?<\/table>/.exec(html)?.[0] ?? "";
+  for (const m of section.matchAll(/<tr><td>([a-z]+)<\/td><td>(\d+)<\/td><\/tr>/g)) windows[m[1]!] = Number(m[2]);
+  const excludedMatch = /Refunds are not accepted for these categories: ([^.]+)\./.exec(html);
+  const excluded = excludedMatch ? excludedMatch[1]!.split(",").map((s) => s.trim()) : [];
+  const exceptionCount = (html.match(/<li>Exception \d+:/g) ?? []).length;
+  return {
+    returnWindowDays: cell("Return window"),
+    feeBasisPoints: cell("Restocking fee"),
+    minPurchaseCents: cell("Minimum purchase"),
+    exceptionCount,
+    windows,
+    excluded,
+  };
+}
 
 describe("task catalog", () => {
   it("covers several tasks and servers, including one that needs two servers", () => {
@@ -40,7 +71,7 @@ describe("task catalog", () => {
     expect(Object.keys(tasks.FIXTURE_SERVERS).length).toBeGreaterThanOrEqual(3);
     expect(tasks.TASK_IDS.some((id) => tasks.TASKS[id]!.servers.length > 1)).toBe(true);
     for (const id of tasks.TASK_IDS) {
-      for (const server of tasks.TASKS[id]!.servers) expect(tasks.FIXTURE_SERVERS[server]).toBeDefined();
+      for (const server of tasks.TASKS[id]!.servers) expect(tasks.ALL_FIXTURE_SERVERS[server]).toBeDefined();
       expect(tasks.TASKS[id]!.expected().every((n) => Number.isInteger(n) && n > 0)).toBe(true);
     }
   });
@@ -66,9 +97,12 @@ describe("task catalog", () => {
     }
   });
 
-  it("only call_tool+opt asks for fields", () => {
+  it("only call_tool+opt asks for fields, and only where a task has records to project", () => {
     for (const id of tasks.TASK_IDS) {
-      expect(tasks.buildInstruction(id, "call-tool-optimized")).toContain("fields=");
+      const projectable = tasks.TASKS[id]!.fields !== null;
+      const optimized = tasks.buildInstruction(id, "call-tool-optimized");
+      if (projectable) expect(optimized).toContain("fields=");
+      else expect(optimized).not.toContain("fields=");
       expect(tasks.buildInstruction(id, "call-tool")).not.toContain("fields=");
       expect(tasks.buildInstruction(id, "run-chain")).toContain("run_chain");
     }
@@ -107,7 +141,7 @@ describe("fixture servers answer their tasks", () => {
   let pm: ProcessManager;
   beforeAll(async () => {
     pm = new ProcessManager({ idleTtlMs: 0 });
-    for (const [name, fixture] of Object.entries(tasks.FIXTURE_SERVERS)) {
+    for (const [name, fixture] of Object.entries(tasks.ALL_FIXTURE_SERVERS)) {
       await pm.activate(name, {
         description: name,
         keywords: [],
@@ -155,6 +189,25 @@ describe("fixture servers answer their tasks", () => {
       ((await call("tickets", "list_tickets", { status: "open" })) as Array<{ assignee: string }>).filter((t) => t.assignee === "ana").length,
       answers.orders![1]!,
     ];
+
+    // Refund evaluation. The policy is read from the HTML page, not from the fixture constants, so this
+    // proves the page carries the facts an agent needs.
+    const page = textOf((await pm.callTool("docs", "get_policy", { version: data.EVAL_CURRENT_POLICY }) as never));
+    const policy = parsePolicyPage(page);
+    const refunded = (await call("refunds", "list_refund_orders", { status: "refunded" })) as Array<{ id: string }>;
+    const details: Array<{ category: string; ageDays: number; refundCents: number | null }> = [];
+    for (const o of refunded) details.push(await call("refunds", "get_refund_order", { id: o.id }));
+    answers.refundAggregate = [
+      refunded.length,
+      details.reduce((sum, d) => sum + (d.refundCents ?? 0), 0),
+    ];
+    const eligible = details.filter(
+      (d) => d.ageDays <= policy.windows[d.category]! && !policy.excluded.includes(d.category)
+    );
+    answers.policyEval = [eligible.length, eligible.reduce((sum, d) => sum + (d.refundCents ?? 0), 0)];
+    answers.policyEvalCompute = [...answers.policyEval];
+    answers.policyFacts = [policy.returnWindowDays, policy.feeBasisPoints, policy.minPurchaseCents, policy.exceptionCount];
+
     for (const id of tasks.TASK_IDS) expect({ id, answer: answers[id] }).toEqual({ id, answer: tasks.TASKS[id]!.expected() });
   });
 
@@ -175,7 +228,8 @@ describe("fixture servers answer their tasks", () => {
     const log = join(home, "starts.log");
     expect(existsSync(log)).toBe(true);
     const names = readFileSync(log, "utf8").split("\n").filter(Boolean).map((l) => l.split(" ")[0]);
-    expect(names.sort()).toEqual(Object.keys(tasks.FIXTURE_SERVERS).sort());
+    // The oracle activates every fixture server, including the refund-evaluation ones.
+    expect(names.sort()).toEqual(Object.keys(tasks.ALL_FIXTURE_SERVERS).sort());
   });
 });
 

@@ -1,0 +1,47 @@
+{
+  "$comment": "Combined experiment from 1.md: seven variants over the refund-evaluation workloads. Every variant uses the same fixtures, task wording, seed and warm index. A variant names how it executes (direct MCP or lazygate call_tool / run_chain), whether the manifest is on, and its response-optimization policy. Only those three things differ between variants.",
+  "name": "combined-refund-evaluation",
+  "tasks": ["refundAggregate", "policyEval", "policyFacts", "policyEvalCompute"],
+  "index": "warm",
+  "variants": {
+    "A": { "label": "direct MCP", "execution": "direct", "manifest": false, "responseOptimization": null },
+    "B": { "label": "lazygate basic", "execution": "call_tool", "manifest": false, "responseOptimization": null },
+    "C": { "label": "basic + manifest", "execution": "call_tool", "manifest": true, "responseOptimization": null },
+    "D": { "label": "manifest + chain", "execution": "run_chain", "manifest": true, "responseOptimization": null },
+    "E": {
+      "label": "manifest + chain + optimization",
+      "execution": "run_chain",
+      "manifest": true,
+      "responseOptimization": {
+        "enabled": true,
+        "defaultMode": "off",
+        "tokenizer": "o200k_base",
+        "includeMetadata": false,
+        "tools": { "lazygate.run_chain": { "mode": "html_markdown" } }
+      }
+    },
+    "F": {
+      "label": "manifest + optimized calls",
+      "execution": "call_tool",
+      "manifest": true,
+      "responseOptimization": {
+        "enabled": true,
+        "defaultMode": "off",
+        "tokenizer": "o200k_base",
+        "includeMetadata": false,
+        "tools": { "docs.get_policy": { "mode": "html_markdown" } }
+      }
+    },
+    "G": {
+      "label": "manifest + field projection",
+      "execution": "call_tool",
+      "manifest": true,
+      "projection": true,
+      "responseOptimization": null
+    }
+  },
+  "controls": {
+    "$comment": "Diagnostic controls from 1.md. Not primary configurations; reported separately.",
+    "policyEvalCompute": "negative control: the script computes the complete answer and returns two numbers; optimization should add essentially no benefit here"
+  }
+}
