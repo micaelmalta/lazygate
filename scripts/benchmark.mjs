@@ -41,6 +41,7 @@
 //                      the server or tool names and must use discover_tools); needs a logged-in claude CLI
 
 import { execFile, spawn } from "child_process";
+import { createHash } from "crypto";
 import { promisify } from "util";
 import {
   readFileSync,
@@ -171,6 +172,45 @@ const manifestFlag = has("--manifest");
 const indexMode = manifestFlag ? "warm" : (get("--index") ?? "fresh");
 const strategiesArg = get("--strategies");
 const jsonOut = get("--json");
+// --trace-dir DIR keeps each run's raw claude stream (tool arguments, results, usage) as JSONL.
+// --seed N fixes the per-task strategy order, so a reproduction runs the same sequence.
+const traceDirArg = get("--trace-dir");
+const seedArg = Number.parseInt(get("--seed") ?? "3801", 10);
+// --experiment FILE runs the declarative variants (A–G) from 1.md instead of the strategy list. Each
+// variant sets execution (direct / call_tool / run_chain), the manifest, and its optimization policy.
+const experimentArg = get("--experiment");
+/** The variant the current run belongs to (null outside --experiment). */
+let activeVariant = null;
+/** Whether the fixture servers list their signatures in the MCP instructions for this run. */
+const variantManifest = () => (activeVariant ? activeVariant.manifest : manifestFlag);
+/** Index state for this run: an experiment's index, or the --index flag. A manifest implies a warm index. */
+const variantIndex = () => (activeVariant ? (variantManifest() ? "warm" : experiment.index) : indexMode);
+/** The parsed experiment (null outside --experiment). Loaded and validated before any run starts. */
+let experiment = null;
+if (experimentArg) {
+  const { parseExperiment } = await import("./lib/tasks.mjs");
+  try {
+    experiment = parseExperiment(JSON.parse(readFileSync(resolve(experimentArg), "utf8")));
+  } catch (err) {
+    console.error(`--experiment ${experimentArg}: ${err.message}`);
+    process.exit(1);
+  }
+  // 1.md: reject conflicting legacy flags rather than silently overriding them.
+  const conflicts = [
+    ["--strategies", strategiesArg],
+    ["--manifest", manifestFlag],
+    ["--preview", previewFlag],
+    ["--cold-discovery", coldDiscovery],
+  ].filter(([, on]) => on).map(([flag]) => flag);
+  if (conflicts.length) {
+    console.error(`--experiment sets execution, manifest and optimization per variant; remove ${conflicts.join(", ")}.`);
+    process.exit(1);
+  }
+  if (!tasksOnly) {
+    console.error("--experiment only applies to --tasks.");
+    process.exit(1);
+  }
+}
 if (!["fresh", "warm"].includes(indexMode)) {
   console.error('--index must be "fresh" or "warm".');
   process.exit(1);
@@ -1293,6 +1333,8 @@ import {
   STRATEGY_IDS,
   STRATEGY_LABELS,
   FIXTURE_SERVERS,
+  EVAL_FIXTURE_SERVERS,
+  ALL_FIXTURE_SERVERS,
   FIXTURE_DIR,
   buildInstruction,
   taskPrompt,
@@ -1303,9 +1345,19 @@ import {
 
 const fmtNumTask = (n) => n.toLocaleString();
 
+/**
+ * Fixture servers a run loads. The original four tasks keep the original three (so their catalog and
+ * published results do not change); the refund-evaluation tasks add the refunds and docs servers.
+ */
+function catalogFor(taskId) {
+  const names = Object.keys(FIXTURE_SERVERS);
+  const needsEval = TASKS[taskId]?.servers.some((s) => s in EVAL_FIXTURE_SERVERS);
+  return needsEval ? Object.keys(ALL_FIXTURE_SERVERS) : names;
+}
+
 /** One fixture server as a servers.json entry (tool chain on; opted in to the discover preview). */
 function fixtureServerEntry(name, startLog) {
-  const fixture = FIXTURE_SERVERS[name];
+  const fixture = ALL_FIXTURE_SERVERS[name];
   return {
     description: fixture.description,
     keywords: fixture.keywords,
@@ -1316,7 +1368,7 @@ function fixtureServerEntry(name, startLog) {
     toolChain: true,
     // Off by default (a discovery request starts nothing); --preview opts the fixtures in.
     ...(previewFlag ? { previewOnDiscover: true } : {}),
-    ...(manifestFlag ? { manifest: true } : {}),
+    ...(variantManifest() ? { manifest: true } : {}),
   };
 }
 
@@ -1327,31 +1379,47 @@ const activeStrategies = () => {
 };
 
 /**
+ * The run units for one task. Without --experiment these are the four strategies; with it, one per
+ * variant. Each unit is { id, strategy, label, variant }: `strategy` drives execution, `variant` (when set)
+ * supplies the manifest and optimization policy for that run.
+ */
+function runUnits() {
+  if (!experiment) {
+    return activeStrategies().map((id) => ({ id, strategy: id, label: STRATEGY_LABELS[id], variant: null }));
+  }
+  return experiment.variants.map((v) => ({ id: v.id, strategy: v.strategy, label: `${v.id} ${v.label}`, variant: v }));
+}
+
+/**
  * tool-index.json as it would look after each fixture server ran once: tool names, descriptions
  * and call signatures (built through the real ProcessManager and ToolIndex from dist/).
  */
-let warmIndexPromise = null;
-function warmToolIndexJson() {
-  warmIndexPromise ??= (async () => {
-    const { ProcessManager } = await import(pathToFileURL(resolve(__dirname, "..", "dist", "process-manager.js")).href);
-    const { ToolIndex } = await import(pathToFileURL(resolve(__dirname, "..", "dist", "tool-index.js")).href);
-    const dir = mkdtempSync(join(workDir, "warm-index-"));
-    const indexPath = join(dir, "tool-index.json");
-    const index = new ToolIndex(indexPath);
-    const manager = new ProcessManager({ idleTtlMs: 0 });
-    try {
-      for (const name of Object.keys(FIXTURE_SERVERS)) {
-        // Same command/args as the servers.json entry, so the index entry is "fresh" for it.
-        const cfg = fixtureServerEntry(name, join(dir, "warm-starts.log"));
-        const tools = await manager.activate(name, cfg);
-        index.record(name, cfg, tools);
-      }
-    } finally {
-      manager.dispose();
+const warmIndexPromises = new Map();
+function warmToolIndexJson(taskId) {
+  const names = catalogFor(taskId);
+  const key = names.join(",");
+  if (!warmIndexPromises.has(key)) warmIndexPromises.set(key, buildWarmToolIndexJson(names));
+  return warmIndexPromises.get(key);
+}
+
+async function buildWarmToolIndexJson(names) {
+  const { ProcessManager } = await import(pathToFileURL(resolve(__dirname, "..", "dist", "process-manager.js")).href);
+  const { ToolIndex } = await import(pathToFileURL(resolve(__dirname, "..", "dist", "tool-index.js")).href);
+  const dir = mkdtempSync(join(workDir, "warm-index-"));
+  const indexPath = join(dir, "tool-index.json");
+  const index = new ToolIndex(indexPath);
+  const manager = new ProcessManager({ idleTtlMs: 0 });
+  try {
+    for (const name of names) {
+      // Same command/args as the servers.json entry, so the index entry is "fresh" for it.
+      const cfg = fixtureServerEntry(name, join(dir, "warm-starts.log"));
+      const tools = await manager.activate(name, cfg);
+      index.record(name, cfg, tools);
     }
-    return readFileSync(indexPath, "utf8");
-  })();
-  return warmIndexPromise;
+  } finally {
+    manager.dispose();
+  }
+  return readFileSync(indexPath, "utf8");
 }
 
 /**
@@ -1359,12 +1427,12 @@ function warmToolIndexJson() {
  * catalog with --include-catalog). Meta-tools stay the only schemas in tools/list (expose
  * defaults to none); the instructions name the servers a task needs, or the model discovers them.
  */
-function taskBrokerConfig(strategyDir, strategyId, startLog) {
+function taskBrokerConfig(strategyDir, strategyId, startLog, taskId) {
   const cfgPath = join(strategyDir, "servers.json");
   // Only the fixtures unless --include-catalog: the real catalog can hold destructive tools and
   // --tasks bypasses permission prompts.
   const merged = { ...(includeCatalog ? servers : {}) };
-  for (const name of Object.keys(FIXTURE_SERVERS)) merged[name] = fixtureServerEntry(name, startLog);
+  for (const name of catalogFor(taskId)) merged[name] = fixtureServerEntry(name, startLog);
   // Expand ${VAR} the same way direct MCP wiring does, so stdio children get real secrets.
   const out = {};
   for (const [name, cfg] of Object.entries(merged)) {
@@ -1379,7 +1447,8 @@ function taskBrokerConfig(strategyDir, strategyId, startLog) {
     }
     out[name] = copy;
   }
-  const responseOptimization = strategyResponseOptimization(strategyId);
+  // An experiment variant supplies its own policy (possibly null = off); otherwise the strategy's default.
+  const responseOptimization = activeVariant ? activeVariant.responseOptimization : strategyResponseOptimization(strategyId);
   writeFileSync(cfgPath, JSON.stringify({ ...(responseOptimization ? { responseOptimization } : {}), servers: out }));
   return cfgPath;
 }
@@ -1389,20 +1458,20 @@ function taskBrokerConfig(strategyDir, strategyId, startLog) {
  * - direct: every fixture server (and the user's runnable catalog with --include-catalog), classic MCP
  * - lazygate: one broker process wrapping that same catalog
  */
-async function taskMcpConfig(strategyId, strategyDir, startLog) {
+async function taskMcpConfig(strategyId, strategyDir, startLog, taskId) {
   if (strategyId === "direct") {
     const mcp = includeCatalog ? buildMcpConfig(Object.keys(servers)) : { mcpServers: {} };
     // A fixture wins if the user already has a server with the same name.
-    for (const name of Object.keys(FIXTURE_SERVERS)) {
+    for (const name of catalogFor(taskId)) {
       mcp.mcpServers[name] = {
         command: process.execPath,
-        args: [resolve(FIXTURE_DIR, FIXTURE_SERVERS[name].file)],
+        args: [resolve(FIXTURE_DIR, ALL_FIXTURE_SERVERS[name].file)],
         env: { FIXTURE_START_LOG: startLog },
       };
     }
     return mcp;
   }
-  const cfgPath = taskBrokerConfig(strategyDir, strategyId, startLog);
+  const cfgPath = taskBrokerConfig(strategyDir, strategyId, startLog, taskId);
   const brokerEntry = resolve(__dirname, "..", "dist", "index.js");
   // The broker keeps tool-index.json under $HOME/.config/lazygate regardless of --config, so give
   // it a private HOME: a run neither reads signatures a previous run left behind (which would make
@@ -1413,7 +1482,7 @@ async function taskMcpConfig(strategyId, strategyDir, startLog) {
     const home = join(strategyDir, "home");
     const configHome = join(home, ".config", "lazygate");
     mkdirSync(configHome, { recursive: true });
-    if (indexMode === "warm") writeFileSync(join(configHome, "tool-index.json"), await warmToolIndexJson());
+    if (variantIndex() === "warm") writeFileSync(join(configHome, "tool-index.json"), await warmToolIndexJson(taskId));
     env = { HOME: home };
   }
   return {
@@ -1432,14 +1501,48 @@ function countServerStarts(startLog) {
   }
 }
 
-async function runTaskStrategy(taskId, strategyId) {
+async function runTaskStrategy(taskId, strategyId, { round = 1, traceDir = null } = {}) {
   const dir = mkdtempSync(join(workDir, `task-${taskId}-${strategyId}-`));
   const startLog = join(dir, "starts.log");
-  const mcpConfig = await taskMcpConfig(strategyId, dir, startLog);
+  const mcpConfig = await taskMcpConfig(strategyId, dir, startLog, taskId);
   const appendFile = join(dir, "instruction.md");
   writeFileSync(appendFile, buildInstruction(taskId, strategyId, { cold: coldDiscovery }));
-  const result = await runClaudeTask(mcpConfig, { appendFile, prompt: taskPrompt(taskId, { cold: coldDiscovery }) });
-  return { taskId, id: strategyId, label: STRATEGY_LABELS[strategyId], ...result, serversStarted: countServerStarts(startLog) };
+  // Persist the raw runner stream per run when asked, so every number in a result can be audited.
+  // Keyed by the variant id when there is one: B and C share an execution, and must not share a file.
+  const runKey = activeVariant ? activeVariant.id : strategyId;
+  const traceFile = traceDir ? join(traceDir, `${taskId}__${runKey}__r${round}.jsonl`) : null;
+  const result = await runClaudeTask(mcpConfig, {
+    appendFile,
+    prompt: taskPrompt(taskId, { cold: coldDiscovery }),
+    model: modelArg,
+    traceFile,
+  });
+  return {
+    taskId,
+    id: runKey,
+    label: activeVariant ? `${activeVariant.id} ${activeVariant.label}` : STRATEGY_LABELS[strategyId],
+    ...result,
+    serversStarted: countServerStarts(startLog),
+    // The configuration this run was built with, so a published row says exactly what it measured.
+    configHash: taskConfigHash(taskId, strategyId),
+    ...(traceFile ? { trace: traceFile } : {}),
+  };
+}
+
+/** Stable hash of everything that defines a strategy's configuration for one task. */
+function taskConfigHash(taskId, strategyId) {
+  const payload = JSON.stringify({
+    instruction: buildInstruction(taskId, strategyId, { cold: coldDiscovery }),
+    prompt: taskPrompt(taskId, { cold: coldDiscovery }),
+    catalog: catalogFor(taskId),
+    responseOptimization: activeVariant ? activeVariant.responseOptimization : strategyResponseOptimization(strategyId),
+    variant: activeVariant?.id ?? null,
+    manifest: variantManifest(),
+    index: variantIndex(),
+    preview: previewFlag,
+    model: modelArg ?? null,
+  });
+  return createHash("sha256").update(payload).digest("hex").slice(0, 16);
 }
 
 /**
@@ -1451,10 +1554,13 @@ async function runTaskStrategy(taskId, strategyId) {
  *   - ignores the user's real MCP config (`--strict-mcp-config`)
  *   - ignores the user's settings and hooks (`--setting-sources ""`, `disableAllHooks`)
  */
-async function runClaudeTask(mcpConfig, { appendFile, prompt }) {
+async function runClaudeTask(mcpConfig, { appendFile, prompt, model = null, traceFile = null }) {
   const claudeArgs = [
     "-p",
     prompt,
+    // Pin the model when asked (--model); the runner's reported model is recorded below, so a run
+    // states which model answered even when no pin was given.
+    ...(model ? ["--model", model] : []),
     // stream-json (with --verbose) lets us count API round trips: `num_turns` counts tool calls,
     // so a model that batches eight calls into one response still reports ten turns.
     "--output-format",
@@ -1497,15 +1603,20 @@ async function runClaudeTask(mcpConfig, { appendFile, prompt }) {
   }
   let data;
   const messageIds = new Set();
-  const toolUses = new Map(); // tool_use id → tool name (a block can repeat across stream events)
+  const toolUses = new Map(); // tool_use id → { name, input } (a block can repeat across stream events)
+  const modelsSeen = new Set();
   try {
     for (const line of stdout.split("\n")) {
       if (!line.trim()) continue;
       const event = JSON.parse(line);
       if (event.type === "assistant" && event.message?.id) {
         messageIds.add(event.message.id);
+        if (event.message.model) modelsSeen.add(String(event.message.model));
         for (const block of event.message.content ?? []) {
-          if (block?.type === "tool_use" && block.id) toolUses.set(block.id, String(block.name ?? ""));
+          // Keep the arguments too: a trace must show which tool, and with which args, each call used.
+          if (block?.type === "tool_use" && block.id) {
+            toolUses.set(block.id, { name: String(block.name ?? ""), input: block.input ?? {} });
+          }
         }
       } else if (event.type === "result") data = event;
     }
@@ -1513,18 +1624,31 @@ async function runClaudeTask(mcpConfig, { appendFile, prompt }) {
   } catch {
     return { ok: false, error: "invalid JSON from claude", durationMs: Date.now() - start };
   }
+  if (traceFile) {
+    try {
+      writeFileSync(traceFile, stdout);
+    } catch {
+      /* a trace is best effort; never fail the run over it */
+    }
+  }
   if (data.is_error || data.api_error_status) {
     return { ok: false, error: String(data.result ?? "claude returned is_error").slice(0, 160), durationMs: data.duration_ms ?? 0 };
   }
   const u = data.usage ?? {};
   const totalInput = (u.input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0);
+  const names = [...toolUses.values()].map((t) => t.name);
   return {
     ok: true,
     answer: String(data.result ?? ""),
     turns: data.num_turns ?? 0,
     apiCalls: Math.max(1, messageIds.size),
     // discover_tools / describe_tool / activate_server calls: the turns spent finding the right tool.
-    lookups: [...toolUses.values()].filter((name) => /(discover_tools|describe_tool|activate_server)$/.test(name)).length,
+    lookups: names.filter((name) => /(discover_tools|describe_tool|activate_server)$/.test(name)).length,
+    // The model the runner says answered. With --model it should match the pin; if it does not, the run is
+    // not the configuration it claims to be.
+    model: [...modelsSeen][0] ?? null,
+    modelsSeen: [...modelsSeen],
+    toolCalls: [...toolUses.values()].map((t) => ({ name: t.name, input: t.input })),
     totalInput,
     outputTokens: u.output_tokens ?? 0,
     durationMs: data.duration_ms ?? Date.now() - start,
@@ -1603,6 +1727,12 @@ function runDetail(r) {
         serversStarted: r.serversStarted ?? 0,
         durationMs: r.durationMs,
         costUSD: r.costUSD ?? 0,
+        // Provenance: which model the runner reports, which configuration produced the run, and the raw
+        // stream to audit it. Each tool call's name and arguments are kept, not just a count.
+        model: r.model ?? null,
+        configHash: r.configHash ?? null,
+        trace: r.trace ?? null,
+        toolCallDetail: (r.toolCalls ?? []).map((t) => ({ name: t.name, input: t.input })),
       }
     : { correct: false, error: String(r.error ?? "unknown").slice(0, 200), durationMs: r.durationMs ?? 0 };
 }
@@ -1614,6 +1744,35 @@ function fmtTurns(n) {
 
 /** Mean of a list, ignoring nothing; 0 for an empty list. */
 const avg = (xs) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0);
+
+/** mulberry32: a small seeded PRNG, so a strategy order is reproducible from --seed. */
+function seededRandom(seed) {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/** Stable 32-bit hash of a string (FNV-1a), to vary the seed per task. */
+function hashString(s) {
+  let h = 0x811c9dc5;
+  for (const ch of s) h = Math.imul(h ^ ch.charCodeAt(0), 0x01000193) >>> 0;
+  return h;
+}
+
+/** Fisher–Yates shuffle with an injected random source; returns a new array. */
+function shuffle(items, rng) {
+  const out = [...items];
+  for (let i = out.length - 1; i > 0; i--) {
+    const j = Math.floor(rng() * (i + 1));
+    [out[i], out[j]] = [out[j], out[i]];
+  }
+  return out;
+}
 
 /** One strategy's row under a task: net/raw input, calls, lookups, servers started, time, verdict. */
 function taskRowLine(r, rounds, expectedCount) {
@@ -1690,7 +1849,7 @@ function summarizeAcrossTasks(rowsByTask) {
 if (tasksOnly) {
   const rounds = Math.max(1, roundsArg || 1);
   console.log(
-    `Tasks:   ${selectedTasks.length} (${selectedTasks.join(", ")}); catalog holds ${Object.keys(FIXTURE_SERVERS).join(", ")}` +
+    `Tasks:   ${selectedTasks.length} (${selectedTasks.join(", ")}); catalog holds ${selectedTasks.some((t) => catalogFor(t).length > Object.keys(FIXTURE_SERVERS).length) ? Object.keys(ALL_FIXTURE_SERVERS).join(", ") : Object.keys(FIXTURE_SERVERS).join(", ")}` +
       (coldDiscovery ? "; cold discovery — extra turns versus a known-tools run are the discover_tools / describe_tool lookups" : "")
   );
   if (coldDiscovery || manifestFlag) {
@@ -1710,8 +1869,9 @@ if (tasksOnly) {
       console.log(`Task ${taskId} — ${task.title}`);
       console.log(`Prompt: ${taskPrompt(taskId, { cold: coldDiscovery })}`);
       console.log(`Expect: ${task.expected().join(" ")}\n`);
-      for (const strategyId of activeStrategies()) {
-        console.log(`[${STRATEGY_LABELS[strategyId]}]\n${buildInstruction(taskId, strategyId, { cold: coldDiscovery })}\n`);
+      for (const unit of runUnits()) {
+        // An experiment variant's instruction follows its execution mode, so a variant shows what it will get.
+        console.log(`[${unit.label ?? STRATEGY_LABELS[unit.id]}]\n${buildInstruction(taskId, unit.strategy, { cold: coldDiscovery })}\n`);
       }
     }
     process.exit(0);
@@ -1725,28 +1885,47 @@ if (tasksOnly) {
   );
   const rowsByTask = {};
   const expectedByTask = {};
+  if (traceDirArg) mkdirSync(resolve(traceDirArg), { recursive: true });
   for (const taskId of selectedTasks) {
     const expected = TASKS[taskId].expected();
     expectedByTask[taskId] = expected;
     console.log(`── ${taskId}: ${TASKS[taskId].title}`);
     console.log(`   expected answer: ${expected.join(" ")}`);
-    const rows = [];
-    for (const strategyId of activeStrategies()) {
-      const label = STRATEGY_LABELS[strategyId];
-      const runs = [];
-      for (let i = 0; i < rounds; i++) {
-        const suffix = rounds > 1 ? ` (round ${i + 1}/${rounds})` : "";
+    const units = runUnits();
+    const strategies = units.map((u) => u.id);
+    const runsByStrategy = Object.fromEntries(strategies.map((id) => [id, []]));
+    // Rounds are the outer loop and the run order is shuffled inside each round, so prompt-cache
+    // state and time-of-run do not line up with one strategy. Seeded, so the order is reproducible.
+    const rng = seededRandom(seedArg ^ hashString(taskId));
+    for (let round = 1; round <= rounds; round++) {
+      for (const unit of shuffle(units, rng)) {
+        const strategyId = unit.id;
+        const label = unit.label ?? STRATEGY_LABELS[strategyId];
+        const suffix = rounds > 1 ? ` (round ${round}/${rounds})` : "";
         process.stdout.write(`  ${label.padEnd(14)} running...${suffix}\n`);
-        const r = await runTaskStrategy(taskId, strategyId);
+        activeVariant = unit.variant;
+        const r = await runTaskStrategy(taskId, unit.strategy, {
+          round,
+          traceDir: traceDirArg ? resolve(traceDirArg) : null,
+        });
+        activeVariant = null;
         if (r.ok) {
           r.correct = answerMatches(r.answer, expected);
           // Input above the fixed per-call overhead: schemas, instructions, calls and results only.
           r.netInput = Math.max(0, Math.round(r.totalInput - r.apiCalls * baselinePerCall));
+          // A pinned run must report the pinned model. If the runner used another model, the run is not
+          // the configuration it claims to be, so it is flagged rather than silently counted.
+          if (modelArg && r.modelsSeen?.length && !r.modelsSeen.some((m) => m.includes(modelArg))) {
+            r.modelMismatch = `pinned ${modelArg}, runner used ${r.modelsSeen.join(", ")}`;
+            console.error(`  ! model mismatch on ${taskId}/${strategyId}: ${r.modelMismatch}`);
+          }
         }
-        runs.push(r);
+        runsByStrategy[strategyId].push(r);
       }
-      rows.push(summarizeTaskRuns(strategyId, label, runs, taskId));
     }
+    const rows = units.map((unit) =>
+      summarizeTaskRuns(unit.id, unit.label ?? STRATEGY_LABELS[unit.id], runsByStrategy[unit.id], taskId)
+    );
     rowsByTask[taskId] = rows;
     console.log("");
     for (const r of rows) console.log(taskRowLine(r, rounds, expected.length));

@@ -32,6 +32,28 @@ export const FIXTURE_SERVERS = {
   },
 };
 
+/**
+ * Servers for the refund-evaluation tasks. Kept out of FIXTURE_SERVERS so the original four tasks keep
+ * their catalog (and published results) unchanged; a run loads these only when its task needs them.
+ */
+export const EVAL_FIXTURE_SERVERS = {
+  refunds: {
+    file: "refunds-server.mjs",
+    tools: "list_refund_orders, get_refund_order",
+    description: "Refund-evaluation orders: list and fetch with category, age and refund amount",
+    keywords: ["refunds", "refund", "returns", "orders", "customers"],
+  },
+  docs: {
+    file: "docs-server.mjs",
+    tools: "list_policies, get_policy",
+    description: "Refund policy documentation: versioned policy pages",
+    keywords: ["policy", "documentation", "docs", "returns"],
+  },
+};
+
+/** Every fixture server a task can use, by name. */
+export const ALL_FIXTURE_SERVERS = { ...FIXTURE_SERVERS, ...EVAL_FIXTURE_SERVERS };
+
 export const ANSWER_RULE = (format) =>
   `Your entire final message must be exactly: ${format} — integers separated by single spaces, nothing else.`;
 
@@ -186,6 +208,164 @@ export const TASKS = {
       "await servers.orders.get_order({id}) for each (use Promise.all if you want), " +
       "sum refundCents; return {tickets, refund}.",
   },
+  // ── refund-evaluation workloads (from 1.md) ──────────────────────────────────────────────
+  // Aggregation: every refunded order's refundCents, read only from get_refund_order. Chaining should dominate.
+  refundAggregate: {
+    title: "refunded evaluation orders: count and total refundCents",
+    servers: ["refunds"],
+    format: "<count> <sum>",
+    prompt:
+      "Using the refunds server, count the refunded orders and sum each order's refundCents field " +
+      "(from get_refund_order; list rows do not carry it). Answer with exactly two numbers: the count, then the sum.",
+    coldPrompt:
+      "Count the refunded orders and sum each order's refundCents field (the per-order record has it; " +
+      "the list does not). Answer with exactly two numbers: the count, then the sum.",
+    expected: data.expectedRefundAggregate,
+    bulk: "There are several refunded orders; get_refund_order records carry many line items — still fetch each one.",
+    coldBulk:
+      "Order records are large — still fetch each order you need, and add the numeric refundCents fields (do NOT estimate them; null means no refund).",
+    fields: '["id","refundCents"]',
+    direct: [
+      'list_refund_orders with status "refunded".',
+      "Call get_refund_order once for each order in that list.",
+      "Add the numeric refundCents fields from those results (skip null).",
+    ],
+    call: (call) => [
+      `${call("refunds", "list_refund_orders", '{status:"refunded"}')}.`,
+      `For each order in the list, ${call("refunds", "get_refund_order", "{id}")} once.`,
+      "Add the numeric refundCents fields from those results (skip null).",
+    ],
+    callFields: (call, fields) => [
+      `${call("refunds", "list_refund_orders", '{status:"refunded"}')}.`,
+      `For each order in the list, ${call("refunds", "get_refund_order", "{id}", fields)} once.`,
+      "Add the numeric refundCents fields from those results (skip null).",
+    ],
+    chain:
+      'await servers.refunds.list_refund_orders({status:"refunded"}), ' +
+      "await servers.refunds.get_refund_order({id}) for each (use Promise.all if you want), " +
+      "sum refundCents (skip null), return {count, total}.",
+  },
+  // Policy evaluation: eligibility needs the policy document's window and exceptions. The chain returns
+  // the compact order facts plus the policy HTML as ONE string, so html_markdown can convert the policy.
+  policyEval: {
+    title: "refunds eligible under the current policy: count and total refundCents",
+    servers: ["refunds", "docs"],
+    format: "<eligibleCount> <eligibleRefundCents>",
+    prompt:
+      "Using the refunds and docs servers: fetch the current refund policy (get_policy for version " +
+      `"${data.EVAL_CURRENT_POLICY}"), read its return window and exceptions, then count the refunded orders that ` +
+      "are eligible under that policy and sum their refundCents (from get_refund_order). An order is eligible when it is " +
+      "within the return window for its category and not excluded by the policy's exceptions. " +
+      "Answer with exactly two numbers: the eligible count, then the eligible refund sum.",
+    coldPrompt:
+      `Count the refunded orders that are eligible under the current refund policy (version ${data.EVAL_CURRENT_POLICY}) ` +
+      "and sum their refundCents (the per-order record has it and the category and age). Answer with exactly two numbers: " +
+      "the eligible count, then the eligible refund sum.",
+    expected: data.expectedPolicyEligible,
+    bulk: "Several refunded orders need checking; get_refund_order records carry line items — still fetch each refunded order.",
+    coldBulk:
+      "Order records are large — still fetch each order you need. Apply the policy in the docs server to each order.",
+    fields: '["id","refundCents","category","ageDays"]',
+    direct: [
+      'list_refund_orders with status "refunded".',
+      `get_policy with version "${data.EVAL_CURRENT_POLICY}" (docs server) and read its return window and exceptions.`,
+      "For each refunded order, call get_refund_order once and check it against the policy.",
+      "Add the refundCents of the eligible orders.",
+    ],
+    call: (call) => [
+      `${call("refunds", "list_refund_orders", '{status:"refunded"}')}.`,
+      `${call("docs", "get_policy", `{version:"${data.EVAL_CURRENT_POLICY}"}`)} and read its window and exceptions.`,
+      `For each refunded order, ${call("refunds", "get_refund_order", "{id}")} once and check it against the policy.`,
+      "Add the refundCents of the eligible orders.",
+    ],
+    callFields: (call, fields) => [
+      `${call("refunds", "list_refund_orders", '{status:"refunded"}')}.`,
+      `${call("docs", "get_policy", `{version:"${data.EVAL_CURRENT_POLICY}"}`)} and read its window and exceptions.`,
+      `For each refunded order, ${call("refunds", "get_refund_order", "{id}", fields)} once and check it against the policy.`,
+      "Add the refundCents of the eligible orders.",
+    ],
+    chain:
+      'await servers.refunds.list_refund_orders({status:"refunded"}), ' +
+      "await servers.refunds.get_refund_order({id}) for each (use Promise.all if you want); " +
+      `await servers.docs.get_policy({version:"${data.EVAL_CURRENT_POLICY}"}) (its text is one HTML string); ` +
+      "keep the order facts you need (id, category, ageDays, refundCents) and return " +
+      "{facts, policyHtml} as ONE final string: the policy HTML plus the JSON facts, so the policy reaches you in full.",
+  },
+  // HTML extraction: four integers spread over headings, a table and an exception paragraph of the current
+  // policy page. The historical section carries outdated numbers, so reading the wrong version is wrong.
+  policyFacts: {
+    title: "current refund policy: return window, fee, minimum purchase and exception count",
+    servers: ["docs"],
+    format: "<windowDays> <feeBasisPoints> <minPurchaseCents> <exceptions>",
+    prompt:
+      `Using the docs server, fetch the refund policy for version "${data.EVAL_CURRENT_POLICY}" (get_policy) and report four ` +
+      "values from that version only: the return window in days, the restocking fee in basis points, the minimum purchase " +
+      "in cents, and the number of exception categories. Answer with exactly four numbers in that order.",
+    coldPrompt:
+      `From the current refund policy page (version ${data.EVAL_CURRENT_POLICY}), report the return window in days, the ` +
+      "restocking fee in basis points, the minimum purchase in cents, and the number of exception categories. " +
+      "Answer with exactly four numbers in that order.",
+    expected: data.expectedPolicyFacts,
+    bulk: "The policy page is long and has sections for other versions; read only the current version's values.",
+    coldBulk: "The policy page is long; read only the values for the current version.",
+    // get_policy returns HTML, not records, so there is no field to project; the call_tool+opt run gets no fields.
+    fields: null,
+    direct: [
+      `get_policy with version "${data.EVAL_CURRENT_POLICY}" (docs server).`,
+      "Read the return window, restocking fee, minimum purchase and exception count for that version only.",
+    ],
+    call: (call) => [
+      `${call("docs", "get_policy", `{version:"${data.EVAL_CURRENT_POLICY}"}`)}.`,
+      "Read the return window, restocking fee, minimum purchase and exception count for that version only.",
+    ],
+    callFields: (call) => [
+      `${call("docs", "get_policy", `{version:"${data.EVAL_CURRENT_POLICY}"}`)}.`,
+      "Read the return window, restocking fee, minimum purchase and exception count for that version only.",
+    ],
+    runChainPreamble: "The policy page is one long HTML document; the script returns it, you read the values from it.\n",
+    chain:
+      `await servers.docs.get_policy({version:"${data.EVAL_CURRENT_POLICY}"}) and return its HTML text as the final string ` +
+      "(one string, unmodified); you read the four values from it.",
+  },
+  // Negative control: the script does the full evaluation itself and returns two numbers. Optimization
+  // should add essentially nothing here, because no evidence reaches the model.
+  policyEvalCompute: {
+    title: "refunds eligible under the current policy (script computes the answer)",
+    servers: ["refunds", "docs"],
+    format: "<eligibleCount> <eligibleRefundCents>",
+    prompt:
+      "Using the refunds and docs servers, count the refunded orders that are eligible under the current refund " +
+      `policy (get_policy version "${data.EVAL_CURRENT_POLICY}") and sum their refundCents. ` +
+      "Answer with exactly two numbers: the eligible count, then the eligible refund sum.",
+    coldPrompt:
+      `Count the refunded orders eligible under the current refund policy (version ${data.EVAL_CURRENT_POLICY}) ` +
+      "and sum their refundCents. Answer with exactly two numbers: the eligible count, then the eligible refund sum.",
+    expected: data.expectedPolicyEligible,
+    bulk: "Several refunded orders need checking; the calculation happens in the script, so keep the records there.",
+    coldBulk: "Order records are large — still fetch each order you need. Do the calculation yourself and report only the two numbers.",
+    fields: '["id","refundCents"]',
+    direct: [
+      `get_policy with version "${data.EVAL_CURRENT_POLICY}" (docs server), then list_refund_orders with status "refunded".`,
+      "For each refunded order, call get_refund_order once and check it against the policy.",
+      "Add the refundCents of the eligible orders.",
+    ],
+    call: (call) => [
+      `${call("docs", "get_policy", `{version:"${data.EVAL_CURRENT_POLICY}"}`)} and read its window and exceptions.`,
+      `${call("refunds", "list_refund_orders", '{status:"refunded"}')}.`,
+      `For each refunded order, ${call("refunds", "get_refund_order", "{id}")} once and check it against the policy.`,
+      "Add the refundCents of the eligible orders.",
+    ],
+    callFields: (call, fields) => [
+      `${call("docs", "get_policy", `{version:"${data.EVAL_CURRENT_POLICY}"}`)} and read its window and exceptions.`,
+      `${call("refunds", "list_refund_orders", '{status:"refunded"}')}.`,
+      `For each refunded order, ${call("refunds", "get_refund_order", "{id}", fields)} once and check it against the policy.`,
+      "Add the refundCents of the eligible orders.",
+    ],
+    chain:
+      `await servers.docs.get_policy({version:"${data.EVAL_CURRENT_POLICY}"}) and read its window and exceptions; ` +
+      'await servers.refunds.list_refund_orders({status:"refunded"}), then await servers.refunds.get_refund_order({id}) for each; ' +
+      "apply the policy in the script and return {count, total} (the eligible count and refund sum).",
+  },
 };
 
 export const TASK_IDS = Object.keys(TASKS);
@@ -199,7 +379,7 @@ export const STRATEGY_LABELS = {
 
 const quote = (s) => `"${s}"`;
 const serverList = (task) => task.servers.map(quote).join(", ");
-const toolList = (task) => task.servers.map((s) => `${s}: ${FIXTURE_SERVERS[s].tools}`).join("; ");
+const toolList = (task) => task.servers.map((s) => `${s}: ${ALL_FIXTURE_SERVERS[s].tools}`).join("; ");
 const numbered = (steps) => steps.map((s, i) => `${i + 1}) ${s}`).join("\n");
 const callWith = (name) => (server, tool, args, fields) =>
   `call_tool(server=${quote(server)}, tool=${quote(tool)}, args=${args}${fields ? `, fields=${fields}` : ""})`;
@@ -207,6 +387,60 @@ const callWith = (name) => (server, tool, args, fields) =>
 /** Response optimization config for the call_tool+opt strategy; null for the others. */
 export function strategyResponseOptimization(strategyId) {
   return strategyId === "call-tool-optimized" ? { enabled: true, defaultMode: "adaptive", maxOutputTokens: 4000 } : null;
+}
+
+/**
+ * Response optimization for an experiment variant. `policy` is the variant's explicit responseOptimization
+ * (null means off). Explicit policies are used as written: no default cap is added, because 1.md requires
+ * the primary comparison to avoid truncation.
+ */
+export function variantResponseOptimization(policy) {
+  return policy ? { ...policy } : null;
+}
+
+/** Which runnable strategy id an experiment `execution` maps onto. */
+const EXECUTION_STRATEGY = { direct: "direct", call_tool: "call-tool", run_chain: "run-chain" };
+
+/**
+ * Validate an experiment definition (1.md) and expand it into runnable variants. Throws with a clear
+ * message on anything the harness cannot run faithfully, so a bad experiment never runs silently.
+ */
+export function parseExperiment(raw) {
+  const errors = [];
+  if (!raw || typeof raw !== "object") throw new Error("experiment: expected a JSON object");
+  const variants = raw.variants;
+  if (!variants || typeof variants !== "object") errors.push("experiment: missing variants");
+  const taskIds = Array.isArray(raw.tasks) ? raw.tasks : [];
+  for (const id of taskIds) if (!TASKS[id]) errors.push(`experiment: unknown task ${id}`);
+  if (taskIds.length === 0) errors.push("experiment: tasks must be a non-empty list");
+  if (raw.index !== undefined && raw.index !== "fresh" && raw.index !== "warm") errors.push(`experiment: index must be "fresh" or "warm"`);
+
+  const expanded = [];
+  for (const [id, v] of Object.entries(variants ?? {})) {
+    if (!EXECUTION_STRATEGY[v.execution]) {
+      errors.push(`variant ${id}: execution must be one of ${Object.keys(EXECUTION_STRATEGY).join(", ")}`);
+      continue;
+    }
+    // Projection (G) is task-level: call_tool with fields. It is only meaningful with call_tool.
+    if (v.projection && v.execution !== "call_tool") errors.push(`variant ${id}: projection needs execution call_tool`);
+    if (v.execution === "direct" && (v.manifest || v.responseOptimization)) {
+      errors.push(`variant ${id}: direct MCP has no manifest or response optimization`);
+    }
+    if (v.responseOptimization && v.responseOptimization.enabled === false) {
+      errors.push(`variant ${id}: responseOptimization.enabled is false; use null to turn optimization off`);
+    }
+    expanded.push({
+      id,
+      label: v.label ?? id,
+      strategy: EXECUTION_STRATEGY[v.execution],
+      manifest: Boolean(v.manifest),
+      projection: Boolean(v.projection),
+      responseOptimization: variantResponseOptimization(v.responseOptimization ?? null),
+    });
+  }
+  if (expanded.length === 0) errors.push("experiment: no variants");
+  if (errors.length) throw new Error(errors.join("; "));
+  return { name: raw.name ?? "experiment", tasks: taskIds, index: raw.index ?? "fresh", variants: expanded };
 }
 
 /** The system-prompt addendum the model gets for one task and strategy. */
@@ -248,6 +482,15 @@ export function buildInstruction(taskId, strategyId, { cold = false } = {}) {
   }
 
   if (strategyId === "call-tool-optimized") {
+    // Tasks whose upstream returns text (HTML) have no records to project: pass no fields, so the
+    // strategy is measured without projection credit it did not earn.
+    if (!task.fields) {
+      if (cold) return `${discover}use call_tool only (never run_chain).\n${task.coldBulk}\n${rule}`;
+      return (
+        `You have the lazygate MCP server. ${upstream}\n${task.bulk}\n` +
+        `Required sequence (use call_tool only; never run_chain):\n${numbered(task.callFields(callWith()))}\n${rule}`
+      );
+    }
     if (cold) {
       return (
         `${discover}use call_tool only (never run_chain).\n` +
@@ -276,7 +519,7 @@ export function buildInstruction(taskId, strategyId, { cold = false } = {}) {
       .join("; ");
     return (
       `You have the lazygate MCP server. Upstream server${plural ? "s" : ""}: ${names} (toolChain on).\n` +
-      "There are several matching records with large bodies; keep all of that inside the script.\n" +
+      (task.runChainPreamble ?? "There are several matching records with large bodies; keep all of that inside the script.\n") +
       "Do exactly this, then stop (no retries unless a tool returns an error):\n" +
       `1) ${stubs}.\n` +
       `2) ONE run_chain call. Inside the script: ${task.chain} Do not use call_tool.\n${rule}`

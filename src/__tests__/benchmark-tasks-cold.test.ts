@@ -31,11 +31,15 @@ describe("benchmark --tasks --cold-discovery (dry run)", () => {
     const cold = run(["--tasks", "--cold-discovery", "--estimate"]);
     expect(cold).toContain("--cold-discovery");
     const lazygateSections = cold.split("[").filter((section) => /^(call_tool|call_tool\+opt|run_chain)\]/.test(section));
-    // Three lazygate strategies per task (tickets, orders, logs, cross).
-    expect(lazygateSections).toHaveLength(3 * 4);
+    // Three lazygate strategies per task, for every task in the catalog.
+    const taskCount = (run(["--tasks", "--cold-discovery", "--estimate"]).match(/^Task \S+ — /gm) ?? []).length;
+    expect(taskCount).toBeGreaterThanOrEqual(4);
+    expect(lazygateSections).toHaveLength(3 * taskCount);
     for (const section of lazygateSections) {
       expect(section).toContain("do not know which upstream servers or tools exist");
-      expect(section).not.toMatch(/"(tickets|orders|logs)"|list_tickets|get_ticket|list_orders|get_order|search_logs|get_log_entry/);
+      expect(section).not.toMatch(
+        /"(tickets|orders|logs|refunds|docs)"|list_tickets|get_ticket|list_orders|get_order|search_logs|get_log_entry|get_policy|list_policies/
+      );
     }
 
     const known = run(["--tasks", "--estimate"]);
