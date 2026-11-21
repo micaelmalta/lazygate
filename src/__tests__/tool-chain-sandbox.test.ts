@@ -184,7 +184,7 @@ describe("runCode: errors", () => {
       code: 'let a = []; while (true) { a.push("x".repeat(100000)); }',
       bindings: [],
       callTool: echo,
-      limits: { deadlineMs: 20000, memoryBytes: 8 * 1024 * 1024 },
+      limits: { deadlineMs: 10000, memoryBytes: 8 * 1024 * 1024 },
     });
     expect(out.error).toMatch(/memory limit/);
   });
