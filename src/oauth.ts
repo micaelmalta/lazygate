@@ -32,12 +32,31 @@ import {
 import { APP_NAME, configDir } from "./paths.js";
 import type { AuthorizationServerMetadata } from "@modelcontextprotocol/sdk/shared/auth.js";
 import { assertSafeUrl, assertTokenEndpointMatchesIssuer, safeFetch } from "./ssrf.js";
+import { secretEnvName } from "./gateway/credentials.js";
+import { OAUTH_SECRET_REF } from "./config.js";
 
 /** Explicit overrides; all fields optional — missing values are auto-discovered. */
 export interface OAuthConfig {
+  /** Literal client id or a `${secret:path}` reference. */
   clientId?: string;
+  /** Confidential client secret; must be a `${secret:path}` reference and requires `clientId`. */
+  clientSecret?: string;
   callbackPort?: number;
   scopes?: string[];
+}
+
+let secretLookup: (path: string) => string | undefined = (path) => process.env[secretEnvName(path)] || undefined;
+
+/** Where `${secret:path}` in OAuth client settings resolves (the gateway's secret store). */
+export function setOAuthSecretLookup(lookup: (path: string) => string | undefined): void {
+  secretLookup = lookup;
+}
+
+/** Client credentials sent to the token endpoint. */
+interface ClientAuth {
+  clientId: string;
+  clientSecret?: string;
+  method?: "client_secret_basic" | "client_secret_post";
 }
 
 export interface GetAccessTokenOptions {
@@ -66,7 +85,7 @@ export class NeedsAuthorizationError extends Error {
 interface PendingAuth {
   serverName: string;
   owner?: string;
-  clientId: string;
+  client: ClientAuth;
   verifier: string;
   redirectUri: string;
   resource: string;
@@ -96,6 +115,7 @@ interface OAuthMeta {
   registration_endpoint?: string;
   scopes_supported?: string[];
   code_challenge_methods_supported?: string[];
+  token_endpoint_auth_methods_supported?: string[];
 }
 
 interface StoredClient {
@@ -392,6 +412,7 @@ function asOAuthMeta(metadata: AuthorizationServerMetadata): OAuthMeta {
     registration_endpoint: metadata.registration_endpoint,
     scopes_supported: metadata.scopes_supported,
     code_challenge_methods_supported: metadata.code_challenge_methods_supported,
+    token_endpoint_auth_methods_supported: metadata.token_endpoint_auth_methods_supported,
   };
 }
 
@@ -499,6 +520,53 @@ async function resolveClientId(
   }
 
   return registerDynamicClient(serverName, resource, discovery, redirectUri, port, scopes);
+}
+
+function expandSecretRef(serverName: string, field: string, value: string): string {
+  const ref = OAUTH_SECRET_REF.exec(value);
+  if (!ref) return value;
+  const resolved = secretLookup(ref[1]);
+  if (!resolved) {
+    throw new Error(`OAuth ${field} for ${serverName} needs secret "${ref[1]}" (lazygate secret set ${ref[1]})`);
+  }
+  return resolved;
+}
+
+/** Expand `${secret:…}` in the configured clientId / clientSecret. */
+function resolveConfiguredClient(
+  serverName: string,
+  config: OAuthConfig
+): { clientId?: string; clientSecret?: string } {
+  const clientId = config.clientId ? expandSecretRef(serverName, "clientId", config.clientId) : undefined;
+  if (!config.clientSecret) return { clientId };
+  if (!clientId) throw new Error(`OAuth clientSecret for ${serverName} requires a clientId`);
+  if (!OAUTH_SECRET_REF.test(config.clientSecret)) {
+    throw new Error(`OAuth clientSecret for ${serverName} must be a \${secret:path} reference`);
+  }
+  return { clientId, clientSecret: expandSecretRef(serverName, "clientSecret", config.clientSecret) };
+}
+
+/** RFC 6749 §2.3.1: Basic unless the AS only advertises client_secret_post. */
+function secretAuthMethod(serverName: string, meta: OAuthMeta): NonNullable<ClientAuth["method"]> {
+  const supported = meta.token_endpoint_auth_methods_supported;
+  if (!supported?.length || supported.includes("client_secret_basic")) return "client_secret_basic";
+  if (supported.includes("client_secret_post")) return "client_secret_post";
+  throw new Error(`OAuth for ${serverName}: the AS accepts neither client_secret_basic nor client_secret_post`);
+}
+
+/** The secret applies only to the configured client, not a cached or dynamically registered one. */
+function clientAuthFor(
+  serverName: string,
+  clientId: string,
+  configured: { clientId?: string; clientSecret?: string },
+  meta: OAuthMeta
+): ClientAuth {
+  if (!configured.clientSecret || clientId !== configured.clientId) return { clientId };
+  return { clientId, clientSecret: configured.clientSecret, method: secretAuthMethod(serverName, meta) };
+}
+
+function formEncode(value: string): string {
+  return encodeURIComponent(value).replace(/%20/g, "+");
 }
 
 interface CallbackListener {
@@ -636,12 +704,21 @@ async function startCallbackServer(
 async function tokenRequest(
   tokenEndpoint: string,
   params: Record<string, string>,
-  what: string
+  what: string,
+  client: ClientAuth
 ): Promise<Record<string, unknown>> {
+  const headers: Record<string, string> = { "Content-Type": "application/x-www-form-urlencoded" };
+  const body: Record<string, string> = { ...params, client_id: client.clientId };
+  if (client.clientSecret && client.method === "client_secret_post") {
+    body.client_secret = client.clientSecret;
+  } else if (client.clientSecret) {
+    const pair = `${formEncode(client.clientId)}:${formEncode(client.clientSecret)}`;
+    headers["Authorization"] = `Basic ${Buffer.from(pair).toString("base64")}`;
+  }
   const res = await safeFetch(tokenEndpoint, {
     method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams(params).toString(),
+    headers,
+    body: new URLSearchParams(body).toString(),
   });
 
   let data: Record<string, unknown>;
@@ -684,7 +761,7 @@ function toTokenSet(
 
 async function exchangeCode(
   tokenEndpoint: string,
-  clientId: string,
+  client: ClientAuth,
   code: string,
   verifier: string,
   redirectUri: string,
@@ -694,20 +771,20 @@ async function exchangeCode(
     tokenEndpoint,
     {
       grant_type: "authorization_code",
-      client_id: clientId,
       code,
       code_verifier: verifier,
       redirect_uri: redirectUri,
       resource,
     },
-    "Token exchange"
+    "Token exchange",
+    client
   );
-  return toTokenSet(data, clientId, resource);
+  return toTokenSet(data, client.clientId, resource);
 }
 
 async function refreshToken(
   tokenEndpoint: string,
-  clientId: string,
+  client: ClientAuth,
   refreshTok: string,
   resource: string
 ): Promise<TokenSet> {
@@ -715,13 +792,13 @@ async function refreshToken(
     tokenEndpoint,
     {
       grant_type: "refresh_token",
-      client_id: clientId,
       refresh_token: refreshTok,
       resource,
     },
-    "Token refresh"
+    "Token refresh",
+    client
   );
-  return toTokenSet(data, clientId, resource, refreshTok);
+  return toTokenSet(data, client.clientId, resource, refreshTok);
 }
 
 const inFlight = new Map<string, Promise<string>>();
@@ -775,16 +852,17 @@ async function obtainAccessToken(
   const discovery = await discover(serverUrl);
   const { meta, info } = discovery;
   const scopes = config.scopes ?? info.resourceMetadata?.scopes_supported ?? [];
+  const configured = resolveConfiguredClient(serverName, config);
 
   const clientIdForRefresh =
-    config.clientId ?? token?.client_id ?? loadClient(serverName)?.client_id;
+    configured.clientId ?? token?.client_id ?? loadClient(serverName)?.client_id;
 
   if (token?.refresh_token && clientIdForRefresh) {
     console.error(`[oauth] Refreshing token for ${serverName}...`);
     try {
       const refreshed = await refreshToken(
         meta.token_endpoint,
-        clientIdForRefresh,
+        clientAuthFor(serverName, clientIdForRefresh, configured, meta),
         token.refresh_token,
         resource
       );
@@ -802,7 +880,7 @@ async function obtainAccessToken(
   console.error(`[oauth] Authorizing ${serverName} — a browser window will open`);
 
   const state = base64url(randomBytes(16));
-  const cachedClient = config.clientId ? null : loadClient(serverName);
+  const cachedClient = configured.clientId ? null : loadClient(serverName);
   const preferredPort = config.callbackPort ?? cachedClient?.callback_port;
   const listener = await startCallbackServer(
     preferredPort,
@@ -812,7 +890,7 @@ async function obtainAccessToken(
   try {
     // Pre-registered clients (explicit clientId) usually registered `localhost`;
     // dynamically registered ones use the RFC 8252 loopback IP literal.
-    const host = config.clientId ? "localhost" : "127.0.0.1";
+    const host = configured.clientId ? "localhost" : "127.0.0.1";
     const redirectUri = `http://${host}:${listener.port}/callback`;
     const clientId = await resolveClientId(
       serverName,
@@ -820,7 +898,7 @@ async function obtainAccessToken(
       discovery,
       redirectUri,
       listener.port,
-      config,
+      { ...config, clientId: configured.clientId },
       scopes
     );
 
@@ -841,7 +919,7 @@ async function obtainAccessToken(
     const { code } = await listener.wait;
     const fresh = await exchangeCode(
       meta.token_endpoint,
-      clientId,
+      clientAuthFor(serverName, clientId, configured, meta),
       code,
       verifier,
       redirectUri,
@@ -883,7 +961,17 @@ export async function startRemoteAuthorization(opts: {
     throw new Error(`Invalid redirect URI: ${redirectUri}`);
   }
 
-  const clientId = await resolveClientId(serverName, resource, discovery, redirectUri, port, config, scopes);
+  const configured = resolveConfiguredClient(serverName, config);
+  const clientId = await resolveClientId(
+    serverName,
+    resource,
+    discovery,
+    redirectUri,
+    port,
+    { ...config, clientId: configured.clientId },
+    scopes
+  );
+  const client = clientAuthFor(serverName, clientId, configured, meta);
   const { verifier, challenge } = generatePKCE();
   const state = base64url(randomBytes(16));
   const bindToken = base64url(randomBytes(24));
@@ -907,7 +995,7 @@ export async function startRemoteAuthorization(opts: {
   pendingAuth.set(state, {
     serverName,
     owner,
-    clientId,
+    client,
     verifier,
     redirectUri,
     resource,
@@ -962,7 +1050,7 @@ export async function finishRemoteAuthorization(
 
   const fresh = await exchangeCode(
     pending.tokenEndpoint,
-    pending.clientId,
+    pending.client,
     code,
     pending.verifier,
     pending.redirectUri,

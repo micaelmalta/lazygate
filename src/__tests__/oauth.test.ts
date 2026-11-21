@@ -42,6 +42,7 @@ const {
   hasStoredToken,
   clearStoredToken,
   pendingAuthCount,
+  setOAuthSecretLookup,
   NeedsAuthorizationError,
 } = await import("../oauth.js");
 
@@ -67,6 +68,7 @@ const openSealedToken = (path: string, serverName: string): Record<string, unkno
 
 let as: Server;
 const tokenRequests: URLSearchParams[] = [];
+const tokenAuthHeaders: Array<string | undefined> = [];
 let tokenResponse: () => Record<string, unknown> = () => ({
   access_token: "fresh-access",
   refresh_token: "fresh-refresh",
@@ -81,6 +83,7 @@ beforeAll(async () => {
     req.on("end", () => {
       if (req.url === "/token") {
         tokenRequests.push(new URLSearchParams(body));
+        tokenAuthHeaders.push(req.headers.authorization);
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify(tokenResponse()));
       } else {
@@ -100,6 +103,7 @@ afterAll(async () => {
 beforeEach(() => {
   jest.clearAllMocks();
   tokenRequests.length = 0;
+  tokenAuthHeaders.length = 0;
   rmSync(join(home, ".config"), { recursive: true, force: true });
   tokenResponse = () => ({
     access_token: "fresh-access",
@@ -365,5 +369,94 @@ describe("remote authorization (gateway callback)", () => {
     await finishRemoteAuthorization(state, "c", bindToken);
     expect(hasStoredToken("shared")).toBe(true);
     expect(hasStoredToken("shared", "alice")).toBe(false);
+  });
+});
+
+describe("confidential client (clientSecret)", () => {
+  const secrets: Record<string, string> = {
+    "figma/client_id": "figma-app",
+    "figma/client_secret": "s3cr3t:+/",
+  };
+  const config = { clientId: "${secret:figma/client_id}", clientSecret: "${secret:figma/client_secret}" };
+
+  beforeEach(() => setOAuthSecretLookup((path) => secrets[path]));
+  afterAll(() => setOAuthSecretLookup(() => undefined));
+
+  const withAuthMethods = (methods: string[]) =>
+    mockDiscover.mockImplementation(async () => ({
+      authorizationServerUrl: `http://127.0.0.1:${asPort}`,
+      authorizationServerMetadata: {
+        issuer: `http://127.0.0.1:${asPort}`,
+        authorization_endpoint: `http://127.0.0.1:${asPort}/authorize`,
+        token_endpoint: `http://127.0.0.1:${asPort}/token`,
+        response_types_supported: ["code"],
+        token_endpoint_auth_methods_supported: methods,
+      },
+      resourceMetadata: { resource: SERVER_URL, scopes_supported: ["mcp:connect"] },
+    }));
+
+  async function connect(): Promise<URL> {
+    const { authorizationUrl, state, bindToken } = await startRemoteAuthorization({
+      serverName: "figma",
+      serverUrl: SERVER_URL,
+      config,
+      owner: "alice",
+      redirectUri: "http://127.0.0.1:8787/oauth/callback",
+    });
+    await finishRemoteAuthorization(state, "code-1", bindToken);
+    return new URL(authorizationUrl);
+  }
+
+  it("resolves the client id from the secret store and sends the secret with HTTP Basic", async () => {
+    withAuthMethods(["client_secret_basic", "client_secret_post"]);
+    const auth = await connect();
+    expect(auth.searchParams.get("client_id")).toBe("figma-app");
+    expect(auth.toString()).not.toContain("s3cr3t");
+    expect(mockRegister).not.toHaveBeenCalled();
+    const expected = Buffer.from("figma-app:s3cr3t%3A%2B%2F").toString("base64");
+    expect(tokenAuthHeaders[0]).toBe(`Basic ${expected}`);
+    expect(tokenRequests[0].get("client_id")).toBe("figma-app");
+    expect(tokenRequests[0].get("client_secret")).toBeNull();
+    expect(hasStoredToken("figma", "alice")).toBe(true);
+  });
+
+  it("sends the secret in the body when the AS only supports client_secret_post", async () => {
+    withAuthMethods(["client_secret_post"]);
+    await connect();
+    expect(tokenAuthHeaders[0]).toBeUndefined();
+    expect(tokenRequests[0].get("client_secret")).toBe("s3cr3t:+/");
+  });
+
+  it("authenticates refreshes with the secret", async () => {
+    withAuthMethods(["client_secret_basic"]);
+    writeToken("figma", {
+      access_token: "old",
+      refresh_token: "r1",
+      client_id: "figma-app",
+      expires_at: Date.now() - 1000,
+      resource: SERVER_URL,
+    });
+    await expect(getAccessToken("figma", SERVER_URL, config, { interactive: false })).resolves.toBe("fresh-access");
+    expect(tokenRequests[0].get("grant_type")).toBe("refresh_token");
+    expect(tokenAuthHeaders[0]).toMatch(/^Basic /);
+  });
+
+  it("fails before the browser step when the secret is missing", async () => {
+    setOAuthSecretLookup((path) => (path === "figma/client_id" ? "figma-app" : undefined));
+    await expect(
+      startRemoteAuthorization({ serverName: "figma", serverUrl: SERVER_URL, config, redirectUri: "http://gw/oauth/callback" })
+    ).rejects.toThrow(/lazygate secret set figma\/client_secret/);
+    expect(pendingAuthCount()).toBe(0);
+  });
+
+  it("rejects a literal clientSecret", async () => {
+    await expect(
+      startRemoteAuthorization({
+        serverName: "figma",
+        serverUrl: SERVER_URL,
+        config: { clientId: "figma-app", clientSecret: "plaintext" },
+        redirectUri: "http://gw/oauth/callback",
+      })
+    ).rejects.toThrow(/\$\{secret:path\} reference/);
   });
 });

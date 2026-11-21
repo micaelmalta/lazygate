@@ -6,11 +6,17 @@ import { z } from "zod";
 import type { ServerConfig } from "./router.js";
 import type { SkillConfig } from "./skill-router.js";
 
+export const OAUTH_SECRET_REF = /^\$\{secret:([^}]+)\}$/;
+
 const OAuthSchema = z.union([
   z.boolean(),
   z
     .object({
       clientId: z.string().optional(),
+      clientSecret: z
+        .string()
+        .regex(OAUTH_SECRET_REF, "clientSecret must be a ${secret:path} reference")
+        .optional(),
       callbackPort: z.number().int().min(0).max(65535).optional(),
       scopes: z.array(z.string()).optional(),
     })
