@@ -181,10 +181,12 @@ describe("runCode: errors", () => {
 
   it("stops a memory bomb with a clear error", async () => {
     const out = await runCode({
-      code: 'let a = []; while (true) { a.push("x".repeat(100000)); }',
+      // One large allocation exceeds the cap immediately, so the test does not depend on how fast
+      // the runner can build up memory (a slow CI runner hit the deadline first with a loop).
+      code: 'let s = "x".repeat(16 * 1024 * 1024); s;',
       bindings: [],
       callTool: echo,
-      limits: { deadlineMs: 10000, memoryBytes: 8 * 1024 * 1024 },
+      limits: { deadlineMs: 20000, memoryBytes: 8 * 1024 * 1024 },
     });
     expect(out.error).toMatch(/memory limit/);
   });
