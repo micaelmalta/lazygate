@@ -49,6 +49,7 @@ import {
   oauthCallbackPage,
   oauthStartPage,
   peekPendingAuth,
+  setOAuthSecretLookup,
   startRemoteAuthorization,
   type OAuthConfig,
 } from "../oauth.js";
@@ -212,6 +213,7 @@ function oauthBindClearCookie(): string {
 
 export async function startGateway(opts: GatewayOptions): Promise<Gateway> {
   const { registry, tokens, secrets, audit, profiles } = opts;
+  setOAuthSecretLookup((path) => secrets.get(path));
   const host = opts.host ?? "127.0.0.1";
   const idleMs = opts.idleMs ?? 30 * 60_000;
   const maxSessions = opts.maxSessions ?? 100;

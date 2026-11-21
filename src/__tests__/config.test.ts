@@ -72,6 +72,18 @@ describe("parseServersConfig", () => {
     expect(Object.keys(entries)).toEqual(["a", "b", "c"]);
   });
 
+  it("accepts oauth.clientSecret only as a ${secret:path} reference", () => {
+    const url = "https://x.example/mcp";
+    const { entries, errors } = parseServersConfig({
+      servers: {
+        ref: { url, type: "http", oauth: { clientId: "c", clientSecret: "${secret:figma/client_secret}" } },
+        literal: { url, type: "http", oauth: { clientId: "c", clientSecret: "plaintext" } },
+      },
+    });
+    expect(Object.keys(entries)).toEqual(["ref"]);
+    expect(errors.join("\n")).toMatch(/servers\.literal — .*\$\{secret:path\} reference/);
+  });
+
   it("accepts local: true for gateway-hidden desktop servers", () => {
     const { entries, errors } = parseServersConfig({
       servers: { desktop: { command: "fs-mcp", local: true, description: "local files" } },

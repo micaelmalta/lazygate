@@ -297,6 +297,16 @@ For `type: "http"` servers, auth is auto-discovered:
 
 Set `oauth: { clientId, callbackPort }` when the AS has no dynamic registration (e.g. Slack).
 
+For a confidential client (e.g. Figma's hosted MCP, whose token endpoint only accepts
+`client_secret_basic` / `client_secret_post`), add `clientSecret` as a `${secret:path}` reference;
+a literal value is rejected. `clientId` may also be a reference. Store the values with
+`lazygate secret set <path>` (or `LAZYGATE_SECRET_<PATH>`). The secret is sent on token exchange and
+refresh, with HTTP Basic unless the AS only advertises `client_secret_post`:
+
+```json
+"oauth": { "clientId": "${secret:figma/client_id}", "clientSecret": "${secret:figma/client_secret}" }
+```
+
 Requests send `Accept: application/json, text/event-stream`, parse JSON or SSE bodies (matched by
 JSON-RPC `id`), send `MCP-Protocol-Version` after `initialize`, re-initialize once if the session
 expires (404), and close the session on deactivate.

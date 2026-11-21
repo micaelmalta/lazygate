@@ -3,7 +3,10 @@
 
 import { loadRegistry } from "./registry.js";
 import { effectiveAuthScope, type ServerConfig } from "./router.js";
-import { getAccessToken, hasStoredToken, tokenPath, type OAuthConfig } from "./oauth.js";
+import { resolve } from "path";
+import { getAccessToken, hasStoredToken, setOAuthSecretLookup, tokenPath, type OAuthConfig } from "./oauth.js";
+import { configDir } from "./paths.js";
+import { SecretStore } from "./gateway/credentials.js";
 import { LOG_PREFIX } from "./version.js";
 
 function flag(args: string[], name: string): string | undefined {
@@ -55,6 +58,8 @@ export async function runOauth(args: string[]): Promise<void> {
   const force = has(rest, "--force");
 
   const oauth = normalizeOAuth(cfg.oauth) ?? {};
+  const secrets = new SecretStore(resolve(configDir(), "gateway"));
+  setOAuthSecretLookup((path) => secrets.get(path));
   if (oauth.clientId && oauth.callbackPort == null) {
     console.error(
       `${LOG_PREFIX} tip: set oauth.callbackPort (e.g. 3118 for Slack/Claude) so the redirect URI matches the registered app`
