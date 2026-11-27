@@ -181,7 +181,7 @@ describe("runCode: errors", () => {
 
   it("stops a memory bomb with a clear error", async () => {
     const out = await runCode({
-      code: 'let a = []; while (true) { a.push("x".repeat(100000)); }',
+      code: "let a = []; while (true) { a.push(new Array(1_000_000).fill(0)); }",
       bindings: [],
       callTool: echo,
       limits: { deadlineMs: 10000, memoryBytes: 8 * 1024 * 1024 },
