@@ -39,6 +39,9 @@ in what the current task needs.
 - **Cheaper, faster multi-step work.** For "find, filter, then fetch" tasks, the agent can run the
   whole chain in one step and get back only the answer. The intermediate results never enter the
   conversation (see [the task benchmark](#on-a-real-task)).
+- **An optional Codex model gateway.** Route Responses API requests through configured providers;
+  LazyGate keeps provider keys server-side and applies complete tool-output optimizations before
+  those results enter the model request. See the [gateway guide](docs/gateway.md#openai-responses-api-and-codex).
 - **Move in with one command.** lazygate imports your existing servers and skills from Claude Code,
   Cursor or OpenCode, backs up every file it touches, and reverts cleanly.
 - **Secrets out of config files.** Tokens move out of client JSON into your shell environment or an
