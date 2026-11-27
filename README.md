@@ -8,7 +8,7 @@ needs it.
 
 Works with Claude Code, Cursor, and OpenCode, on your laptop or as a shared team gateway.
 
-[Why lazygate](#why-lazygate) · [What you get](#what-you-get) · [Install](#install) · [For teams](#for-teams) · [Docs](#docs)
+[Why lazygate](#why-lazygate) · [What you get](#what-you-get) · [Install](#install) · [For teams](#for-teams) · [macOS LaunchAgent](#run-the-gateway-at-login-on-macos) · [Docs](#docs)
 
 ---
 
@@ -146,6 +146,67 @@ localhost. Stdio servers are refused in gateway mode unless `LAZYGATE_GATEWAY_AL
 share the gateway's OS user; this is not isolation). Skill `prompt.context` fetches reach private
 networks only with `"allowPrivate": true`. `lazygate benchmark --tasks` loads only its fixture
 server unless you pass `--include-catalog`. Setup guide: [docs/gateway.md](docs/gateway.md).
+
+### Run the gateway at login on macOS
+
+To keep LazyGate running in your login session, create
+`~/Library/LaunchAgents/com.lazygate.serve.plist` with absolute paths and the `serve` subcommand.
+This example starts both the MCP and LLM gateway in the same process:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple Computer//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+<key>Label</key>
+<string>com.lazygate.serve</string>
+<key>ProgramArguments</key>
+<array>
+  <string>/absolute/path/to/node</string>
+  <string>/absolute/path/to/lazygate/dist/index.js</string>
+  <string>serve</string>
+  <string>--llm-config</string>
+  <string>/Users/alice/.config/lazygate/gateway/llm.json</string>
+  <string>--namespace-tools</string>
+</array>
+<key>RunAtLoad</key>
+<true/>
+<key>KeepAlive</key>
+<true/>
+</dict>
+</plist>
+```
+
+Replace the example paths with the absolute paths to Node.js, your LazyGate install, and the LLM
+config. Remove `--llm-config` and its path if you only need MCP. Make provider key environment
+variables available to the LaunchAgent through its `EnvironmentVariables` dictionary or LazyGate's
+package-root `.env`; shell `export` commands are not inherited by `launchd`.
+With `--llm-config`, the same process serves MCP at `/mcp` and the LLM API at `/v1/responses` and
+`/v1/models`.
+
+Load the plist and start the gateway now (it will also start at login because `RunAtLoad` is set):
+
+```bash
+launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.lazygate.serve.plist"
+```
+
+Restart an already-loaded gateway after changing its LazyGate config:
+
+```bash
+launchctl kickstart -k "gui/$(id -u)/com.lazygate.serve"
+```
+
+Stop and unload the gateway:
+
+```bash
+launchctl bootout "gui/$(id -u)/com.lazygate.serve"
+```
+
+After editing the plist itself, run `bootout` and then `bootstrap` so `launchd` reloads it.
+
+Check whether the service is loaded with `launchctl list | grep -i lazygate`. If your plist uses a
+different filename, pass that path to `bootstrap`; the service label in the plist must still match
+the target used by `kickstart` and `bootout`.
 
 ## Docs
 
