@@ -1,7 +1,7 @@
 {
     "name": "lazygate",
     "version": "1.0.0",
-    "description": "Lazy-loading MCP broker for Claude Code",
+    "description": "Lazy-loading MCP broker and OpenAI Responses gateway",
     "license": "MIT",
     "type": "module",
     "main": "dist/index.js",
@@ -75,6 +75,9 @@
         "model-context-protocol",
         "mcp-gateway",
         "mcp-proxy",
+        "llm-gateway",
+        "openai-responses-api",
+        "codex",
         "claude-code",
         "cursor",
         "context",

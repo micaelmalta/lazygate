@@ -11,6 +11,7 @@ import { UserProfileStore } from "./profile.js";
 import { TokenStore, parseDuration } from "./tokens.js";
 import { AuditLog } from "./audit.js";
 import { startGateway } from "./server.js";
+import { loadLlmGatewayConfig } from "./llm-config.js";
 import { hardenGatewayDirs } from "./hardening.js";
 import { parseStdioCommandAllowlist } from "../stdio-policy.js";
 import { loadTokenizer, parseTokenizerFlag } from "../tokenizers.js";
@@ -65,6 +66,7 @@ async function serve(args: string[]): Promise<void> {
   const allowedHosts = (flag(args, "--allowed-host") ?? "").split(",").filter(Boolean);
 
   const registry = loadRegistry(args);
+  const llmGateway = loadLlmGatewayConfig(args);
   const stdioCommandAllowlist = parseStdioCommandAllowlist();
   // Prefer LAZYGATE_VAULT_KEY; never create vault.key beside vault.json in serve mode.
   const vault = new UserVault(dir);
@@ -87,9 +89,11 @@ async function serve(args: string[]): Promise<void> {
     stdioCommandAllowlist,
     namespaceTools: has(args, "--namespace-tools"),
     tokenizer: await loadTokenizer(parseTokenizerFlag(flag(args, "--tokenizer"))),
+    llmGateway,
   });
 
   console.error(`${LOG_PREFIX} HTTP gateway listening on ${gateway.url}`);
+  if (gateway.llmUrl) console.error(`${LOG_PREFIX} OpenAI Responses gateway listening on ${gateway.llmUrl}`);
   console.error(`${LOG_PREFIX} Web UI: ${gateway.publicUrl}/ui`);
   if (vault.getKeySource() === "ephemeral") {
     console.error(

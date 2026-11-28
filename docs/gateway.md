@@ -174,6 +174,7 @@ from remote gateway users (admins still see it labelled).
 lazygate serve [--host 127.0.0.1] [--port 8787] [--config servers.json] [--skills skills.json]
                [--idle-timeout-min 30] [--max-sessions 100]
                [--namespace-tools] [--tokenizer chars_per_4|o200k_base|cl100k_base]
+               [--llm-config llm.json]
                [--allow-remote --allowed-host gw.example.com:443]
                [--public-url https://gw.example.com]
 ```
@@ -194,6 +195,53 @@ optimization policy suggestions derived from the audit log.
   server/target, ok, duration; admin mutations also carry before/after content hashes). Arguments,
   results and secret values are not logged.
 - `autoActivate` servers start when a session finishes initializing, if their credentials resolve.
+
+## OpenAI Responses API and Codex
+
+Pass `--llm-config` to expose an OpenAI Responses-compatible model gateway from the same process. It adds authenticated `POST /v1/responses` and `GET /v1/models` routes; the MCP endpoint remains at `/mcp`.
+
+The config maps Codex-facing model IDs to Responses-compatible upstreams. Provider keys stay in environment variables on the gateway host. Start from [`config/llm-gateway.example.json`](../config/llm-gateway.example.json):
+
+```json
+{
+  "providers": {
+    "bifrost": {
+      "baseUrl": "https://bifrost.example.com/v1",
+      "apiKeyEnv": "LAZYGATE_BIFROST_KEY"
+    }
+  },
+  "models": {
+    "gpt-6.1-sol": { "provider": "bifrost", "model": "gpt-6.1-sol" }
+  }
+}
+```
+
+Start the gateway with the key in its environment:
+
+```bash
+export LAZYGATE_BIFROST_KEY="…"
+lazygate serve --llm-config "$HOME/.config/lazygate/gateway/llm.json"
+```
+
+Create a LazyGate personal access token and make it available to the process that starts Codex. Add a custom provider to `~/.codex/config.toml`:
+
+```toml
+model = "gpt-6.1-sol"
+model_provider = "lazygate"
+
+[model_providers.lazygate]
+name = "LazyGate"
+base_url = "http://127.0.0.1:8787/v1"
+wire_api = "responses"
+env_key = "LAZYGATE_TOKEN"
+requires_openai_auth = false
+```
+
+The incoming LazyGate token is replaced with the configured provider key; it is never sent upstream. The gateway streams provider responses through without changing Responses events or tool-call IDs. The upstream must support the Responses API, including SSE streaming and tool calls. A Chat Completions endpoint alone is not compatible.
+
+Use a model ID recognized by the installed Codex version. For namespaced LazyGate tools, start the MCP gateway with `--namespace-tools`; then response optimization policies such as `jira.fetch_doc` can match their `function_call_output` items in the Responses request. Only information-preserving optimizations are applied there; reductions marked incomplete are left unchanged because an LLM request has no LazyGate result handle. Other MCP results continue through the existing MCP response optimizer.
+
+The `models` endpoint lists routed model IDs, but does not publish Codex-specific metadata for custom aliases. Custom model names need a Codex-compatible model catalog. Model requests are audited by user, model, duration, and status; request and response contents are not logged.
 
 ## Remote access / TLS
 

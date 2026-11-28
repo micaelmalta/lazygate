@@ -179,12 +179,12 @@ describe("runCode: errors", () => {
     expect(Date.now() - started).toBeLessThan(5000);
   });
 
-  it("rejects an allocation larger than the memory limit", async () => {
+  it("stops a memory bomb with a clear error", async () => {
     const out = await runCode({
-      code: "return new ArrayBuffer(16 * 1024 * 1024).byteLength;",
+      code: "let a = []; while (true) { a.push(new Array(1_000_000).fill(0)); }",
       bindings: [],
       callTool: echo,
-      limits: { ...small, memoryBytes: 8 * 1024 * 1024 },
+      limits: { deadlineMs: 10000, memoryBytes: 8 * 1024 * 1024 },
     });
     expect(out.error).toMatch(/memory limit/);
   });
