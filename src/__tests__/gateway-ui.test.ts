@@ -281,7 +281,9 @@ describe("tokens (admin)", () => {
     expect((await ui("GET", "/ui/api/me", made.json.token)).json).toMatchObject({ user: "carol", groups: ["eng", "sre"], admin: false });
 
     const list = await ui("GET", "/ui/api/tokens", admin);
-    expect(JSON.stringify(list.json)).not.toContain(made.json.token.split("_")[2]);
+    const secret = made.json.token.replace(/^lzg_[0-9a-f]{8}_/, "");
+    expect(secret).not.toBe("");
+    expect(JSON.stringify(list.json)).not.toContain(secret);
     expect(list.json.tokens.find((t: any) => t.id === made.json.id)).toMatchObject({ user: "carol", label: "laptop" });
 
     expect((await ui("DELETE", `/ui/api/tokens/${made.json.id}`, admin)).status).toBe(204);

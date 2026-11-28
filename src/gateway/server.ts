@@ -57,6 +57,8 @@ import { effectiveAuthScope, type ServerConfig } from "../router.js";
 import type { SkillConfig } from "../skill-router.js";
 import { gatewayStartupWarnings } from "./warnings.js";
 import { isSharedIndexable } from "./tool-index-warm.js";
+import { handleLlmGatewayRequest } from "./llm.js";
+import type { LlmGatewayConfig } from "./llm-config.js";
 
 /** Per-request bag so optimization metrics can be audited without attaching them to the client result. */
 interface CallMetricsBag {
@@ -114,10 +116,14 @@ export interface GatewayOptions {
    * `namespaceTools: false`. Default false.
    */
   namespaceTools?: boolean;
+  /** Optional OpenAI Responses-compatible model gateway for Codex and other clients. */
+  llmGateway?: LlmGatewayConfig;
 }
 
 export interface Gateway {
   url: string;
+  /** OpenAI-compatible API base URL (`/v1`) when the model gateway is enabled. */
+  llmUrl?: string;
   port: number;
   /** Base URL (no /mcp) — OAuth callback and UI. */
   publicUrl: string;
@@ -753,6 +759,30 @@ export async function startGateway(opts: GatewayOptions): Promise<Gateway> {
       return;
     }
 
+    if (path.startsWith("/v1/")) {
+      if (!opts.llmGateway) return sendJson(res, 404, { error: "not found" });
+      const ip = clientKey(req);
+      const wait = authLimiter.retryAfterSec(ip);
+      if (wait > 0) {
+        audit.recordSecurity({ action: "auth.rate_limited", surface: "llm", ip, ok: false });
+        return sendJson(res, 429, { error: { message: "too many failed attempts", type: "authentication_error" } }, { "Retry-After": String(wait) });
+      }
+      const user = tokens.verify(bearerToken(req.headers.authorization));
+      if (!user) {
+        authLimiter.fail(ip);
+        audit.recordSecurity({ action: "auth.failed", surface: "llm", ip, ok: false });
+        return sendJson(res, 401, { error: { message: "unauthorized", type: "authentication_error" } }, { "WWW-Authenticate": 'Bearer realm="lazygate-llm"' });
+      }
+      registry.router.reloadServersFromDisk();
+      return handleLlmGatewayRequest(req, res, path, {
+        config: opts.llmGateway,
+        user,
+        audit,
+        responseOptimization: registry.router.getResponseOptimization(),
+        tokenizer: opts.tokenizer,
+      });
+    }
+
     if (path !== "/mcp" && !isUiPath(path)) return sendJson(res, 404, { error: "not found" });
 
     if (isUiPath(path)) {
@@ -920,6 +950,7 @@ export async function startGateway(opts: GatewayOptions): Promise<Gateway> {
   }
   return {
     url: `http://${shownHost}:${port}/mcp`,
+    llmUrl: opts.llmGateway ? `${publicUrl}/openai/v1` : undefined,
     port,
     publicUrl,
     sessionCount: () => sessions.size,

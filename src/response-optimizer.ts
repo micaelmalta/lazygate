@@ -86,7 +86,7 @@ export interface ResponseOptimizationConfig {
 export interface OptimizationContext {
   serverName: string;
   toolName: string;
-  source: "call_tool" | "run_chain";
+  source: "call_tool" | "run_chain" | "llm_gateway";
 }
 
 export interface OptimizationMetrics {

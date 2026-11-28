@@ -1633,11 +1633,17 @@ export const UI_JS = String.raw`(function () {
           String(e.ms || 0),
           e.optimizationMode
             ? (e.optimizationSelectedMode ? e.optimizationMode + " → " + e.optimizationSelectedMode : e.optimizationMode)
-            : ""
+            : "",
+          e.optimizationMode
+            ? h("span", {
+                class: e.savedTokens > 0 ? "good" : "muted",
+                title: fmtCount(e.originalTokens) + " → " + fmtCount(e.optimizedTokens) + " estimated tokens"
+              }, fmtCount(e.savedTokens))
+            : "—"
         ];
       });
       clear(out);
-      out.appendChild(table(["When", "User", "Action", "Target", "Session", "Result", "ms", "Optimization"], rows, "Nothing yet."));
+      out.appendChild(table(["When", "User", "Action", "Target", "Session", "Result", "ms", "Optimization", "Tokens saved"], rows, "Nothing yet."));
     }
 
     function ensureUi() {

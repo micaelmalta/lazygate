@@ -536,7 +536,7 @@ export class AuditLog {
   recordSecurity(opts: {
     user?: string;
     action: string;
-    surface: "mcp" | "ui";
+    surface: "mcp" | "ui" | "llm";
     ip?: string;
     ok: boolean;
     session?: string;
