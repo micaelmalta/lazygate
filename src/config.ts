@@ -8,6 +8,11 @@ import type { SkillConfig } from "./skill-router.js";
 
 export const OAUTH_SECRET_REF = /^\$\{secret:([^}]+)\}$/;
 
+const privateOAuthOrigin = z.string().refine((value) => {
+  const url = URL.canParse(value) ? new URL(value) : undefined;
+  return url?.protocol === "https:" && url.origin === value && !url.hostname.includes("*");
+}, "must be an exact HTTPS origin without a path or wildcard");
+
 const OAuthSchema = z.union([
   z.boolean(),
   z
@@ -19,6 +24,7 @@ const OAuthSchema = z.union([
         .optional(),
       callbackPort: z.number().int().min(0).max(65535).optional(),
       scopes: z.array(z.string()).optional(),
+      privateOrigins: z.array(privateOAuthOrigin).optional(),
     })
     .strict(),
 ]);

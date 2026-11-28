@@ -6,7 +6,8 @@ import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync, statSync, 
 import { createDecipheriv } from "crypto";
 import { tmpdir } from "os";
 import { join } from "path";
-import { createServer, type Server } from "http";
+import { createServer, request, type IncomingMessage, type RequestOptions, type Server } from "http";
+import https from "https";
 import { createRequire } from "module";
 
 // Jest's sandboxed process.env does not affect os.homedir(), so mock it explicitly.
@@ -326,6 +327,39 @@ describe("interactive: false", () => {
 });
 
 describe("remote authorization (gateway callback)", () => {
+  it("validates private OAuth metadata using the MCP server's configured origins", async () => {
+    const origin = "https://10.226.1.2";
+    const serverUrl = `${origin}/mcp`;
+    const requestSpy = jest.spyOn(https, "request").mockImplementation(((requestOptions: RequestOptions, callback: (res: IncomingMessage) => void) =>
+      request({ ...requestOptions, protocol: "http:", hostname: "127.0.0.1", port: asPort, lookup: undefined }, callback)
+    ) as typeof https.request);
+    mockDiscover.mockImplementation(async (_url: unknown, options: { fetchFn: typeof fetch }) => {
+      await expect(options.fetchFn("https://10.226.1.3/metadata")).rejects.toThrow(/private/);
+      await options.fetchFn(`${origin}/metadata`);
+      return {
+        authorizationServerUrl: origin,
+        authorizationServerMetadata: {
+          authorization_endpoint: `${origin}/authorize`,
+          token_endpoint: `${origin}/token`,
+        },
+      };
+    });
+    const options = { serverName: "hq", serverUrl, redirectUri: "http://127.0.0.1:8787/oauth/callback" };
+    try {
+      await expect(startRemoteAuthorization({ ...options, config: { clientId: "pre" } })).rejects.toThrow(/private/);
+      const { authorizationUrl, state, bindToken } = await startRemoteAuthorization({
+        ...options,
+        config: { clientId: "pre", privateOrigins: [origin] },
+      });
+      expect(new URL(authorizationUrl).origin).toBe(origin);
+      await expect(finishRemoteAuthorization(state, "hq-code", bindToken)).resolves.toMatchObject({ serverName: "hq" });
+      expect(tokenRequests[0].get("code")).toBe("hq-code");
+      expect(requestSpy.mock.calls.map(([opts]) => (opts as RequestOptions).path)).toEqual(["/metadata", "/token"]);
+    } finally {
+      requestSpy.mockRestore();
+    }
+  });
+
   it("exchanges a code at the given redirect URI and stores a per-user token", async () => {
     const redirectUri = "http://127.0.0.1:8787/oauth/callback";
     const { authorizationUrl, state, bindToken } = await startRemoteAuthorization({

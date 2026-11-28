@@ -15,8 +15,12 @@ export class UnsafeUrlError extends Error {
 }
 
 function ipv4Mapped(ip: string): string | undefined {
-  const m = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/i.exec(normalizeIp(ip));
-  return m?.[1];
+  if (isIP(ip) !== 6) return undefined;
+  const mapped = /^\[::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})\]$/.exec(new URL(`http://[${ip}]`).hostname);
+  if (!mapped) return undefined;
+  const high = parseInt(mapped[1], 16);
+  const low = parseInt(mapped[2], 16);
+  return [high >> 8, high & 255, low >> 8, low & 255].join(".");
 }
 
 /** True for 127.0.0.0/8 and ::1 (including IPv4-mapped). */
@@ -42,13 +46,17 @@ export function isPrivateOrLinkLocal(ip: string): boolean {
     return false;
   }
   const [a, b] = v.split(".").map(Number);
-  if (a === 10) return true;
-  if (a === 172 && b >= 16 && b <= 31) return true;
-  if (a === 192 && b === 168) return true;
+  if (isPrivateIPv4(v)) return true;
   if (a === 169 && b === 254) return true; // link-local / cloud metadata
   if (a === 0) return true;
   if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT
   return false;
+}
+
+function isPrivateIPv4(ip: string): boolean {
+  if (isIP(ip) !== 4) return false;
+  const [first, second] = ip.split(".").map(Number);
+  return first === 10 || (first === 172 && second >= 16 && second <= 31) || (first === 192 && second === 168);
 }
 
 function normalizeIp(ip: string): string {
@@ -67,6 +75,7 @@ export interface SafeUrlOptions {
    * and 169.254.169.254 / fd00:ec2::254 stay blocked always.
    */
   allowPrivate?: boolean;
+  privateOrigins?: readonly string[];
 }
 
 export interface ResolvedTarget {
@@ -122,14 +131,16 @@ export async function resolveSafeUrl(urlString: string, opts: SafeUrlOptions = {
     return { url, address, family };
   }
 
-  const bare = normalizeIp(ipv4Mapped(address) ?? address);
+  const bare = ipv4Mapped(address) ?? (family === 6 ? new URL(`http://[${address}]`).hostname.slice(1, -1) : address);
   if (ALWAYS_BLOCKED.has(bare)) {
     throw new UnsafeUrlError(`Refusing URL resolving to private/link-local address (${address})`);
   }
   if (isLoopbackAddress(address)) {
     throw new UnsafeUrlError(`Refusing URL resolving to private/link-local address (${address})`);
   }
-  if (isPrivateOrLinkLocal(address) && !opts.allowPrivate) {
+  const trustedPrivateOrigin = url.protocol === "https:" &&
+    opts.privateOrigins?.includes(url.origin) && isPrivateIPv4(bare);
+  if (isPrivateOrLinkLocal(bare) && !opts.allowPrivate && !trustedPrivateOrigin) {
     throw new UnsafeUrlError(`Refusing URL resolving to private/link-local address (${address})`);
   }
   return { url, address, family };
@@ -207,6 +218,7 @@ export async function pinnedFetch(
         port: url.port || undefined,
         path: `${url.pathname}${url.search}`,
         method: init.method ?? "GET",
+        agent: false,
         headers: init.headers,
         signal: init.signal,
         // Pin: every connection attempt uses the validated address.
