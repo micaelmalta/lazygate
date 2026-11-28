@@ -31,7 +31,7 @@ import {
 } from "@modelcontextprotocol/sdk/client/auth.js";
 import { APP_NAME, configDir } from "./paths.js";
 import type { AuthorizationServerMetadata } from "@modelcontextprotocol/sdk/shared/auth.js";
-import { assertSafeUrl, assertTokenEndpointMatchesIssuer, safeFetch } from "./ssrf.js";
+import { assertSafeUrl, assertTokenEndpointMatchesIssuer, pinnedFetch, safeFetch } from "./ssrf.js";
 import { secretEnvName } from "./gateway/credentials.js";
 import { OAUTH_SECRET_REF } from "./config.js";
 
@@ -43,6 +43,7 @@ export interface OAuthConfig {
   clientSecret?: string;
   callbackPort?: number;
   scopes?: string[];
+  privateOrigins?: string[];
 }
 
 let secretLookup: (path: string) => string | undefined = (path) => process.env[secretEnvName(path)] || undefined;
@@ -57,6 +58,25 @@ interface ClientAuth {
   clientId: string;
   clientSecret?: string;
   method?: "client_secret_basic" | "client_secret_post";
+}
+
+type OAuthFetch = typeof safeFetch;
+
+function oauthFetch(privateOrigins: OAuthConfig["privateOrigins"]): OAuthFetch {
+  return (input, init) => {
+    const url = new URL(input);
+    if (!privateOrigins?.includes(url.origin)) return safeFetch(url, init);
+    const { method, headers, body, signal } = init ?? {};
+    if (body != null && typeof body !== "string") throw new TypeError("Expected a string OAuth request body");
+    const requestHeaders = new Headers(headers);
+    if (typeof body === "string") requestHeaders.set("Content-Length", String(Buffer.byteLength(body)));
+    return pinnedFetch(url.href, {
+      method,
+      headers: Object.fromEntries(requestHeaders),
+      body: body ?? undefined,
+      signal: signal ?? undefined,
+    }, { privateOrigins });
+  };
 }
 
 export interface GetAccessTokenOptions {
@@ -90,6 +110,7 @@ interface PendingAuth {
   redirectUri: string;
   resource: string;
   tokenEndpoint: string;
+  fetch: OAuthFetch;
   /** IdP authorize URL (after the gateway /oauth/start confirmation). */
   authorizationUrl: string;
   /** Bound to an HttpOnly cookie so only the browser that confirmed Connect can finish. */
@@ -419,38 +440,43 @@ function asOAuthMeta(metadata: AuthorizationServerMetadata): OAuthMeta {
 interface Discovery {
   info: OAuthServerInfo;
   meta: OAuthMeta;
+  fetch: OAuthFetch;
 }
 
 /** Validate AS endpoints from discovery (SSRF + token_endpoint origin). */
-async function validateDiscoveryEndpoints(info: OAuthServerInfo, meta: OAuthMeta): Promise<void> {
+async function validateDiscoveryEndpoints(
+  info: OAuthServerInfo,
+  meta: OAuthMeta,
+  privateOrigins: OAuthConfig["privateOrigins"]
+): Promise<void> {
   const issuer = info.authorizationServerUrl || meta.authorization_endpoint;
-  await assertSafeUrl(meta.authorization_endpoint);
-  await assertSafeUrl(meta.token_endpoint);
-  if (meta.registration_endpoint) await assertSafeUrl(meta.registration_endpoint);
+  const options = { privateOrigins };
+  await assertSafeUrl(meta.authorization_endpoint, options);
+  await assertSafeUrl(meta.token_endpoint, options);
+  if (meta.registration_endpoint) await assertSafeUrl(meta.registration_endpoint, options);
   assertTokenEndpointMatchesIssuer(meta.token_endpoint, issuer, meta.authorization_endpoint);
 }
 
 /** Discover AS metadata for an MCP resource URL (RFC 9728 → RFC 8414). */
-async function discover(serverUrl: string): Promise<Discovery> {
-  // Admin-configured MCP URL may be internal; SSRF applies to AS metadata endpoints below.
-  const info = await discoverOAuthServerInfo(serverUrl, { fetchFn: safeFetch });
+async function discover(serverUrl: string, privateOrigins: OAuthConfig["privateOrigins"]): Promise<Discovery> {
+  const fetch = oauthFetch(privateOrigins);
+  const info = await discoverOAuthServerInfo(serverUrl, { fetchFn: fetch });
   if (info.authorizationServerMetadata) {
     const meta = asOAuthMeta(info.authorizationServerMetadata);
-    await validateDiscoveryEndpoints(info, meta);
-    return { info, meta };
+    await validateDiscoveryEndpoints(info, meta, privateOrigins);
+    return { info, meta, fetch };
   }
 
   // Fallback: origin well-known (older deployments)
   const base = new URL(serverUrl).origin;
   const wellKnown = `${base}/.well-known/oauth-authorization-server`;
-  await assertSafeUrl(wellKnown);
-  const res = await safeFetch(wellKnown);
+  const res = await fetch(wellKnown);
   if (!res.ok) {
     throw new Error(`OAuth discovery failed for ${serverUrl}: no AS metadata`);
   }
   const meta = (await res.json()) as OAuthMeta;
-  await validateDiscoveryEndpoints(info, meta);
-  return { info, meta };
+  await validateDiscoveryEndpoints(info, meta, privateOrigins);
+  return { info, meta, fetch };
 }
 
 async function registerDynamicClient(
@@ -486,7 +512,7 @@ async function registerDynamicClient(
       token_endpoint_auth_method: "none",
       ...(scopes.length ? { scope: scopes.join(" ") } : {}),
     },
-    fetchFn: safeFetch,
+    fetchFn: discovery.fetch,
   });
 
   saveClient(serverName, {
@@ -705,7 +731,8 @@ async function tokenRequest(
   tokenEndpoint: string,
   params: Record<string, string>,
   what: string,
-  client: ClientAuth
+  client: ClientAuth,
+  fetch: OAuthFetch
 ): Promise<Record<string, unknown>> {
   const headers: Record<string, string> = { "Content-Type": "application/x-www-form-urlencoded" };
   const body: Record<string, string> = { ...params, client_id: client.clientId };
@@ -715,7 +742,7 @@ async function tokenRequest(
     const pair = `${formEncode(client.clientId)}:${formEncode(client.clientSecret)}`;
     headers["Authorization"] = `Basic ${Buffer.from(pair).toString("base64")}`;
   }
-  const res = await safeFetch(tokenEndpoint, {
+  const res = await fetch(tokenEndpoint, {
     method: "POST",
     headers,
     body: new URLSearchParams(body).toString(),
@@ -765,7 +792,8 @@ async function exchangeCode(
   code: string,
   verifier: string,
   redirectUri: string,
-  resource: string
+  resource: string,
+  fetch: OAuthFetch
 ): Promise<TokenSet> {
   const data = await tokenRequest(
     tokenEndpoint,
@@ -777,7 +805,8 @@ async function exchangeCode(
       resource,
     },
     "Token exchange",
-    client
+    client,
+    fetch
   );
   return toTokenSet(data, client.clientId, resource);
 }
@@ -786,7 +815,8 @@ async function refreshToken(
   tokenEndpoint: string,
   client: ClientAuth,
   refreshTok: string,
-  resource: string
+  resource: string,
+  fetch: OAuthFetch
 ): Promise<TokenSet> {
   const data = await tokenRequest(
     tokenEndpoint,
@@ -796,7 +826,8 @@ async function refreshToken(
       resource,
     },
     "Token refresh",
-    client
+    client,
+    fetch
   );
   return toTokenSet(data, client.clientId, resource, refreshTok);
 }
@@ -849,7 +880,7 @@ async function obtainAccessToken(
     return token.access_token;
   }
 
-  const discovery = await discover(serverUrl);
+  const discovery = await discover(serverUrl, config.privateOrigins);
   const { meta, info } = discovery;
   const scopes = config.scopes ?? info.resourceMetadata?.scopes_supported ?? [];
   const configured = resolveConfiguredClient(serverName, config);
@@ -864,7 +895,8 @@ async function obtainAccessToken(
         meta.token_endpoint,
         clientAuthFor(serverName, clientIdForRefresh, configured, meta),
         token.refresh_token,
-        resource
+        resource,
+        discovery.fetch
       );
       saveToken(serverName, refreshed, owner);
       return refreshed.access_token;
@@ -923,7 +955,8 @@ async function obtainAccessToken(
       code,
       verifier,
       redirectUri,
-      resource
+      resource,
+      discovery.fetch
     );
     saveToken(serverName, fresh, owner);
 
@@ -950,7 +983,7 @@ export async function startRemoteAuthorization(opts: {
   const { serverName, serverUrl, owner, redirectUri } = opts;
   const config = opts.config ?? {};
   const resource = canonicalResource(serverUrl);
-  const discovery = await discover(serverUrl);
+  const discovery = await discover(serverUrl, config.privateOrigins);
   const { meta, info } = discovery;
   const scopes = config.scopes ?? info.resourceMetadata?.scopes_supported ?? [];
 
@@ -1000,6 +1033,7 @@ export async function startRemoteAuthorization(opts: {
     redirectUri,
     resource,
     tokenEndpoint: meta.token_endpoint,
+    fetch: discovery.fetch,
     authorizationUrl,
     bindToken,
     expiresAt: Date.now() + PENDING_TTL_MS,
@@ -1054,7 +1088,8 @@ export async function finishRemoteAuthorization(
     code,
     pending.verifier,
     pending.redirectUri,
-    pending.resource
+    pending.resource,
+    pending.fetch
   );
   saveToken(pending.serverName, fresh, pending.owner);
   console.error(

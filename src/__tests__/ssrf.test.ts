@@ -25,6 +25,18 @@ describe("isPrivateOrLinkLocal / isLoopbackAddress", () => {
 });
 
 describe("assertSafeUrl", () => {
+  it("allows private IPv4 only for an explicitly trusted HTTPS origin", async () => {
+    const origin = "https://10.226.1.2";
+    const options = { privateOrigins: [origin] };
+    await expect(assertSafeUrl(`${origin}/.well-known/oauth-authorization-server`, options)).resolves.toBeInstanceOf(URL);
+    await expect(assertSafeUrl(`${origin}:8443/token`, options)).rejects.toBeInstanceOf(UnsafeUrlError);
+    await expect(assertSafeUrl("https://10.226.1.3/token", options)).rejects.toBeInstanceOf(UnsafeUrlError);
+    for (const address of ["169.254.1.2", "169.254.169.254", "[fd00:ec2::254]", "[::ffff:a9fe:a9fe]", "127.0.0.2"]) {
+      const blocked = `https://${address}`;
+      await expect(assertSafeUrl(`${blocked}/token`, { privateOrigins: [blocked] })).rejects.toBeInstanceOf(UnsafeUrlError);
+    }
+  });
+
   it("allows https public hosts and http loopback", async () => {
     await expect(assertSafeUrl("http://127.0.0.1:9/x")).resolves.toBeInstanceOf(URL);
     await expect(assertSafeUrl("http://localhost/x")).resolves.toBeInstanceOf(URL);

@@ -35,6 +35,21 @@ describe("parseServersConfig toolChain", () => {
 });
 
 describe("parseServersConfig", () => {
+  it("accepts exact HTTPS origins as private OAuth destinations", () => {
+    const url = "https://hq.example.com/mcp";
+    const { entries, errors } = parseServersConfig({
+      servers: {
+        hq: { url, oauth: { privateOrigins: ["https://hq.example.com"] } },
+        wildcard: { url, oauth: { privateOrigins: ["https://*.example.com"] } },
+        path: { url, oauth: { privateOrigins: [url] } },
+        plain: { url, oauth: { privateOrigins: ["http://hq.example.com"] } },
+      },
+    });
+    expect(entries.hq.oauth).toEqual({ privateOrigins: ["https://hq.example.com"] });
+    expect(Object.keys(entries)).toEqual(["hq"]);
+    expect(errors).toHaveLength(3);
+  });
+
   it("applies defaults and keeps valid entries", () => {
     const { entries, errors } = parseServersConfig({ servers: { a: { command: "node" } } });
     expect(errors).toEqual([]);

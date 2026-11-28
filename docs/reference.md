@@ -297,6 +297,18 @@ For `type: "http"` servers, auth is auto-discovered:
 
 Set `oauth: { clientId, callbackPort }` when the AS has no dynamic registration (e.g. Slack).
 
+For an internal MCP server on a private IPv4 network, an admin can add the exact trusted HTTPS
+origin to that server's OAuth config. Include a separate origin only if its private authorization
+server uses a different host or port:
+
+```json
+"oauth": { "privateOrigins": ["https://mcp.example.internal"] }
+```
+
+This permits RFC 1918 destinations for those origins during OAuth discovery, registration,
+code exchange, and refresh. Connections use the validated DNS address and retain TLS certificate
+verification. Other private origins, link-local addresses, and cloud metadata remain restricted.
+
 For a confidential client (e.g. Figma's hosted MCP, whose token endpoint only accepts
 `client_secret_basic` / `client_secret_post`), add `clientSecret` as a `${secret:path}` reference;
 a literal value is rejected. `clientId` may also be a reference. Store the values with
