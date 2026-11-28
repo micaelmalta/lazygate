@@ -950,7 +950,7 @@ export async function startGateway(opts: GatewayOptions): Promise<Gateway> {
   }
   return {
     url: `http://${shownHost}:${port}/mcp`,
-    llmUrl: opts.llmGateway ? `${publicUrl}/v1` : undefined,
+    llmUrl: opts.llmGateway ? `${publicUrl}/openai/v1` : undefined,
     port,
     publicUrl,
     sessionCount: () => sessions.size,
